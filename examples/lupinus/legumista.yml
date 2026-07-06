@@ -1,0 +1,72 @@
+# Project identity — the ONE file that makes this pipeline topic-specific.
+# Re-point the whole discovery -> synthesis -> ideation arc at a new field by
+# editing this file (plus the data: agent_state.json anchors, context_inputs/*.md
+# steering, and ideation-goal.md). Prompt wording lives in prompts/*.md.
+# See legumista.example.yml for a fully annotated template, and PIPELINE.md.
+
+name: Lupinus genomics
+slug: lupinus-genomics                        # used in report titles + filenames
+subject: Lupinus (Fabaceae) genomics          # short noun phrase for prompts (no leading article)
+scope: >-
+  Genus Lupinus / lupin, with a genomics dimension (genome assembly,
+  pangenome, WGS, GWAS, QTL, linkage map, transcriptome, comparative genomics,
+  synteny, gene discovery).
+
+years: [2006, 2026]                # inclusive scope window for the crawl
+contact_email: you@example.org     # set your email — OpenAlex/Unpaywall polite-pool mailto
+
+# Lexical pre-ranking signal for Phase 1: before the LLM judge sees candidates,
+# Python ranks them so generic high-citation method papers don't crowd out real
+# on-topic biology. `strong` terms are weighted 5x; `weak` 1x.
+lexical:
+  strong: [lupin, lupinus]
+  weak:
+    - angustifolius
+    - albus
+    - luteus
+    - mutabilis
+    - cosentinii
+    - digitatus
+    - tarwi
+    - fabaceae
+    - genome
+    - pangenome
+    - genomic
+    - gwas
+    - qtl
+    - transcriptome
+    - quinolizidine
+    - alkaloid
+    - anthracnose
+    - conglutin
+    - vernalization
+    - domestication
+    - nodulation
+    - cluster root
+
+ideation:
+  # The kind of research ideas Phase 3 should produce. Change this to open the
+  # pipeline to wet-lab / theoretical / clinical fields, etc.
+  domain_constraint: purely computational / bioinformatic (no wet-lab, no new data generation)
+
+# LLM endpoint (OpenAI-compatible /chat/completions). Defaults to OpenRouter's free
+# demo model so this example runs on a clean clone with just an API key:
+#     export OPENROUTER_API_KEY=sk-or-...   &&   legumista discover
+# The free model is tiny — fine to see the pipeline work, but idea/synthesis quality
+# scales with the model. For serious runs, use a stronger hosted model or LOCAL ollama
+# (uncomment the block below; `ollama serve` exposes /v1 on :11434, no key needed).
+llm:
+  base_url: https://openrouter.ai/api/v1
+  model: meta-llama/llama-3.2-3b-instruct:free   # free 3B demo; browse others at openrouter.ai/models
+  api_key_env: OPENROUTER_API_KEY
+  temperature: 0.3
+  timeout: 3600                            # generous; large-corpus synthesis can run long
+  json_mode: false
+
+# --- Local ollama instead (uncomment; no proxy, no API key needed) ---
+# llm:
+#   base_url: http://localhost:11434/v1
+#   model: qwen3:32b                     # your `ollama list` tag
+#   api_key_env: OLLAMA_API_KEY          # unused by ollama; leave unset
+#   temperature: 0.3
+#   timeout: 3600

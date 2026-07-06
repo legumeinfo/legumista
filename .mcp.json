@@ -1,0 +1,4 @@
+{
+  "_comment": "No MCP servers are needed — legumista ships native tools (OpenAlex/Crossref/arXiv/Europe PMC/bioRxiv search, read_paper, NCBI datasets+EDirect, web search, grep/read). To plug in your OWN MCP server, add it under mcpServers and install the client with `pip install -e '.[mcp]'`. Example: \"myserver\": { \"command\": \"python\", \"args\": [\"-m\", \"my_mcp_server\"], \"env\": {} }",
+  "mcpServers": {}
+}

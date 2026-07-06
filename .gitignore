@@ -1,0 +1,18 @@
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# --- Packaging (pip install -e .) ---
+*.egg-info/
+/build/
+/dist/
+
+# --- Editor / OS cruft ---
+.DS_Store
+*.swp
+
+# NOTE: this is the code repository's ignore file. Per-PROJECT generated artifacts
+# (corpus/, papers/, reviews/, ideas/, ledgers) are ignored by each project's own
+# .gitignore — see examples/lupinus/.gitignore and the one `legumista init` writes.
