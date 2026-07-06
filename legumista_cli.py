@@ -435,6 +435,38 @@ def research(
 
 
 # ---------------------------------------------------------------------------
+# MCP server — expose the native research toolset over the Model Context Protocol
+# ---------------------------------------------------------------------------
+@app.command()
+def mcp(
+    transport: str = typer.Option("stdio", "--transport", "-t",
+        help="Transport: 'stdio' (default; how MCP clients spawn a server) or 'http'."),
+    host: str = typer.Option("127.0.0.1", help="Bind host (http transport only)."),
+    port: int = typer.Option(8000, help="Bind port (http transport only)."),
+):
+    """Start a spec-compliant FastMCP server exposing legumista's native research tools
+    (OpenAlex/Crossref/arXiv/Europe PMC/bioRxiv search, read_paper, NCBI datasets+EDirect,
+    web search, and workspace-sandboxed grep/read) so any MCP client can drive them.
+
+    Tools are sandboxed to the active project (grep/read_file resolve inside it), so run
+    inside a project or target one with -C. Needs the 'serve' extra: pip install
+    'legumista[serve]'."""
+    if transport not in ("stdio", "http"):
+        _err(f"[!] unknown transport {transport!r} — use 'stdio' or 'http'.")
+        raise typer.Exit(1)
+    from legumista_agent.mcp_server import serve
+    # stdio speaks the protocol on stdout, so status must go to stderr to avoid corrupting
+    # the JSON-RPC stream; http is a plain server, so a friendly stdout line is fine.
+    (_err if transport == "stdio" else _out)(
+        f"[*] legumista MCP server (transport={transport}"
+        + (f", http://{host}:{port}/mcp" if transport == "http" else "") + ") …")
+    try:
+        serve(transport=transport, host=host, port=port)
+    except KeyboardInterrupt:  # graceful Ctrl-C
+        _err("[*] MCP server stopped.")
+
+
+# ---------------------------------------------------------------------------
 # Housekeeping
 # ---------------------------------------------------------------------------
 @reset_app.command("crawl")

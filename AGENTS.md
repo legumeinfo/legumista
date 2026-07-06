@@ -15,7 +15,9 @@ runnable *Lupinus* (Fabaceae) genomics demo project lives in
 - Pure Python calling an OpenAI-compatible `/chat/completions` endpoint
   (`config.py llm`) — no external agent runtime, proxy, or MCP server in the loop. The
   agentic tools (`legumista_agent/`) are native and keyless; users may still plug their
-  own MCP servers into `.mcp.json`.
+  own MCP servers into `.mcp.json` (inbound), and the same native toolset can be served
+  *outbound* to any MCP client via `legumista mcp` (`legumista_agent/mcp_server.py`, a
+  FastMCP bridge; needs the `serve` extra).
 - `orchestrator.py` owns the crawl and writes every canonical file. Do **not** hand-edit
   the JSON ledgers (`agent_state.json`, `library_manifest.json`, `ideation_state.json`);
   they are program-owned. Outputs live under `./reviews/`, `./corpus/`, `./ideas/`,
@@ -38,8 +40,9 @@ runnable *Lupinus* (Fabaceae) genomics demo project lives in
   `examples/lupinus/knowledge/` (indexed at `examples/lupinus/knowledge/README.md`).
 
 ## Contributing
-- **Dev install:** `pip install -e '.[mcp]' pytest` (Python ≥3.11). The `[mcp]` extra
-  is only needed if you touch the optional MCP client.
+- **Dev install:** `pip install -e '.[mcp,serve]' pytest` (Python ≥3.11). The `[mcp]`
+  extra is only needed if you touch the optional MCP client; `[serve]` (FastMCP) only if
+  you touch `legumista mcp` / `legumista_agent/mcp_server.py`.
 - **Tests:** `python -m pytest -q` (suite in `tests/`).
 - **CI:** `.github/workflows/ci.yml` runs the tests on Python 3.11 and 3.12 for every
   push and pull request. Keep them green.

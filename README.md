@@ -149,6 +149,7 @@ legumista ideate                  # Phase 3 (+ 3b): grow ideas, then expand to p
 | `legumista digest` / `legumista report` | rebuild digests (no model) |
 | `legumista expand` | Phase 3b only (`--include-pool`) |
 | `legumista research "<topic>"` | agentic tool-using research via native tools |
+| `legumista mcp` | serve the native toolset over MCP (FastMCP; `-t stdio`/`http`) |
 | `legumista reset crawl` / `legumista reset ideation` | clear artifacts (`--hard` / `--dry-run`) |
 | `legumista init [dir]` | scaffold a new project (bare `legumista.yml` + `agent_state.json`) |
 | `legumista status` | project + corpus/idea counts + endpoint health |
@@ -279,6 +280,26 @@ The same agentic harness backs the pipeline: `discover`/`review`/`ideate` run th
 step as a bounded tool-loop (up to `agent.max_turns`, default 8), so the model can verify
 and enrich with tools before answering. The deterministic mechanics (OpenAlex citation
 walk, JSON verdicts, commits) are unchanged.
+
+### Serving the tools over MCP
+
+The same native toolset is available to **any** Model Context Protocol client (Claude
+Desktop, an IDE, another agent), not just `legumista research`. `legumista mcp` starts a
+spec-compliant [FastMCP](https://gofastmcp.com/servers/server) server
+([`legumista_agent/mcp_server.py`](legumista_agent/mcp_server.py)) that exposes every
+native + local read tool with its original JSON-schema and a read-only annotation:
+
+```bash
+pip install -e '.[serve]'        # brings in fastmcp
+legumista mcp                    # stdio transport (how MCP clients spawn a server)
+legumista mcp -t http --port 8000  # long-running HTTP endpoint at /mcp
+```
+
+Tools stay sandboxed to the active project (`grep`/`read_file` resolve inside it), so run
+it in a project dir or target one with `-C`. To wire it into a stdio MCP client, point the
+client at the `legumista` command with args `["mcp"]` (and the project dir as `cwd`). This
+is the mirror image of `.mcp.json`: that pulls *other* servers' tools **in**; `legumista
+mcp` pushes *legumista's* tools **out**.
 
 ## Autonomous pipeline (discover → synthesize → ideate)
 

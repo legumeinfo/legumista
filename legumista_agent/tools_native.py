@@ -100,8 +100,11 @@ def _is_sensitive(realpath: str) -> bool:
     """True if any path component is a dotfile/dotdir or the basename looks secret."""
     root = os.path.realpath(config.WORKSPACE)
     rel = os.path.relpath(realpath, root)
+    # `relpath` yields a bare "." only when realpath IS the workspace root; that
+    # current-dir marker is not a hidden component, so don't treat it as one (it's
+    # what made a default-path `grep`/`read` of the workspace root refuse itself).
     for comp in rel.split(os.sep):
-        if comp and comp != ".." and comp.startswith("."):
+        if comp and comp not in ("..", ".") and comp.startswith("."):
             return True
     return bool(_SECRET_RE.search(os.path.basename(realpath)))
 

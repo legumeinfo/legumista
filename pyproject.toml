@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "legumista"
-version = "0.1.0"
+version = "0.1.1"
 description = "Autonomous research discovery → synthesis → ideation pipeline driven by any OpenAI-compatible LLM."
 readme = "README.md"
 requires-python = ">=3.11"          # 3.11+ baseline (stdlib features used across the pipeline)
@@ -43,6 +43,8 @@ Issues = "https://github.com/legumeinfo/legumista/issues"
 # external MCP servers (see .mcp.json); install with `.[mcp]`.
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
+# `legumista mcp` serves the native toolset over the Model Context Protocol via FastMCP.
+serve = ["fastmcp>=2.9"]
 
 [project.scripts]
 legumista = "legumista_cli:main"
