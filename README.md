@@ -258,6 +258,17 @@ external services:
   `web_search` (DuckDuckGo), and `grep`/`read_file`/`web_fetch`. Documented for the model in
   [`prompts/tools_native.md`](legumista_assets/prompts/tools_native.md), appended to the
   system prompt.
+- **Bioinformatics tools (`legumista_agent/tools_pysam.py`)** — *optional* (`bio` extra):
+  htslib access to indexed genomics files via `pysam`. `samtools` and `bcftools` are
+  **general dispatchers** — pass an argv list (subcommand + flags), the same convention as
+  `ncbi_datasets` — so almost the whole samtools/bcftools suite is available (view, sort,
+  index, depth, coverage, stats, call, norm, query, …). Plus read-only helpers
+  `fasta_fetch` and `tabix_query`, and a `tabix_index` builder. Path arguments are
+  workspace-sandboxed, URL arguments SSRF-checked; regions are samtools-style (1-based
+  inclusive). **Read operations run by default; write operations (sort/index/call/
+  tabix_index, or any `-o` output) require the `read_write` permission** — pass
+  `--allow-write` to `legumista research` or `legumista mcp`. Install with
+  `pip install -e '.[bio]'`.
 - **`legumista_agent/mcp_client.py`** — *optional*: any MCP servers in
   [`.mcp.json`](.mcp.json) are discovered via the official `mcp` SDK and added
   alongside the native tools (`mcp__<server>__<tool>`). Install with `pip install
@@ -273,7 +284,8 @@ Output lands in `reviews/<ts>_research/` (`answer.md`, a DOI `seed.md` for
 
 **Requirements:** just the model endpoint. The native tools are stdlib + `ddgs` +
 `pypdf` and need no API keys or MCP servers; `ncbi_datasets`/`edirect` additionally
-use the NCBI CLIs if you've installed them. Your own MCP servers are opt-in: add them
+use the NCBI CLIs if you've installed them, and the genomics tools need the `bio` extra
+(`pip install -e '.[bio]'` for pysam). Your own MCP servers are opt-in: add them
 to `.mcp.json` and `pip install -e '.[mcp]'`.
 
 The same agentic harness backs the pipeline: `discover`/`review`/`ideate` run their model
@@ -287,19 +299,24 @@ The same native toolset is available to **any** Model Context Protocol client (C
 Desktop, an IDE, another agent), not just `legumista research`. `legumista mcp` starts a
 spec-compliant [FastMCP](https://gofastmcp.com/servers/server) server
 ([`legumista_agent/mcp_server.py`](legumista_agent/mcp_server.py)) that exposes every
-native + local read tool with its original JSON-schema and a read-only annotation:
+native + local tool — including the pysam genomics tools when the `bio` extra is installed —
+with its original JSON-schema and a `readOnlyHint` annotation reflecting whether the tool
+can write:
 
 ```bash
-pip install -e '.[serve]'        # brings in fastmcp
-legumista mcp                    # stdio transport (how MCP clients spawn a server)
+pip install -e '.[serve,bio]'      # fastmcp (server) + pysam (genomics tools)
+legumista mcp                      # stdio transport, read-only (how clients spawn a server)
 legumista mcp -t http --port 8000  # long-running HTTP endpoint at /mcp
+legumista mcp --allow-write        # also permit genomics write ops (sort/index/call/…)
 ```
 
-Tools stay sandboxed to the active project (`grep`/`read_file` resolve inside it), so run
-it in a project dir or target one with `-C`. To wire it into a stdio MCP client, point the
-client at the `legumista` command with args `["mcp"]` (and the project dir as `cwd`). This
-is the mirror image of `.mcp.json`: that pulls *other* servers' tools **in**; `legumista
-mcp` pushes *legumista's* tools **out**.
+Tools stay sandboxed to the active project (paths resolve inside it), so run it in a
+project dir or target one with `-C`. The MCP server has no permission gate of its own, so
+`--allow-write` is the sole switch for write operations; without it the write-capable
+genomics tools run reads only and refuse writes. To wire it into a stdio MCP client, point
+the client at the `legumista` command with args `["mcp"]` (and the project dir as `cwd`).
+This is the mirror image of `.mcp.json`: that pulls *other* servers' tools **in**;
+`legumista mcp` pushes *legumista's* tools **out**.
 
 ## Autonomous pipeline (discover → synthesize → ideate)
 

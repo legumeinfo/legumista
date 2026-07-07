@@ -18,14 +18,19 @@ from .loop import run_agent
 from .mcp_client import MCPManager
 from .tools_local import local_read_tools
 from .tools_native import native_tools
+from .tools_pysam import bio_tools
 
 
 class AgentRuntime:
     def __init__(self, servers: dict = None, *, include_local: bool = True,
-                 extra_tools: list = None):
+                 extra_tools: list = None, allow_write: bool = False):
         self._servers = servers or {}
         self._include_local = include_local
         self._extra = list(extra_tools or [])
+        # Whether write-capable native tools (the pysam samtools/bcftools dispatchers,
+        # tabix_index) expose their write operations. The permission gate is the primary
+        # control; this makes the tools themselves fail closed unless writes are enabled.
+        self._allow_write = allow_write
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._mgr = None
@@ -51,7 +56,8 @@ class AgentRuntime:
                 await self._mgr.__aenter__()
                 tools += await self._mgr.list_tools()
             if self._include_local:
-                tools += local_read_tools() + native_tools()
+                tools += (local_read_tools() + native_tools()
+                          + bio_tools(allow_write=self._allow_write))
             return tools + self._extra
 
         self.tools = self._submit(_setup())

@@ -58,18 +58,21 @@ def _make_bridge_class():
     return _BridgeTool
 
 
-def build_server(name: str = "legumista"):
-    """Assemble a FastMCP server exposing legumista's native + local read tools.
+def build_server(name: str = "legumista", *, allow_write: bool = False):
+    """Assemble a FastMCP server exposing legumista's native + local tools.
 
     Returns the `FastMCP` instance (not yet running). Every tool is registered with its
-    original name, description, and JSON-schema parameters, and marked read-only via the
-    MCP `readOnlyHint` annotation (the whole toolset is read-only by construction)."""
+    original name, description, and JSON-schema parameters. A tool's read-only status
+    becomes the MCP `readOnlyHint` annotation. The MCP server has no permission gate, so
+    `allow_write` is the sole control over the write-capable genomics tools: when False
+    (default) their write operations fail closed and only read subcommands run."""
     _require_fastmcp()
     from fastmcp import FastMCP
 
     import config
     from .tools_local import local_read_tools
     from .tools_native import native_tools
+    from .tools_pysam import bio_tools
 
     Bridge = _make_bridge_class()
     # The native-tools usage doctrine (prompts/tools_native.md) doubles as server-level
@@ -83,7 +86,7 @@ def build_server(name: str = "legumista"):
     server = FastMCP(name=name, instructions=instructions)
 
     _HANDLERS.clear()
-    for tool in local_read_tools() + native_tools():
+    for tool in local_read_tools() + native_tools() + bio_tools(allow_write=allow_write):
         _HANDLERS[tool.name] = tool.run
         server.add_tool(Bridge(
             name=tool.name,
@@ -95,10 +98,11 @@ def build_server(name: str = "legumista"):
 
 
 def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000,
-          show_banner: bool = False) -> None:
+          show_banner: bool = False, *, allow_write: bool = False) -> None:
     """Build and run the server (blocking). `transport` is 'stdio' (default; how MCP
-    clients spawn a server) or 'http' (a long-running HTTP endpoint on host:port)."""
-    server = build_server()
+    clients spawn a server) or 'http' (a long-running HTTP endpoint on host:port).
+    `allow_write` enables the write-capable genomics tools' write operations."""
+    server = build_server(allow_write=allow_write)
     if transport == "stdio":
         server.run(transport="stdio", show_banner=show_banner)
     else:

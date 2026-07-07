@@ -17,7 +17,14 @@ runnable *Lupinus* (Fabaceae) genomics demo project lives in
   agentic tools (`legumista_agent/`) are native and keyless; users may still plug their
   own MCP servers into `.mcp.json` (inbound), and the same native toolset can be served
   *outbound* to any MCP client via `legumista mcp` (`legumista_agent/mcp_server.py`, a
-  FastMCP bridge; needs the `serve` extra).
+  FastMCP bridge; needs the `serve` extra). Beyond the keyless scholarly tools, an
+  optional pysam/htslib toolset (`legumista_agent/tools_pysam.py`, the `bio` extra) exposes
+  the samtools/bcftools suites as general argv dispatchers plus a few helpers — added to
+  the same toolset the runtime and MCP server assemble, so it flows to both.
+- **Read vs write.** The default is read-only everywhere. Write-capable tools declare a
+  per-call `writes(args)` classifier (`legumista_agent/tool.py`); the permission gate
+  (`permissions.py`) allows writes only in `read_write` mode. `--allow-write` on
+  `legumista research`/`mcp` flips it on. The pipeline phases are always read-only.
 - `orchestrator.py` owns the crawl and writes every canonical file. Do **not** hand-edit
   the JSON ledgers (`agent_state.json`, `library_manifest.json`, `ideation_state.json`);
   they are program-owned. Outputs live under `./reviews/`, `./corpus/`, `./ideas/`,
@@ -40,9 +47,10 @@ runnable *Lupinus* (Fabaceae) genomics demo project lives in
   `examples/lupinus/knowledge/` (indexed at `examples/lupinus/knowledge/README.md`).
 
 ## Contributing
-- **Dev install:** `pip install -e '.[mcp,serve]' pytest` (Python ≥3.11). The `[mcp]`
+- **Dev install:** `pip install -e '.[mcp,serve,bio]' pytest` (Python ≥3.11). The `[mcp]`
   extra is only needed if you touch the optional MCP client; `[serve]` (FastMCP) only if
-  you touch `legumista mcp` / `legumista_agent/mcp_server.py`.
+  you touch `legumista mcp` / `legumista_agent/mcp_server.py`; `[bio]` (pysam) only if you
+  touch the genomics tools in `legumista_agent/tools_pysam.py`.
 - **Tests:** `python -m pytest -q` (suite in `tests/`).
 - **CI:** `.github/workflows/ci.yml` runs the tests on Python 3.11 and 3.12 for every
   push and pull request. Keep them green.

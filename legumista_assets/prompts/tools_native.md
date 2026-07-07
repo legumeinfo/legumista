@@ -172,6 +172,41 @@ a database/portal, a software repo, a news item, an author's affiliation.
 
 ---
 
+## Bioinformatics tools (pysam / htslib) — query indexed genomics files
+
+For when the evidence is a genome, alignment, or variant file rather than a paper. These
+bind htslib via `pysam`; they need the optional `bio` extra — if a tool says it's absent,
+treat that as "unavailable", not an error to retry. File arguments are a project path or an
+http(s) URL whose **sibling index must exist** (`.fai`/`.bai`/`.csi`/`.tbi`); a
+"missing index" message means the file simply isn't queryable — say so, don't guess.
+Regions are **samtools-style: 1-based, inclusive** — `seqid`, `seqid:start`, or
+`seqid:start-end` (e.g. `chr1:1000-2000`).
+
+**`samtools` and `bcftools` are general dispatchers** — you pass an argv list (subcommand
+then flags), exactly like `ncbi_datasets`, and get the tool's stdout back. This is the main
+surface; nearly all of samtools/bcftools is available.
+
+- **`samtools`** — SAM/BAM/CRAM/FASTA. Args: `{args: [subcommand, ...]}`. e.g.
+  `["view","-c","aln.bam","chr1:1-1000"]` (count), `["idxstats","aln.bam"]`,
+  `["coverage","-r","chr1:1-1000","aln.bam"]`, `["depth","-r","chr1:100-200","aln.bam"]`,
+  `["stats","aln.bam"]`, `["view","-H","aln.bam"]` (header → reference names).
+- **`bcftools`** — VCF/BCF. Args: `{args: [subcommand, ...]}`. e.g.
+  `["view","-H","v.vcf.gz","chr1:1-1000"]`, `["query","-f","%CHROM\\t%POS\\t%REF\\t%ALT\\n","v.vcf.gz"]`,
+  `["stats","v.vcf.gz"]`, `["view","-h","v.vcf.gz"]` (header → contigs/samples).
+- **`fasta_fetch`** — extract a subsequence from an indexed FASTA. Args: `path`, `region`.
+- **`tabix_query`** — a bgzip+tabix table (GFF/GTF/BED/…): no `region` lists contigs, a
+  `region` returns feature lines. Args: `path`, `region?`, `max_records?`.
+
+**Reads vs writes.** Read subcommands (samtools `view`/`flagstat`/`idxstats`/`stats`/
+`depth`/`coverage`, bcftools `view`/`query`/`stats`, and the two helpers) work by default.
+Operations that write a file — samtools `sort`/`index`/`markdup`, bcftools `call`/`norm`/
+`index`, `tabix_index`, or any read subcommand given an output flag like `-o` — are refused
+unless the run was started with write access (`--allow-write`). If you get a "writes are
+disabled" message, don't retry; report that the step needs write access. Path arguments are
+confined to the project workspace.
+
+---
+
 ## Optional MCP tools
 
 If the researcher has configured MCP servers in `.mcp.json`, those servers' tools appear

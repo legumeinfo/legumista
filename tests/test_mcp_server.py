@@ -13,22 +13,26 @@ def _run(coro):
 
 
 def test_build_server_exposes_native_tools():
-    """Every native + local read tool is registered, read-only, with a schema."""
+    """Every native + local + genomics tool is registered with a schema, and each tool's
+    readOnlyHint annotation matches its source `read_only` flag (the write-capable pysam
+    dispatchers are correctly advertised as not-read-only)."""
     from fastmcp import Client
     from legumista_agent.mcp_server import build_server
     from legumista_agent.tools_local import local_read_tools
     from legumista_agent.tools_native import native_tools
+    from legumista_agent.tools_pysam import bio_tools
 
-    expected = {t.name for t in local_read_tools() + native_tools()}
+    source = {t.name: t for t in local_read_tools() + native_tools() + bio_tools()}
 
     async def check():
         async with Client(build_server()) as c:
             tools = await c.list_tools()
-            names = {t.name for t in tools}
-            assert names == expected, names ^ expected
+            assert {t.name for t in tools} == set(source)
             for t in tools:
-                assert t.annotations and t.annotations.readOnlyHint is True
+                assert t.annotations.readOnlyHint is source[t.name].read_only
                 assert (t.inputSchema or {}).get("type") == "object"
+            # samtools/bcftools are write-capable dispatchers -> not read-only
+            assert next(t for t in tools if t.name == "samtools").annotations.readOnlyHint is False
 
     _run(check())
 

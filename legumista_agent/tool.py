@@ -14,10 +14,14 @@ training distribution — all of which improve name→intent recognition and rel
 selection.
 """
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 # args (dict) -> result text (awaited)
 ToolRun = Callable[[dict], Awaitable[str]]
+# args (dict) -> True if THIS specific call writes (mutates disk/state). Optional: for
+# tools whose read/write nature depends on the arguments — e.g. a `samtools` dispatcher
+# where `view` reads but `sort` writes. The permission gate consults it per call.
+WritesFn = Callable[[dict], bool]
 
 
 @dataclass
@@ -27,6 +31,10 @@ class Tool:
     parameters: dict          # JSON Schema, type "object"
     read_only: bool
     run: ToolRun
+    # Per-call write classifier. When None, `read_only` is authoritative for the whole
+    # tool. When set, the gate treats a call as a write iff `writes(args)` is True, so one
+    # tool can expose both read and write operations under a single schema.
+    writes: Optional[WritesFn] = None
 
     def to_openai(self) -> dict:
         """Render the OpenAI function-tool spec.

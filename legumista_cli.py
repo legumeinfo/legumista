@@ -372,10 +372,16 @@ def report():
 def research(
     topic: str = typer.Argument(..., help="Research question / topic for the agent."),
     max_turns: Optional[int] = typer.Option(None, help="Max tool-use turns."),
+    allow_write: bool = typer.Option(
+        False, "--allow-write",
+        help="Grant write access (read_write permission): the genomics tools may run "
+             "writing operations (samtools sort/index, bcftools call, tabix_index). Off "
+             "by default — reads only."),
 ):
     """Agentic literature research: the model uses native paper-search tools
-    (OpenAlex/Crossref/arXiv/Europe PMC + web/grep/read) — plus any MCP servers in
-    .mcp.json — in a tool-call loop, then saves the answer + a DOI seed + transcript."""
+    (OpenAlex/Crossref/arXiv/Europe PMC + web/grep/read + samtools/bcftools genomics) —
+    plus any MCP servers in .mcp.json — in a tool-call loop, then saves the answer + a DOI
+    seed + transcript."""
     _require_project()
     import config
     from legumista_agent.agent import research as run_research
@@ -396,11 +402,13 @@ def research(
     _out(f"[*] researching: {topic}")
     # Same system prompt as every other phase: the shared base + native-tools spec.
     system = config.system_prompt() or None
+    if allow_write:
+        _out("[*] write access enabled (read_write): genomics tools may write to the workspace")
     try:
         result = run_research(topic, servers=servers,
                               system=system,
                               max_turns=max_turns or config.agent_max_turns(),
-                              on_event=on_event)
+                              on_event=on_event, allow_write=allow_write)
     except Exception as e:  # noqa: BLE001 - surface endpoint / MCP-spawn failures clearly
         _err(f"[!] agent run failed: {type(e).__name__}: {e}")
         _err("    (check the model endpoint in legumista.yml `llm`, and any MCP servers in .mcp.json)")
@@ -443,25 +451,31 @@ def mcp(
         help="Transport: 'stdio' (default; how MCP clients spawn a server) or 'http'."),
     host: str = typer.Option("127.0.0.1", help="Bind host (http transport only)."),
     port: int = typer.Option(8000, help="Bind port (http transport only)."),
+    allow_write: bool = typer.Option(
+        False, "--allow-write",
+        help="Expose the genomics tools' write operations (samtools sort/index, bcftools "
+             "call, tabix_index). Off by default — read operations only."),
 ):
-    """Start a spec-compliant FastMCP server exposing legumista's native research tools
-    (OpenAlex/Crossref/arXiv/Europe PMC/bioRxiv search, read_paper, NCBI datasets+EDirect,
-    web search, and workspace-sandboxed grep/read) so any MCP client can drive them.
+    """Start a spec-compliant FastMCP server exposing legumista's native tools — scholarly
+    search (OpenAlex/Crossref/arXiv/Europe PMC/bioRxiv), read_paper, NCBI datasets+EDirect,
+    web search, workspace-sandboxed grep/read, and the pysam genomics suite
+    (samtools/bcftools/fasta_fetch/tabix) — so any MCP client can drive them.
 
-    Tools are sandboxed to the active project (grep/read_file resolve inside it), so run
-    inside a project or target one with -C. Needs the 'serve' extra: pip install
-    'legumista[serve]'."""
+    Tools are sandboxed to the active project (paths resolve inside it), so run inside a
+    project or target one with -C. Needs the 'serve' extra (pip install 'legumista[serve]');
+    the genomics tools also need 'bio' (pysam)."""
     if transport not in ("stdio", "http"):
         _err(f"[!] unknown transport {transport!r} — use 'stdio' or 'http'.")
         raise typer.Exit(1)
     from legumista_agent.mcp_server import serve
     # stdio speaks the protocol on stdout, so status must go to stderr to avoid corrupting
     # the JSON-RPC stream; http is a plain server, so a friendly stdout line is fine.
-    (_err if transport == "stdio" else _out)(
-        f"[*] legumista MCP server (transport={transport}"
-        + (f", http://{host}:{port}/mcp" if transport == "http" else "") + ") …")
+    log = _err if transport == "stdio" else _out
+    log(f"[*] legumista MCP server (transport={transport}"
+        + (f", http://{host}:{port}/mcp" if transport == "http" else "")
+        + (", writes ENABLED" if allow_write else "") + ") …")
     try:
-        serve(transport=transport, host=host, port=port)
+        serve(transport=transport, host=host, port=port, allow_write=allow_write)
     except KeyboardInterrupt:  # graceful Ctrl-C
         _err("[*] MCP server stopped.")
 
