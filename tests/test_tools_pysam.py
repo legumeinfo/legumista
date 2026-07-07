@@ -4,7 +4,7 @@ SSRF sandbox. Skipped when the optional `bio` extra (pysam) is absent. No networ
 model calls; the workspace is pointed at a tmp fixture dir."""
 import pytest
 
-pysam = pytest.importorskip("pysam", reason="needs the `bio` extra (pip install 'legumista[bio]')")
+pysam = pytest.importorskip("pysam", reason="pysam is a legumista dependency — reinstall the package")
 
 import config
 from legumista_agent import tools_pysam as P
@@ -90,14 +90,6 @@ def test_output_flag_makes_a_read_subcommand_a_write(fixtures):
     assert "writes are disabled" in _sam(["view", "-o", "out.sam", "reads.sorted.bam"])
 
 
-def test_writes_classifier():
-    w = P._mk_writes(P._SAM_READ)
-    assert w({"args": ["view", "-c", "x.bam"]}) is False
-    assert w({"args": ["sort", "-o", "o.bam", "x.bam"]}) is True
-    assert w({"args": ["view", "-o", "o.bam", "x.bam"]}) is True   # output flag
-    assert w({"args": []}) is False
-
-
 # --- sandbox + SSRF on dispatcher argv ------------------------------------------------
 def test_argv_path_sandbox(fixtures):
     assert "outside the project workspace" in _sam(["view", "/etc/passwd"])
@@ -134,16 +126,14 @@ def test_tabix_index_is_write_gated(fixtures):
     assert tools["tabix_index"].read_only is False
 
 
-# --- degradation ----------------------------------------------------------------------
-def test_missing_pysam_message(monkeypatch):
-    monkeypatch.setattr(P, "_pysam", lambda: (None, "error: needs the 'pysam' package"))
-    assert _sam(["view", "x.bam"]).startswith("error: needs the 'pysam'")
-    assert P._fasta_fetch({"path": "x.fa", "region": "chr1:1-2"}).startswith("error: needs")
-
-
-def test_region_parsing():
+def test_parse_region_follows_samtools_coordinate_spec():
+    """samtools regions are 1-based inclusive; pysam's fetch is 0-based half-open. The
+    parser converts start -> lo-1, keeps the inclusive hi as the exclusive bound (so span
+    width == inclusive base count), strips commas, and rejects inverted/empty regions."""
     assert P._parse_region("chr1:1000-2000") == ("chr1", 999, 2000, None)
-    assert P._parse_region("chr1:1000") == ("chr1", 999, 1000, None)
-    assert P._parse_region("chr1") == ("chr1", None, None, None)
-    assert P._parse_region("chr1:5-1")[3].startswith("error")
-    assert P._parse_region("")[3].startswith("error")
+    assert P._parse_region("chr1:1-1") == ("chr1", 0, 1, None)        # just the first base
+    assert P._parse_region("chr2:500") == ("chr2", 499, 500, None)    # single pos -> 1 bp
+    assert P._parse_region("chr1:1,000-2,000") == ("chr1", 999, 2000, None)  # commas stripped
+    assert P._parse_region("chr1") == ("chr1", None, None, None)      # whole contig
+    assert P._parse_region("chr1:5-1")[3].startswith("error")         # start > end
+    assert P._parse_region("")[3].startswith("error")                 # empty

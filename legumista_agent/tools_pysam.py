@@ -22,9 +22,9 @@ Read vs write, and the permission model:
 Safety, matching tools_native.py: pysam/htslib I/O is offloaded with `asyncio.to_thread`;
 local path arguments are confined to the project workspace (same sandbox as grep/
 read_file) and rewritten to absolute so the process cwd is irrelevant; http(s) URL
-arguments pass the native SSRF guard (other schemes refused). pysam is an optional
-dependency (the `bio` extra), imported lazily so the package works without it and every
-tool reports cleanly when it is absent.
+arguments pass the native SSRF guard (other schemes refused). pysam is a dependency of
+legumista, imported lazily (only when a genomics tool actually runs) so the heavy htslib
+extension isn't loaded by pipeline/research runs that never touch it.
 
 Coordinates: `region` in the helpers is samtools-style — `seqid`, `seqid:start`, or
 `seqid:start-end`, 1-based inclusive — converted to pysam's 0-based half-open internally.
@@ -55,8 +55,8 @@ def _pysam():
         import pysam
         return pysam, None
     except ModuleNotFoundError:
-        return None, ("error: this tool needs the 'pysam' package (htslib bindings). "
-                      "Install it with: pip install 'legumista[bio]'  (or: pip install pysam)")
+        return None, ("error: could not import 'pysam' (htslib bindings). It ships as a "
+                      "dependency of legumista — reinstalling the package should restore it.")
 
 
 # --- argument sandboxing (paths -> workspace; URLs -> SSRF-checked) ------------------

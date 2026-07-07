@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.legumeinfo/legumista -->
+
 # Legumista — a citation-grounded research discovery, synthesis & ideation pipeline using LLMs
 
 **Legumista** turns a citation graph into a reviewed corpus and then into grounded
@@ -258,21 +260,18 @@ external services:
   `web_search` (DuckDuckGo), and `grep`/`read_file`/`web_fetch`. Documented for the model in
   [`prompts/tools_native.md`](legumista_assets/prompts/tools_native.md), appended to the
   system prompt.
-- **Bioinformatics tools (`legumista_agent/tools_pysam.py`)** — *optional* (`bio` extra):
-  htslib access to indexed genomics files via `pysam`. `samtools` and `bcftools` are
-  **general dispatchers** — pass an argv list (subcommand + flags), the same convention as
-  `ncbi_datasets` — so almost the whole samtools/bcftools suite is available (view, sort,
-  index, depth, coverage, stats, call, norm, query, …). Plus read-only helpers
-  `fasta_fetch` and `tabix_query`, and a `tabix_index` builder. Path arguments are
-  workspace-sandboxed, URL arguments SSRF-checked; regions are samtools-style (1-based
-  inclusive). **Read operations run by default; write operations (sort/index/call/
-  tabix_index, or any `-o` output) require the `read_write` permission** — pass
-  `--allow-write` to `legumista research` or `legumista mcp`. Install with
-  `pip install -e '.[bio]'`.
+- **Bioinformatics tools (`legumista_agent/tools_pysam.py`)** — htslib access to indexed
+  genomics files via `pysam`. `samtools` and `bcftools` are **general dispatchers** — pass
+  an argv list (subcommand + flags), the same convention as `ncbi_datasets` — so almost the
+  whole samtools/bcftools suite is available (view, sort, index, depth, coverage, stats,
+  call, norm, query, …). Plus read-only helpers `fasta_fetch` and `tabix_query`, and a
+  `tabix_index` builder. Path arguments are workspace-sandboxed, URL arguments SSRF-checked;
+  regions are samtools-style (1-based inclusive). **Read operations run by default; write
+  operations (sort/index/call/tabix_index, or any `-o` output) require the `read_write`
+  permission** — pass `--allow-write` to `legumista research` or `legumista mcp`.
 - **`legumista_agent/mcp_client.py`** — *optional*: any MCP servers in
-  [`.mcp.json`](.mcp.json) are discovered via the official `mcp` SDK and added
-  alongside the native tools (`mcp__<server>__<tool>`). Install with `pip install
-  '.[mcp]'`.
+  [`.mcp.json`](.mcp.json) are discovered via the MCP SDK (bundled with FastMCP) and added
+  alongside the native tools (`mcp__<server>__<tool>`).
 - **`legumista_agent/permissions.py`** — a per-tool allow/deny gate (`read_only` /
   `allow_all` / `deny_all`); `research` uses `allow_all` (trusted, read-only tools).
 - **System prompt** — the same shared base as every other phase (`system-prompt.md`,
@@ -284,9 +283,9 @@ Output lands in `reviews/<ts>_research/` (`answer.md`, a DOI `seed.md` for
 
 **Requirements:** just the model endpoint. The native tools are stdlib + `ddgs` +
 `pypdf` and need no API keys or MCP servers; `ncbi_datasets`/`edirect` additionally
-use the NCBI CLIs if you've installed them, and the genomics tools need the `bio` extra
-(`pip install -e '.[bio]'` for pysam). Your own MCP servers are opt-in: add them
-to `.mcp.json` and `pip install -e '.[mcp]'`.
+use the NCBI CLIs if you've installed them. Everything else ships in the one package —
+`pip install legumista` includes the FastMCP server runtime, the pysam genomics tools, and
+the client SDK for plugging your own MCP servers into `.mcp.json`.
 
 The same agentic harness backs the pipeline: `discover`/`review`/`ideate` run their model
 step as a bounded tool-loop (up to `agent.max_turns`, default 8), so the model can verify
@@ -296,27 +295,69 @@ walk, JSON verdicts, commits) are unchanged.
 ### Serving the tools over MCP
 
 The same native toolset is available to **any** Model Context Protocol client (Claude
-Desktop, an IDE, another agent), not just `legumista research`. `legumista mcp` starts a
-spec-compliant [FastMCP](https://gofastmcp.com/servers/server) server
+Desktop, an IDE, another agent), not just `legumista research`. `legumista mcp` — one
+subcommand of the single `legumista` app — starts a spec-compliant
+[FastMCP](https://gofastmcp.com/servers/server) server
 ([`legumista_agent/mcp_server.py`](legumista_agent/mcp_server.py)) that exposes every
-native + local tool — including the pysam genomics tools when the `bio` extra is installed —
-with its original JSON-schema and a `readOnlyHint` annotation reflecting whether the tool
-can write:
+native tool (including the pysam genomics tools) with its original JSON-schema and a
+`readOnlyHint` annotation reflecting whether the tool can write:
 
 ```bash
-pip install -e '.[serve,bio]'      # fastmcp (server) + pysam (genomics tools)
-legumista mcp                      # stdio transport, read-only (how clients spawn a server)
+pip install legumista              # everything's included — nothing extra to add
+legumista mcp                      # stdio transport (how clients spawn a server)
 legumista mcp -t http --port 8000  # long-running HTTP endpoint at /mcp
 legumista mcp --allow-write        # also permit genomics write ops (sort/index/call/…)
 ```
 
-Tools stay sandboxed to the active project (paths resolve inside it), so run it in a
-project dir or target one with `-C`. The MCP server has no permission gate of its own, so
-`--allow-write` is the sole switch for write operations; without it the write-capable
-genomics tools run reads only and refuse writes. To wire it into a stdio MCP client, point
-the client at the `legumista` command with args `["mcp"]` (and the project dir as `cwd`).
-This is the mirror image of `.mcp.json`: that pulls *other* servers' tools **in**;
-`legumista mcp` pushes *legumista's* tools **out**.
+Unlike the pipeline commands, `legumista mcp` needs no project and doesn't care where it's
+launched — just run it. (Local-file tools resolve within the launch directory; pass `-C` to
+pin a different root.) The MCP server has no permission gate of its own, so `--allow-write`
+is the sole switch for write operations; without it the write-capable genomics tools run
+reads only and refuse writes. This is the mirror image of `.mcp.json`: that pulls *other*
+servers' tools **in**; the legumista server pushes *legumista's* tools **out**.
+
+#### Wiring it into an MCP client
+
+legumista is one command, so the MCP server is just `legumista mcp` — the same everywhere.
+Once published to PyPI, any client can launch it with **`uvx`** (the
+[uv](https://docs.astral.sh/uv/) runner, the Python analogue of `npx`) with no manual
+install. Drop this into the client's standard `mcpServers` config (Claude Desktop, Cursor,
+Claude Code, OpenAI Agents SDK, …):
+
+```jsonc
+{
+  "mcpServers": {
+    "legumista": {
+      "command": "uvx",
+      "args": ["legumista", "mcp"]
+    }
+  }
+}
+```
+
+`uvx legumista mcp` installs legumista into a throwaway environment and runs the server —
+no extras to specify, since everything ships in the one package. Add `"--allow-write"` to
+the `args` to permit genomics writes. Some GUI clients don't see `uvx` on `PATH` — give the
+absolute path (`which uvx`) if so. From a source checkout it's simply `legumista mcp` after
+`pip install -e .`.
+
+#### Publishing to the official MCP Registry
+
+Metadata for the [official MCP Registry](https://registry.modelcontextprotocol.io) lives
+in [`server.json`](server.json) (reverse-DNS name `io.github.legumeinfo/legumista`,
+pointing at the PyPI package). The registry is a *metaregistry* — it stores that manifest,
+not the code, and verifies namespace ownership via the `<!-- mcp-name: … -->` marker in this
+README (which becomes the PyPI description). To publish a release:
+
+```bash
+uv build && uv publish                       # 1. push the package to PyPI
+mcp-publisher login github                   # 2. verify the io.github.legumeinfo namespace
+mcp-publisher publish                        # 3. submit server.json to the registry
+```
+
+Keep the `version` in `server.json` in step with `pyproject.toml`. A `Dockerfile` (with the
+`io.modelcontextprotocol.server.name` label for OCI-image verification) is provided for the
+container distribution channel.
 
 ## Autonomous pipeline (discover → synthesize → ideate)
 

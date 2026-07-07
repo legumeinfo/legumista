@@ -458,12 +458,12 @@ def mcp(
 ):
     """Start a spec-compliant FastMCP server exposing legumista's native tools — scholarly
     search (OpenAlex/Crossref/arXiv/Europe PMC/bioRxiv), read_paper, NCBI datasets+EDirect,
-    web search, workspace-sandboxed grep/read, and the pysam genomics suite
-    (samtools/bcftools/fasta_fetch/tabix) — so any MCP client can drive them.
+    web search, grep/read, and the pysam genomics suite (samtools/bcftools/fasta_fetch/
+    tabix) — so any MCP client can drive them.
 
-    Tools are sandboxed to the active project (paths resolve inside it), so run inside a
-    project or target one with -C. Needs the 'serve' extra (pip install 'legumista[serve]');
-    the genomics tools also need 'bio' (pysam)."""
+    Just run `legumista mcp` — no project or working directory is required (unlike the
+    pipeline commands). Local-file tools resolve within the launch directory; pass -C to
+    pin a different root."""
     if transport not in ("stdio", "http"):
         _err(f"[!] unknown transport {transport!r} — use 'stdio' or 'http'.")
         raise typer.Exit(1)

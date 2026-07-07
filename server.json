@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.legumeinfo/legumista",
+  "title": "Legumista",
+  "description": "Scholarly search, open-access full-text, NCBI/EDirect, and pysam genomics tools over MCP.",
+  "repository": {
+    "url": "https://github.com/legumeinfo/legumista",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/legumeinfo/legumista",
+  "version": "0.1.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "legumista",
+      "version": "0.1.2",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "valueHint": "subcommand",
+          "description": "Start the MCP server (stdio) via `uvx legumista mcp`. Append '--allow-write' to permit write operations."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "LEGUMISTA_HOME",
+          "description": "Project directory whose files the tools may read (grep/read_file/genomics are sandboxed to it). Defaults to the working directory.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_PYSAM_ALLOWED_URLS",
+          "description": "Optional comma-separated http(s) URL-prefix allowlist for the genomics tools; when unset, any public host is allowed (private/loopback are always blocked).",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

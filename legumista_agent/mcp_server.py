@@ -10,19 +10,11 @@ to a FastMCP `Tool` subclass whose `run` calls back into the legumista handler a
 the text result in a spec-compliant `ToolResult` (a single text content block). The
 tool's read-only flag becomes the MCP `readOnlyHint` annotation.
 
-`fastmcp` is an optional dependency (the `serve` extra); it is imported lazily here so
-the rest of the package works without it.
+`fastmcp` is a dependency of legumista; it is imported inside `build_server` (not at
+module top) so merely importing this module stays cheap until you actually serve. The
+server is started only via `legumista mcp` (there is no separate server binary — the whole
+tool is one `legumista` command).
 """
-
-
-def _require_fastmcp():
-    try:
-        import fastmcp  # noqa: F401
-    except ModuleNotFoundError as e:  # pragma: no cover - trivial guard
-        raise SystemExit(
-            "the MCP server needs the 'fastmcp' package. Install it with:\n"
-            "    pip install 'legumista[serve]'   (or: pip install fastmcp)"
-        ) from e
 
 
 # Registry mapping tool name -> the legumista async handler. Kept module-level (not a
@@ -66,7 +58,6 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     becomes the MCP `readOnlyHint` annotation. The MCP server has no permission gate, so
     `allow_write` is the sole control over the write-capable genomics tools: when False
     (default) their write operations fail closed and only read subcommands run."""
-    _require_fastmcp()
     from fastmcp import FastMCP
 
     import config
