@@ -207,6 +207,39 @@ confined to the project workspace.
 
 ---
 
+## LIS Data Store (`lis_find`, `lis_files`, `lis_gene`) — legume genomics data
+
+For legume data specifically, the LIS Data Store (https://data.legumeinfo.org) publishes
+genomes, annotations, diversity panels, GWAS and more for ~21 genera. These three tools
+**resolve; they do not retrieve** — they hand you URLs and region strings that the
+bioinformatics tools above then read. Work through them in order:
+
+1. **`lis_find`** — discovery. No arguments lists the genera; `{taxon:"Glycine max"}` lists
+   that species' data types; `{taxon, type:"annotations"}` lists collections with their
+   synopsis, genotype and **`publication_doi`**. Always start here: a collection name ends
+   in an arbitrary four-character key (`Wm82.gnm4.ann1.T8TQ`) that you cannot guess or
+   construct. Narrow long lists with `query` (e.g. `"Wm82.gnm4"`).
+2. **`lis_files`** — given a collection path, which files are **randomly accessible** and
+   how. The store's directory listing hides the `.fai`/`.tbi` index siblings, so this is
+   the only way to know a 286 MB genome can be region-queried without downloading it. It
+   also lists files that are **not** indexed — notably the `.gfa.tsv.gz` gene-family
+   assignments and the `info_*.txt.gz` tables. Those cannot be read at all through this
+   toolset; say so rather than attempting them.
+3. **`lis_gene`** — an exact gene or mRNA ID (`Glyma.12G040000`, or fully qualified
+   `glyma.Wm82.gnm4.ann1.Glyma.12G040000`) to its locus plus ready-made `fasta_fetch` and
+   `tabix_query` calls. **Exact IDs only** — gene symbols like `GmNARK` are not resolved;
+   if you have a symbol, find the ID first (the curated
+   `<abbrev>.traits.yml` under a species' `gene_functions/` maps symbols to IDs and DOIs,
+   readable with `web_fetch`).
+
+Two things follow from the store's design and are worth exploiting. Every collection
+carries a `publication_doi` **by specification**, so any dataset you read can be traced to
+its paper with `openalex_by_doi` / `read_paper` — do that when the provenance matters.
+And the protein/CDS FASTAs are indexed **by gene ID**, so `fasta_fetch` with the sequence
+name as the region returns one protein without downloading the file.
+
+---
+
 ## Optional MCP tools
 
 If the researcher has configured MCP servers in `.mcp.json`, those servers' tools appear

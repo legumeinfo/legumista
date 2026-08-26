@@ -22,11 +22,13 @@ def test_served_toolset_conforms_to_mcp_spec():
     are correctly advertised as not-read-only)."""
     from fastmcp import Client
     from legumista_agent.mcp_server import build_server
+    from legumista_agent.tools_lis import lis_tools
     from legumista_agent.tools_local import local_read_tools
     from legumista_agent.tools_native import native_tools
     from legumista_agent.tools_pysam import bio_tools
 
-    source = {t.name: t for t in local_read_tools() + native_tools() + bio_tools()}
+    source = {t.name: t
+              for t in local_read_tools() + native_tools() + lis_tools() + bio_tools()}
 
     async def check():
         async with Client(build_server()) as c:

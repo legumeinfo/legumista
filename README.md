@@ -1,5 +1,7 @@
 <!-- mcp-name: io.github.legumeinfo/legumista -->
 
+![Legumista bean mascot](./legumista_assets/legumista.png)
+
 # Legumista — a citation-grounded research discovery, synthesis & ideation pipeline using LLMs
 
 **Legumista** turns a citation graph into a reviewed corpus and then into grounded
@@ -269,6 +271,15 @@ external services:
   regions are samtools-style (1-based inclusive). **Read operations run by default; write
   operations (sort/index/call/tabix_index, or any `-o` output) require the `read_write`
   permission** — pass `--allow-write` to `legumista research` or `legumista mcp`.
+- **LIS Data Store tools (`legumista_agent/tools_lis.py`)** — systematic access to
+  [data.legumeinfo.org](https://data.legumeinfo.org): `lis_find` (discover species, data
+  types and collections, with each collection's `publication_doi`), `lis_files` (which of a
+  collection's files are randomly accessible over HTTP, and the exact call to read them —
+  the store's directory listing hides the `.fai`/`.tbi` siblings), and `lis_gene` (an exact
+  gene/mRNA ID → locus + ready-made `fasta_fetch`/`tabix_query` calls). They **resolve
+  rather than retrieve**: the URLs they return are read by the bioinformatics tools above,
+  and the DOIs by `openalex_by_doi`/`read_paper`. Read-only, no disk state; base URL
+  overridable with `LEGUMISTA_LIS_BASE_URL`.
 - **`legumista_agent/mcp_client.py`** — *optional*: any MCP servers in
   [`.mcp.json`](.mcp.json) are discovered via the MCP SDK (bundled with FastMCP) and added
   alongside the native tools (`mcp__<server>__<tool>`).

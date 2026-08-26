@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "legumista"
-version = "0.1.3"
+version = "0.1.4"
 description = "Autonomous research discovery → synthesis → ideation pipeline driven by any OpenAI-compatible LLM."
 readme = "README.md"
 requires-python = ">=3.11"          # 3.11+ baseline (stdlib features used across the pipeline)
@@ -38,6 +38,7 @@ dependencies = [
     "pypdf>=4",        # OA full-text extraction (read_paper native tool)
     "fastmcp>=2.9",    # the `legumista mcp` server (+ the MCP client SDK it bundles)
     "pysam>=0.22",     # htslib bindings for the samtools/bcftools genomics tools
+    "certifi>=2023.7", # CA bundle for htslib's vendored libcurl (remote genomics I/O)
 ]
 
 [project.urls]

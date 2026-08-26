@@ -16,6 +16,7 @@ import threading
 
 from .loop import run_agent
 from .mcp_client import MCPManager
+from .tools_lis import lis_tools
 from .tools_local import local_read_tools
 from .tools_native import native_tools
 from .tools_pysam import bio_tools
@@ -56,7 +57,7 @@ class AgentRuntime:
                 await self._mgr.__aenter__()
                 tools += await self._mgr.list_tools()
             if self._include_local:
-                tools += (local_read_tools() + native_tools()
+                tools += (local_read_tools() + native_tools() + lis_tools()
                           + bio_tools(allow_write=self._allow_write))
             return tools + self._extra
 
