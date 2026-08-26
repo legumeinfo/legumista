@@ -141,9 +141,29 @@ _PATH_FLAGS = {"-o", "--output", "--output-file", "-T", "--reference", "--fasta-
                "--samples-file", "-b", "-L", "--bed"}
 
 
+# getopt also accepts a value glued to its option — `--output=path` and `-opath`. Neither
+# form looks like a path to `_looks_like_path` (both start with '-'), so without special
+# handling they slip past the sandbox entirely.
+_ATTACHED_LONG_RE = re.compile(r"^(--[A-Za-z0-9][A-Za-z0-9-]*)=(.*)$")
+
+
 def _looks_like_path(tok: str) -> bool:
     return (not tok.startswith("-")
             and (os.sep in tok or tok.lower().endswith(_GENOMIC_EXT)))
+
+
+def _short_attached_path(tok: str) -> bool:
+    """True for a short path-option with its value glued on (`-oout.vcf`, `-T/ref.fa`).
+
+    We refuse these rather than split them: bundled boolean shorts are indistinguishable
+    (`samtools view -bS` is `-b -S`, not `-b S`), so splitting would corrupt valid argv.
+    Only tokens whose tail actually looks like a path qualify, keeping `-bS` untouched."""
+    if len(tok) <= 2 or not tok.startswith("-") or tok.startswith("--"):
+        return False
+    if tok[:2] not in _PATH_FLAGS:
+        return False
+    tail = tok[2:]
+    return os.sep in tail or tail.lower().endswith(_GENOMIC_EXT)
 
 
 def _guard_argv(argv: list):
@@ -153,6 +173,22 @@ def _guard_argv(argv: list):
     (new_argv, None) or (None, error_text)."""
     out, expect_path = [], False
     for tok in argv:
+        attached = _ATTACHED_LONG_RE.match(tok)
+        if attached and attached.group(1) in _PATH_FLAGS:
+            flag, value = attached.group(1), attached.group(2)
+            if _is_url(value):
+                resolved, err = _validate_remote(value)
+            else:
+                resolved, err = _sandbox_path(value)
+            if err:
+                return None, err
+            out.append(f"{flag}={resolved}")
+            expect_path = False
+            continue
+        if _short_attached_path(tok):
+            return None, (f"error: refused {tok!r} — a value attached to a short option "
+                          f"hides the path from the workspace sandbox. Pass it as two "
+                          f"tokens instead: {tok[:2]} {tok[2:]}")
         if _is_url(tok):
             url, err = _validate_remote(tok)
             if err:
@@ -234,7 +270,8 @@ def _mk_writes(readset):
             return True
         for tok in argv[1:]:
             t = str(tok)
-            if t in _OUTPUT_FLAGS or t.startswith("--output="):
+            attached = _ATTACHED_LONG_RE.match(t)
+            if t in _OUTPUT_FLAGS or (attached and attached.group(1) in _OUTPUT_FLAGS):
                 return True
         return False
     return writes
@@ -263,6 +300,114 @@ def _bcftools_list_samples(pysam, argv):
     if not samples:
         return "(no samples declared in this VCF/BCF header)"
     return _cap(f"{len(samples)} sample(s):\n" + "\n".join(samples))
+
+
+# --- honouring the agent's -o -------------------------------------------------------
+# To capture a dispatcher's output, pysam appends `-o <tmpfile>` to the argv and points
+# the real stdout at /dev/null (libcutils.pyx `_pysam_dispatch`). getopt takes the LAST
+# -o, so for the subcommands below the agent's own -o is silently overridden: the file is
+# never created, the content comes back as the tool result, and the exit status is 0.
+# We mirror pysam's rule, strip the agent's -o before dispatch, and write the captured
+# output ourselves. Subcommands pysam leaves alone (samtools sort, bcftools index, …)
+# honour -o natively and must not be touched.
+_BCF_NO_INJECT = ("head", "index", "roh", "stats")
+_BCF_BINARY_TYPES = {"b": "compressed BCF", "u": "uncompressed BCF", "z": "bgzipped VCF"}
+_SAM_BINARY_FMTS = {"bam": "BAM", "cram": "CRAM"}
+
+
+def _pysam_injects_output(module_name: str, sub: str, argv: list) -> bool:
+    """Does pysam's stdout capture rewrite this call's -o? Mirrors MAP_STDOUT_OPTIONS."""
+    if module_name == "bcftools":
+        return sub not in _BCF_NO_INJECT
+    if sub in ("mpileup", "depad"):
+        return True
+    if sub == "view":
+        return "-c" not in argv          # pysam exempts `samtools view -c` (counts only)
+    return False
+
+
+def _binary_output_request(module_name: str, argv: list) -> str:
+    """Name the binary/compressed output format this argv asks for, or "" if it is text.
+
+    Captured output reaches us as text, so a binary format would have to round-trip
+    through str() to reach the file (or the model's context) — silent corruption. These
+    are refused with a route that produces the same artifact safely."""
+    if module_name == "bcftools":
+        for i, tok in enumerate(argv):
+            value = ""
+            if tok in ("-O", "--output-type"):
+                value = argv[i + 1] if i + 1 < len(argv) else ""
+            elif tok.startswith("--output-type="):
+                value = tok.split("=", 1)[1]
+            elif tok.startswith("-O") and len(tok) > 2:
+                value = tok[2:]          # -Oz, and -Oz6 with a compression level
+            label = _BCF_BINARY_TYPES.get(value.strip().lower()[:1])
+            if label:
+                return label
+        return ""
+    for i, tok in enumerate(argv):
+        if tok == "-b":
+            return "BAM"
+        if tok == "-C":
+            return "CRAM"
+        value = ""
+        if tok in ("-O", "--output-fmt"):
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+        elif tok.startswith("--output-fmt="):
+            value = tok.split("=", 1)[1]
+        label = _SAM_BINARY_FMTS.get(value.strip().lower().split(",")[0])
+        if label:
+            return label
+    return ""
+
+
+def _binary_output_error(module_name: str, sub: str, fmt: str) -> str:
+    route = ("Write the text form (drop -O, keep `-o out.vcf`), then call tabix_index "
+             "with preset=vcf — it bgzip-compresses in place and builds the .tbi, "
+             "leaving an indexed file you can region-query."
+             if module_name == "bcftools" else
+             "Write SAM text (drop -b/-C), or use `samtools sort -o out.bam`, which "
+             "writes BAM natively and is not affected.")
+    return (f"error: `{module_name} {sub}` cannot emit {fmt} through this tool — its "
+            f"output is captured as text, which would corrupt the bytes. {route}")
+
+
+def _extract_output_path(argv: list):
+    """Pull the agent's -o/--output/--output-file (and its value) out of argv.
+    Returns (argv_without_it, path_or_None, error_or_None)."""
+    out, path, skip = [], None, False
+    for i, tok in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if tok in _OUTPUT_FLAGS:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                return None, None, f"error: {tok} needs a filename."
+            path, skip = argv[i + 1], True
+            continue
+        attached = _ATTACHED_LONG_RE.match(tok)
+        if attached and attached.group(1) in _OUTPUT_FLAGS:
+            if not attached.group(2):
+                return None, None, f"error: {attached.group(1)}= needs a filename."
+            path = attached.group(2)
+            continue
+        out.append(tok)
+    return out, path, None
+
+
+def _write_output(out, path: str, module_name: str, sub: str) -> str:
+    """Persist a dispatcher's captured stdout to the file the agent asked for."""
+    data = b"" if out is None else (out if isinstance(out, bytes) else str(out).encode())
+    try:
+        with open(path, "wb") as fh:
+            fh.write(data)
+    except OSError as e:
+        return f"error: could not write {os.path.basename(path)}: {e}"
+    name = os.path.basename(path)
+    if not data:
+        return f"({module_name} {sub}: produced no output; wrote empty {name})"
+    lines = data.count(b"\n")
+    return f"wrote {len(data):,} bytes ({lines:,} lines) to {name}"
 
 
 def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
@@ -299,6 +444,14 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
         handled = _bcftools_list_samples(pysam, guarded)
         if handled is not None:
             return handled
+    out_path = None
+    if _pysam_injects_output(module_name, sub, guarded):
+        fmt = _binary_output_request(module_name, guarded)
+        if fmt:
+            return _binary_output_error(module_name, sub, fmt)
+        guarded, out_path, oerr = _extract_output_path(guarded)
+        if oerr:
+            return oerr
     from pysam.utils import SamtoolsError
     with _DISPATCH_LOCK:
         try:
@@ -309,6 +462,8 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
             return _open_err(e, " ".join(argv))
         except Exception as e:  # noqa: BLE001 - never let a dispatch kill the loop
             return f"error: {module_name} raised {type(e).__name__}: {e}"
+    if out_path is not None:
+        return _write_output(out, out_path, module_name, argv[0])
     out = "" if out is None else (out if isinstance(out, str) else str(out))
     if not out.strip():
         return (f"({module_name} {argv[0]}: completed with no stdout"

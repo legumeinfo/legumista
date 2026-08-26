@@ -212,3 +212,121 @@ def test_bcftools_query_format_still_dispatches(fixtures):
     going to the real dispatcher."""
     out = _bcf(["query", "-f", "%CHROM\t%POS\n", "variants.vcf.gz"])
     assert "chr1\t15" in out and "chr1\t25" in out
+
+
+# --- attached-value options must not slip past the workspace sandbox ------------------
+def test_equals_form_long_option_is_sandboxed(fixtures):
+    """`--output=<path>` is a single token starting with '-', so it looks nothing like a
+    path; without explicit handling it bypasses the sandbox entirely."""
+    assert "outside the project workspace" in _bcf(
+        ["view", "--output=/etc/evil.vcf", "variants.vcf.gz"], allow_write=True)
+    guarded, err = P._guard_argv(["--output=sub.vcf"])
+    assert err is None
+    assert guarded[0].startswith("--output=") and guarded[0].endswith("/sub.vcf")
+    assert os.path.isabs(guarded[0].split("=", 1)[1])
+
+
+def test_equals_form_counts_as_a_write(fixtures):
+    """Gating must see the equals form too, or it would slip through as a 'read'."""
+    assert P._mk_writes(P._BCF_READ)({"args": ["view", "--output-file=x.vcf"]}) is True
+    assert "writes are disabled" in _bcf(["view", "--output=x.vcf", "variants.vcf.gz"])
+
+
+def test_equals_form_url_is_ssrf_checked(fixtures):
+    assert "blocked URL" in _sam(["view", "--reference=http://169.254.169.254/r.fa",
+                                  "reads.sorted.bam"])
+
+
+def test_short_attached_path_is_refused_not_guessed(fixtures):
+    """`-oout.vcf` hides the path; we refuse rather than split, because bundled boolean
+    shorts (`-bS`) are indistinguishable from an attached value."""
+    out = _bcf(["view", "-o/etc/evil.vcf", "variants.vcf.gz"], allow_write=True)
+    assert "attached to a short option" in out and "-o /etc/evil.vcf" in out
+    # a bundled boolean pair must keep working - its tail is not path-like
+    assert P._short_attached_path("-bS") is False
+    assert P._short_attached_path("-o/tmp/x.vcf") is True
+    assert P._short_attached_path("-Oz") is False       # not a path flag at all
+
+
+# --- the agent's -o is honoured where pysam would clobber it --------------------------
+def test_pysam_injects_output_mirrors_pysam(fixtures):
+    """The rule we mirror from pysam's MAP_STDOUT_OPTIONS; getting it wrong either
+    clobbers the agent's -o or double-writes a file pysam never touched."""
+    assert P._pysam_injects_output("bcftools", "view", []) is True
+    assert P._pysam_injects_output("bcftools", "query", []) is True
+    for sub in ("head", "index", "roh", "stats"):
+        assert P._pysam_injects_output("bcftools", sub, []) is False
+    assert P._pysam_injects_output("samtools", "view", []) is True
+    assert P._pysam_injects_output("samtools", "view", ["-c"]) is False
+    assert P._pysam_injects_output("samtools", "sort", []) is False   # honours -o itself
+
+
+def test_bcftools_output_flag_actually_writes_the_file(fixtures):
+    out = _bcf(["view", "-H", "-o", "sub.vcf", "variants.vcf.gz"], allow_write=True)
+    assert "wrote" in out and "sub.vcf" in out
+    written = (fixtures / "sub.vcf").read_text()
+    assert "rs1" in written and written.count("\n") == 2
+
+
+def test_samtools_view_output_flag_actually_writes_the_file(fixtures):
+    """samtools view is injected too — the bug is not bcftools-only."""
+    out = _sam(["view", "-o", "out.sam", "reads.sorted.bam"], allow_write=True)
+    assert "wrote" in out and "out.sam" in out
+    assert "read0" in (fixtures / "out.sam").read_text()
+
+
+def test_equals_form_output_writes_the_file(fixtures):
+    out = _bcf(["view", "-H", "--output=eq.vcf", "variants.vcf.gz"], allow_write=True)
+    assert "wrote" in out
+    assert "rs1" in (fixtures / "eq.vcf").read_text()
+
+
+def test_samtools_sort_output_is_left_to_pysam(fixtures):
+    """sort is not injected, so we must NOT strip its -o - pysam writes the BAM itself."""
+    assert "completed" in _sam(["sort", "-o", "s.bam", "reads.sorted.bam"], allow_write=True)
+    assert (fixtures / "s.bam").exists() and (fixtures / "s.bam").stat().st_size > 0
+
+
+def test_output_flag_without_a_filename_errors(fixtures):
+    assert "needs a filename" in _bcf(["view", "-o"], allow_write=True)
+    # the equals form with an empty value is caught upstream by the path sandbox
+    assert "missing 'path'" in _bcf(["view", "--output=", "variants.vcf.gz"],
+                                    allow_write=True)
+
+
+def test_derived_file_can_be_indexed_and_queried(fixtures):
+    """The chain the -O refusal points at: write text, tabix_index it, region-query it.
+    This is what keeps binary output unnecessary rather than merely forbidden."""
+    assert "wrote" in _bcf(["view", "-o", "derived.vcf", "variants.vcf.gz"],
+                           allow_write=True)
+    assert "indexed" in P._tabix_index({"path": "derived.vcf", "preset": "vcf"})
+    out = P._tabix_query({"path": "derived.vcf.gz", "region": "chr1:20-30"})
+    assert "1 record(s)" in out and "chr1\t25" in out
+
+
+# --- binary/compressed output is refused rather than corrupted ------------------------
+def test_binary_output_request_detection():
+    assert P._binary_output_request("bcftools", ["-O", "z"]) == "bgzipped VCF"
+    assert P._binary_output_request("bcftools", ["-Oz"]) == "bgzipped VCF"
+    assert P._binary_output_request("bcftools", ["-Oz6"]) == "bgzipped VCF"
+    assert P._binary_output_request("bcftools", ["--output-type=b"]) == "compressed BCF"
+    assert P._binary_output_request("bcftools", ["-O", "v"]) == ""      # text VCF is fine
+    assert P._binary_output_request("samtools", ["-b"]) == "BAM"
+    assert P._binary_output_request("samtools", ["--output-fmt=cram"]) == "CRAM"
+    assert P._binary_output_request("samtools", ["-h"]) == ""
+
+
+def test_binary_output_is_refused_with_a_route(fixtures):
+    out = _bcf(["view", "-Oz", "-o", "sub.vcf.gz", "variants.vcf.gz"], allow_write=True)
+    assert "cannot emit bgzipped VCF" in out and "tabix_index" in out
+    assert not (fixtures / "sub.vcf.gz").exists()
+
+
+def test_binary_output_refused_even_without_o(fixtures):
+    """Without -o the bytes would land in the model's context as a str() repr instead."""
+    assert "cannot emit" in _bcf(["view", "-Oz", "variants.vcf.gz"])
+
+
+def test_samtools_binary_output_points_at_sort(fixtures):
+    out = _sam(["view", "-b", "-o", "out.bam", "reads.sorted.bam"], allow_write=True)
+    assert "cannot emit BAM" in out and "samtools sort" in out
