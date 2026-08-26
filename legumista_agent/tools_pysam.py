@@ -49,14 +49,51 @@ MAX_SEQ = int(os.environ.get("LEGUMISTA_PYSAM_MAX_SEQ", "100000"))
 _DISPATCH_LOCK = threading.Lock()
 
 
+# pysam's manylinux wheels vendor their own libcurl + OpenSSL (see pysam.libs/), built in
+# a RHEL-based container, so their compiled-in CA locations are /etc/pki/tls/... . Those
+# paths don't exist on Debian/Ubuntu/Alpine/Arch/macOS, so every https:// read through
+# htslib dies with "Libcurl reported error 77 (Problem with the SSL CA cert)" — which is
+# every remote genome/annotation/VCF this toolset is built to stream. libcurl reads
+# CURL_CA_BUNDLE when it creates an easy handle, not at load time, so pointing it at a
+# bundle that does exist fixes it in-process, before the first remote open.
+_CA_ENV = "CURL_CA_BUNDLE"
+_SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian/Ubuntu/Alpine/Arch
+    "/etc/pki/tls/certs/ca-bundle.crt",     # RHEL/Fedora/CentOS
+    "/etc/ssl/ca-bundle.pem",               # openSUSE
+    "/etc/ssl/cert.pem",                    # macOS/BSD
+)
+
+
+def _ensure_ca_bundle() -> None:
+    """Point htslib's bundled libcurl at a CA bundle that exists on this machine.
+
+    An operator-set CURL_CA_BUNDLE always wins (that is how a corporate TLS-inspecting
+    proxy is configured); otherwise prefer the system trust store over certifi's, so a
+    site's own added roots keep working. Silently does nothing if neither is available —
+    a remote read then fails with the usual htslib error rather than a new one."""
+    if os.environ.get(_CA_ENV):
+        return
+    for path in _SYSTEM_CA_BUNDLES:
+        if os.path.exists(path):
+            os.environ[_CA_ENV] = path
+            return
+    try:
+        import certifi
+        os.environ[_CA_ENV] = certifi.where()
+    except Exception:  # noqa: BLE001 - certifi absent or unreadable; not fatal
+        pass
+
+
 def _pysam():
     """Import pysam lazily; return (module, None) or (None, error_text)."""
     try:
         import pysam
-        return pysam, None
     except ModuleNotFoundError:
         return None, ("error: could not import 'pysam' (htslib bindings). It ships as a "
                       "dependency of legumista — reinstalling the package should restore it.")
+    _ensure_ca_bundle()
+    return pysam, None
 
 
 # --- argument sandboxing (paths -> workspace; URLs -> SSRF-checked) ------------------
@@ -203,6 +240,31 @@ def _mk_writes(readset):
     return writes
 
 
+# `bcftools query -l` prints sample names straight to the process's stdout, bypassing the
+# output stream that `-o` controls. To capture output, pysam's dispatcher appends
+# `-o <tmpfile>` to the argv and sends the real stdout to /dev/null — so the sample list
+# is discarded and the dispatcher returns "" with exit status 0: a silent empty answer.
+# Serve the listing from the VariantFile header instead; same answer, no CLI text to parse.
+_LIST_SAMPLES_FLAGS = ("-l", "--list-samples")
+
+
+def _bcftools_list_samples(pysam, argv):
+    """Answer `bcftools query -l <file>` from the header. Returns the text, or None if
+    this argv is not a plain sample listing (combined with other options), in which case
+    the caller runs the normal dispatcher rather than guessing at the intent."""
+    rest = [t for t in argv if t not in _LIST_SAMPLES_FLAGS]
+    if len(rest) != 1 or rest[0].startswith("-"):
+        return None
+    try:
+        with pysam.VariantFile(rest[0]) as vf:
+            samples = list(vf.header.samples)
+    except (OSError, ValueError) as e:
+        return _open_err(e, rest[0])
+    if not samples:
+        return "(no samples declared in this VCF/BCF header)"
+    return _cap(f"{len(samples)} sample(s):\n" + "\n".join(samples))
+
+
 def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
     pysam, err = _pysam()
     if err:
@@ -232,6 +294,11 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
     guarded, err = _guard_argv(argv[1:])
     if err:
         return err
+    if (module_name == "bcftools" and sub == "query"
+            and any(t in _LIST_SAMPLES_FLAGS for t in guarded)):
+        handled = _bcftools_list_samples(pysam, guarded)
+        if handled is not None:
+            return handled
     from pysam.utils import SamtoolsError
     with _DISPATCH_LOCK:
         try:

@@ -2,6 +2,8 @@
 samtools/bcftools dispatchers, the read-only helpers, write gating, and the workspace/
 SSRF sandbox. Skipped when the optional `bio` extra (pysam) is absent. No network, no
 model calls; the workspace is pointed at a tmp fixture dir."""
+import os
+
 import pytest
 
 pysam = pytest.importorskip("pysam", reason="pysam is a legumista dependency — reinstall the package")
@@ -137,3 +139,76 @@ def test_parse_region_follows_samtools_coordinate_spec():
     assert P._parse_region("chr1") == ("chr1", None, None, None)      # whole contig
     assert P._parse_region("chr1:5-1")[3].startswith("error")         # start > end
     assert P._parse_region("")[3].startswith("error")                 # empty
+
+
+# --- CA bundle for htslib's vendored libcurl ------------------------------------------
+def test_ensure_ca_bundle_respects_operator_setting(monkeypatch):
+    """An explicitly-set CURL_CA_BUNDLE is never overridden — that is how a corporate
+    TLS-inspecting proxy is configured."""
+    monkeypatch.setenv(P._CA_ENV, "/some/site/roots.pem")
+    P._ensure_ca_bundle()
+    assert os.environ[P._CA_ENV] == "/some/site/roots.pem"
+
+
+def test_ensure_ca_bundle_prefers_system_store(monkeypatch, tmp_path):
+    """With nothing set, the first *existing* system bundle wins (so a site's added roots
+    keep working); missing candidates ahead of it are skipped."""
+    present = tmp_path / "ca-certificates.crt"
+    present.write_text("")
+    monkeypatch.delenv(P._CA_ENV, raising=False)
+    monkeypatch.setattr(P, "_SYSTEM_CA_BUNDLES", ("/nonexistent/pki.crt", str(present)))
+    P._ensure_ca_bundle()
+    assert os.environ[P._CA_ENV] == str(present)
+
+
+def test_ensure_ca_bundle_falls_back_to_certifi(monkeypatch):
+    """No system bundle (the manylinux-wheel-on-a-slim-image case) -> certifi's."""
+    certifi = pytest.importorskip("certifi")
+    monkeypatch.delenv(P._CA_ENV, raising=False)
+    monkeypatch.setattr(P, "_SYSTEM_CA_BUNDLES", ("/nonexistent/a.crt", "/nonexistent/b.crt"))
+    P._ensure_ca_bundle()
+    assert os.environ[P._CA_ENV] == certifi.where()
+
+
+def test_pysam_import_sets_ca_bundle(monkeypatch):
+    """The fix has to land before the first remote open, so _pysam() applies it."""
+    monkeypatch.delenv(P._CA_ENV, raising=False)
+    mod, err = P._pysam()
+    assert err is None and mod is not None
+    assert os.path.exists(os.environ[P._CA_ENV])
+
+
+# --- bcftools query -l (pysam's -o injection swallows it) -----------------------------
+def test_bcftools_query_list_samples(fixtures):
+    """pysam captures dispatcher output by appending `-o <tmpfile>` and pointing the real
+    stdout at /dev/null; `query -l` printf()s to stdout, so it would come back empty."""
+    out = _bcf(["query", "-l", "variants.vcf.gz"])
+    assert "2 sample(s)" in out
+    assert out.strip().endswith("S1\nS2")
+
+
+def test_bcftools_query_list_samples_long_flag(fixtures):
+    assert "S1" in _bcf(["query", "--list-samples", "variants.vcf.gz"])
+
+
+def test_bcftools_query_list_samples_reports_open_errors(fixtures):
+    assert "error" in _bcf(["query", "-l", "no_such_file.vcf.gz"]).lower()
+
+
+def test_bcftools_query_list_samples_is_sandboxed(fixtures):
+    """The interception happens after _guard_argv, so the workspace sandbox still holds."""
+    assert "outside the project workspace" in _bcf(["query", "-l", "/etc/passwd"])
+
+
+def test_bcftools_query_list_samples_declines_mixed_argv(fixtures):
+    """Combined with other options it is not a plain listing — fall through to the
+    dispatcher rather than guessing which token is the file."""
+    assert P._bcftools_list_samples(pysam, ["-l", "-r", "chr1", "variants.vcf.gz"]) is None
+    assert P._bcftools_list_samples(pysam, ["-l"]) is None
+
+
+def test_bcftools_query_format_still_dispatches(fixtures):
+    """Regression guard: the normal `query -f` path writes through `-o` and must keep
+    going to the real dispatcher."""
+    out = _bcf(["query", "-f", "%CHROM\t%POS\n", "variants.vcf.gz"])
+    assert "chr1\t15" in out and "chr1\t25" in out
