@@ -6,7 +6,14 @@
 #
 #   docker build -t legumista .
 #   docker run --rm -i legumista                       # stdio; -i keeps stdin open
-#   docker run --rm -p 8000:8000 legumista --http --host 0.0.0.0
+#   docker run --rm -d --name legumista -p 8000:8000 \
+#       legumista -t http --host 0.0.0.0            # HTTP at http://127.0.0.1:8000/mcp
+#
+# The transport flag is `-t http` / `--transport http` (there is no `--http`), and
+# `--host 0.0.0.0` is required: bound to the default 127.0.0.1 the server is reachable
+# only from inside the container. Without `-t http` the entrypoint starts a stdio server,
+# which sees EOF immediately unless `-i` is passed and exits — that exit is the symptom
+# of a missing transport flag, not a crash.
 #
 # Unlike a bare `pip install`, this image also carries the EXTERNAL CLIs that four of the
 # served tools shell out to, so the whole advertised toolset works out of the box:
@@ -107,5 +114,14 @@ importlib.import_module('pysam.bcftools'); \
 print('htslib', pysam.__samtools_version__)"
 
 # Everything is one command: start the MCP server with `legumista mcp` (stdio by default).
-# Extra args (e.g. --http, --allow-write) pass straight through.
+# Extra args (e.g. -t http, --allow-write) pass straight through.
+# Documents the HTTP port; publish it with -p. Deliberately no HEALTHCHECK: the
+# default transport is stdio, which serves no HTTP endpoint, so a baked-in probe
+# would mark every stdio container unhealthy. For a long-running HTTP server pass
+# one at run time instead:
+#   --health-cmd 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/mcp
+#                  | grep -qE "^(200|400|406)$"'
+# (a live MCP endpoint answers a bare GET with 400/406; a dead one refuses.)
+EXPOSE 8000
+
 ENTRYPOINT ["legumista", "mcp"]

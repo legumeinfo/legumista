@@ -280,6 +280,18 @@ external services:
   rather than retrieve**: the URLs they return are read by the bioinformatics tools above,
   and the DOIs by `openalex_by_doi`/`read_paper`. Read-only, no disk state; base URL
   overridable with `LEGUMISTA_LIS_BASE_URL`.
+- **LIS InterMine tools (`legumista_agent/tools_mine.py`)** — narrow, per-question
+  PathQuery tools over a LIS mine: `legumemine_gene_proteins`, `legumemine_gene_families`,
+  `legumemine_gene_ontology`, `legumemine_gene_expression`, `legumemine_gene_symbol`
+  (symbol -> gene id + DOIs), `legumemine_gene_orthologs` (family members across species),
+  plus three breeding tools that route on `taxon` because QTL/GWAS/marker data exists only
+  in the per-species mines: `lis_trait_qtls`, `lis_trait_gwas`, `lis_marker_position`.
+  One tool per biologist
+  question rather than a general query builder, so InterMine's sharp edges are handled
+  once: identifier ambiguity (via `LOOKUP`), one gene name matching several assemblies,
+  result capping with a true total, and — most importantly — InterMine reporting failure
+  as HTTP 200 with `results: []` and the reason in `wasSuccessful`/`error`. Mine is
+  selectable per call and via `LEGUMISTA_LIS_MINE`.
 - **`legumista_agent/mcp_client.py`** — *optional*: any MCP servers in
   [`.mcp.json`](.mcp.json) are discovered via the MCP SDK (bundled with FastMCP) and added
   alongside the native tools (`mcp__<server>__<tool>`).

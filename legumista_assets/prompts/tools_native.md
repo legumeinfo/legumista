@@ -240,6 +240,55 @@ name as the region returns one protein without downloading the file.
 
 ---
 
+## LIS InterMine (`legumemine_gene_*`) — curated relationships for a gene
+
+Where the Data Store serves files, a LIS mine serves curated relationships. Four
+per-question tools, all taking `{gene}` (any identifier form — they use InterMine's
+LOOKUP, so `Glyma.12G040000` and the qualified `glyma.Wm82.gnm4.ann1.Glyma.12G040000`
+both work):
+
+- **`legumemine_gene_proteins`** — the protein(s) a gene encodes, with length and weight.
+  For the actual *sequence*, use `lis_gene` + `fasta_fetch` against the Data Store.
+- **`legumemine_gene_families`** — gene family assignments (`Legume.fam3.10524`) with
+  family size. The **only** route to this data: the Data Store ships family assignments as
+  an unindexed `.gfa.tsv.gz` that no tool can read.
+- **`legumemine_gene_ontology`** — GO and other ontology terms for the gene.
+- **`legumemine_gene_expression`** — expression values across samples, highest first.
+
+Two more, for the questions breeders ask:
+
+- **`legumemine_gene_symbol`** — a gene SYMBOL (`GmNARK`, `PvSYMRK`) to its identifier,
+  full name, functional synopsis and the DOIs behind the claim. **Start here whenever you
+  have a symbol rather than an ID** — `lis_gene` and the other mine tools match
+  identifiers only. Case-insensitive.
+- **`legumemine_gene_orthologs`** — a gene's counterparts in other legumes via its gene
+  family ("does my crop have this gene?"). Pass `gene` and the family is resolved first.
+
+And three that need a **species**, because QTL/GWAS/marker data lives ONLY in the
+per-species mines — the pan-legume mine has none of it. All take `taxon`:
+
+- **`lis_trait_qtls`** — QTLs mapped for a trait, with linkage group, LOD and the study.
+- **`lis_trait_gwas`** — GWAS associations for a trait, most significant first. The study
+  identifiers match the Data Store's `gwas/` collections exactly, so `lis_files` can serve
+  the underlying data for any hit.
+- **`lis_marker_position`** — a marker's physical position on every assembly carrying it.
+  Report the coordinate for the assembly the user is working on; they differ between
+  gnm1/gnm2/gnm4 for the same marker.
+
+Three things to respect in the results:
+
+1. **A bare gene name matches several assemblies.** `Glyma.12G040000` exists in gnm2, gnm4
+   and gnm6 — *different loci*. When the output says "matched N assemblies", do not mix
+   the rows; re-run with `assembly` (e.g. `gnm4`) to pick one.
+2. **Results are capped.** One gene can carry 639 expression values. When the output says
+   "N of M", you have seen N — say so, and raise `max_results` if you need more.
+3. **Read the error, don't infer absence.** These tools distinguish "no matches (the query
+   was valid)" from "the mine rejected the query" from "the mine's query service is
+   failing". Only the first means the gene lacks that data; the others mean retry
+   differently or switch `mine`.
+
+---
+
 ## Optional MCP tools
 
 If the researcher has configured MCP servers in `.mcp.json`, those servers' tools appear

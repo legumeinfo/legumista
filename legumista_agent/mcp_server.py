@@ -63,6 +63,7 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     import config
     from .tools_lis import lis_tools
     from .tools_local import local_read_tools
+    from .tools_mine import mine_tools
     from .tools_native import native_tools
     from .tools_pysam import bio_tools
 
@@ -78,7 +79,7 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     server = FastMCP(name=name, instructions=instructions)
 
     _HANDLERS.clear()
-    for tool in (local_read_tools() + native_tools() + lis_tools()
+    for tool in (local_read_tools() + native_tools() + lis_tools() + mine_tools()
                  + bio_tools(allow_write=allow_write)):
         _HANDLERS[tool.name] = tool.run
         server.add_tool(Bridge(
