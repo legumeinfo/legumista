@@ -36,8 +36,11 @@ def _normalize_params(schema: dict) -> dict:
 
 def _make_bridge_class():
     """Build the FastMCP Tool subclass lazily (needs fastmcp imported first)."""
-    from fastmcp.tools import Tool as FastMCPTool
-    from fastmcp.tools.tool import ToolResult
+    # Import both from the `fastmcp.tools` package root, not `fastmcp.tools.tool`:
+    # fastmcp 4.0 removed that submodule, and the package root exports both names on
+    # 3.x and 4.x alike. The dependency is floor-pinned (fastmcp>=2.9), so a fresh
+    # install picks up whatever is current — this import must not care which.
+    from fastmcp.tools import Tool as FastMCPTool, ToolResult
     from mcp.types import TextContent
 
     class _BridgeTool(FastMCPTool):

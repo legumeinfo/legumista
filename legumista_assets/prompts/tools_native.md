@@ -225,12 +225,19 @@ bioinformatics tools above then read. Work through them in order:
    also lists files that are **not** indexed — notably the `.gfa.tsv.gz` gene-family
    assignments and the `info_*.txt.gz` tables. Those cannot be read at all through this
    toolset; say so rather than attempting them.
-3. **`lis_gene`** — an exact gene or mRNA ID (`Glyma.12G040000`, or fully qualified
-   `glyma.Wm82.gnm4.ann1.Glyma.12G040000`) to its locus plus ready-made `fasta_fetch` and
-   `tabix_query` calls. **Exact IDs only** — gene symbols like `GmNARK` are not resolved;
-   if you have a symbol, find the ID first (the curated
-   `<abbrev>.traits.yml` under a species' `gene_functions/` maps symbols to IDs and DOIs,
-   readable with `web_fetch`).
+3. **`lis_gene`** — a gene to its locus plus ready-made `fasta_fetch` and `tabix_query`
+   calls. It accepts, in this order of precedence: an exact ID (`Glyma.12G040000`, or
+   fully qualified `glyma.Wm82.gnm4.ann1.Glyma.12G040000`); a **curated symbol**
+   (`GmNARK`), resolved through `gene_functions/<abbrev>.traits.yml`, which also returns
+   that gene's own publication DOI; or a **superseded ID** (`Glyma01g00210`), resolved
+   through the collection's synonym file. The reply states which route answered, so a
+   curated-symbol hit is never mistaken for an exact one.
+
+   Both alias sources are narrow — traits files exist for Glycine/Phaseolus/Medicago/Lotus
+   but not Vigna/Cicer/Arachis, and synonym files for only a couple of collections per
+   species — so a miss reports which sources were consulted. Critically, an ID from a
+   **different assembly** (an `A17.gnm5` name against a `gnm4` annotation) is not a
+   synonym and cannot resolve here; pick the matching collection with `lis_find` instead.
 
 Two things follow from the store's design and are worth exploiting. Every collection
 carries a `publication_doi` **by specification**, so any dataset you read can be traced to

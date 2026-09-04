@@ -43,10 +43,12 @@ import io
 import os
 import re
 import threading
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from .tool import Tool
-from .tools_native import BlockedURLError, MAX_CHARS, _cap, _get, _get_bytes, _validate_url
+from .tools_native import (BlockedURLError, HTTP_TIMEOUT, MAX_CHARS, _cap, _get,
+                           _get_bytes, _validate_url)
 
 BASE_URL = os.environ.get("LEGUMISTA_LIS_BASE_URL", "https://data.legumeinfo.org").rstrip("/")
 MAX_RESULTS = int(os.environ.get("LEGUMISTA_LIS_MAX_RESULTS", "10"))
@@ -156,6 +158,85 @@ def _checksum_files(coll_path: str, identifier: str):
     return names
 
 
+# Only CHECKSUM enumerates the index siblings. h5ai filters .fai/.tbi/.gzi out of BOTH
+# the HTML index and its JSON API (verified: 24 files listed either way vs 46 in CHECKSUM,
+# and zero occurrences of those extensions anywhere in the page), and MANIFEST describes
+# data files rather than their indexes. So when a collection ships no CHECKSUM — every
+# qtl/ and gwas/ collection checked lacks one — there is no listing anywhere that answers
+# "is this file indexed?", and the only way to find out is to ask the server about each
+# candidate URL. Probing runs on the fallback path only, and the collections that need it
+# are the small ones (a QTL collection holds ~4 files), so the cost stays bounded.
+_PROBE_SUFFIXES = tuple(_ACCESS_BY_INDEX)
+MAX_PROBES = int(os.environ.get("LEGUMISTA_LIS_MAX_PROBES", "200"))
+
+# A file's own type decides which index siblings are even possible, so the listing tells
+# us what is worth asking about: htslib pairs .fai with FASTA, .bai/.csi with BAM, .crai
+# with CRAM, and .tbi/.csi with any bgzipped tabbed file. Probing a .tsv.gz for a .bai is
+# a guaranteed 404. Order matters — the specific compressed types must be tested before
+# the generic ".gz" tabbed group.
+#
+# This narrows the probe set; it does NOT replace probing. Inferring presence from type
+# alone would be wrong here: every qtl/ and gwas/ .tsv.gz on the live store has no index
+# at all (.tbi/.csi/.fai all 404), so assuming one would mark the entire QTL corpus
+# randomly accessible when none of it is.
+_PLAUSIBLE_INDEXES = (
+    ((".fa", ".fa.gz", ".fasta", ".fasta.gz", ".fna", ".fna.gz",
+      ".faa", ".faa.gz"), (".fai",)),
+    ((".bam",), (".bai", ".csi")),
+    ((".cram",), (".crai",)),
+    ((".vcf.gz", ".bcf"), (".tbi", ".csi")),
+    ((".gff.gz", ".gff3.gz", ".gtf.gz", ".bed.gz", ".sam.gz",
+      ".tsv.gz", ".txt.gz"), (".tbi", ".csi")),
+)
+
+
+def _plausible_index_suffixes(name: str):
+    """Index suffixes worth probing for this file. An unrecognized type falls back to the
+    full set rather than silently skipping a file that turns out to be indexed — the cost
+    of a wrong guess here is mislabelling streamable data as unreadable."""
+    low = name.lower()
+    for extensions, indexes in _PLAUSIBLE_INDEXES:
+        if low.endswith(extensions):
+            return indexes
+    return _PROBE_SUFFIXES
+_UA = "legumista-agent/1.0 (research)"
+
+
+def _url_exists(url: str) -> bool:
+    """HEAD one datastore URL. Used only to recover index status on the fallback path."""
+    def produce():
+        try:
+            _validate_url(url)
+            req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return 200 <= getattr(resp, "status", 200) < 300
+        except Exception:  # noqa: BLE001 - a 404 (or any failure) means "no index"
+            return False
+    return _cached(f"head:{url}", produce)
+
+
+def _collection_files(coll_path: str, identifier: str):
+    """The collection's file list plus where it came from: ('checksum'|'probe'|'none').
+
+    CHECKSUM is preferred — it is authoritative and free. Falling back to the directory
+    listing recovers the data files but silently loses every index sibling, which would
+    make `lis_files` report a streamable file as unreadable; probing restores that on
+    evidence rather than assumption."""
+    names = _checksum_files(coll_path, identifier)
+    if names:
+        return names, "checksum"
+    _dirs, files = _list_dir(coll_path)
+    if not files:
+        return [], "none"
+    data = [f for f in files
+            if not f.startswith(("README.", "MANIFEST.", "CHANGES.", "CHECKSUM."))]
+    probes = [f + suffix
+              for f in data for suffix in _plausible_index_suffixes(f)][:MAX_PROBES]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        found = list(pool.map(lambda n: _url_exists(_url(coll_path, n)), probes))
+    return files + [n for n, ok in zip(probes, found) if ok], "probe"
+
+
 def _manifest_map(coll_path: str, identifier: str) -> dict:
     """MANIFEST files are a YAML *list* of {name, description} - safe_load_all yields the
     list as one document, so flatten whichever shape we get."""
@@ -214,8 +295,8 @@ def _find(args) -> str:
     if not genus:
         genera, _ = _list_dir("")
         genera = [g for g in genera if g[:1].isupper()]
-        return ("LIS Data Store genera (pass one as 'genus', or a full 'taxon' like "
-                f"'Glycine max'):\n  " + ", ".join(genera))
+        return (f"{len(genera)} genera in the LIS Data Store (pass one as 'genus', or a "
+                f"full 'taxon' like 'Glycine max'):\n  " + ", ".join(genera))
 
     if not species:
         specs, _ = _list_dir(genus)
@@ -294,10 +375,11 @@ def _files(args) -> str:
     path, identifier = _normalize_collection(args.get("collection"))
     if path is None:
         return identifier
-    names = _checksum_files(path, identifier)
+    names, source = _collection_files(path, identifier)
     if not names:
-        return (f"error: no CHECKSUM.{identifier}.md5 under {path} — check the path "
-                "(lis_find prints exact paths).")
+        return (f"error: could not list {path} — it publishes no "
+                f"CHECKSUM.{identifier}.md5 and its directory listing is empty. Check "
+                "the path (lis_find prints exact paths).")
     present = set(names)
     manifest = _manifest_map(path, identifier)
     rm = _readme(path, identifier)
@@ -313,6 +395,10 @@ def _files(args) -> str:
     if rm.get("publication_doi"):
         head.append(f"publication_doi: {rm['publication_doi']}   -> openalex_by_doi / read_paper")
     head.append(f"{len(data)} data file(s); base URL {_url(path)}/")
+    if source == "probe":
+        head.append(f"file list: directory listing — {identifier} publishes no CHECKSUM, "
+                    "so index status below was determined by probing each candidate URL, "
+                    "not read from a manifest.")
 
     addressable, plain = [], []
     for name in sorted(data):
@@ -329,7 +415,9 @@ def _files(args) -> str:
         lines.append(f"      via {tool}: {how}")
         lines.append(f"      url {_url(path, name)}")
     lines.append("")
-    lines.append(f"NOT INDEXED ({len(plain)}) — no .fai/.tbi published, so these cannot be "
+    evidence = ("no .fai/.tbi sibling found when probed" if source == "probe"
+                else "no .fai/.tbi published")
+    lines.append(f"NOT INDEXED ({len(plain)}) — {evidence}, so these cannot be "
                  "region-queried or read through this toolset; they are whole-file "
                  "downloads only:")
     for name, _t, _h, desc in plain:
@@ -378,6 +466,104 @@ def _bed_url(path: str, identifier: str, names) -> str:
     return ""
 
 
+# --- alias resolution: symbols and superseded IDs -------------------------------------
+# Two independent sources, both optional and both narrow — report which one answered so an
+# agent never mistakes a curated symbol hit for an exact-ID hit.
+#
+#   symbols  gene_functions/<abbrev>.traits.yml — curated, carries the gene's DOI too.
+#            Published for Glycine, Phaseolus, Medicago, Lotus; NOT for Vigna/Cicer/Arachis.
+#   synonyms <collection>.synonym.txt.gz or .info_synonyms.txt.gz — "current \t superseded",
+#            e.g. Glyma.01G000100.1 <- Glyma01g00210. Rare: 2 of 55 Glycine annotation
+#            collections, 1 of 5 Phaseolus, 0 of 19 Medicago.
+#
+# Note what this deliberately does NOT do: a name from a DIFFERENT assembly (A17 gnm5's
+# MtrunA17_Chr1g* vs gnm4's Medtr*) is not a synonym but a cross-assembly mapping, and no
+# store file expresses it. Such a lookup fails, and the message says so rather than
+# implying the gene is absent.
+_SYNONYM_SUFFIXES = (".synonym.txt.gz", ".info_synonyms.txt.gz")
+
+
+def _traits_symbols(genus: str, species: str, abbrev: str) -> dict:
+    """Lowercased gene symbol -> [(full_gene_id, synopsis, doi)] from the curated file."""
+    def produce():
+        text = _fetch_text(_url(genus, species, "gene_functions", f"{abbrev}.traits.yml"))
+        index: dict = {}
+        for doc in _yaml_docs(text):
+            gid = (doc.get("gene_model_full_id") or "").strip()
+            if not gid:
+                continue
+            refs = [r.get("doi") for r in (doc.get("references") or [])
+                    if isinstance(r, dict) and r.get("doi")]
+            entry = (gid, (doc.get("phenotype_synopsis") or "").strip(),
+                     refs[0] if refs else "")
+            for sym in (doc.get("gene_symbols") or []):
+                index.setdefault(str(sym).strip().lower(), []).append(entry)
+        return index
+    return _cached(f"traits:{genus}/{species}", produce)
+
+
+def _synonyms(coll_path: str, names) -> dict:
+    """Lowercased superseded ID -> current ID, from whichever synonym file exists."""
+    hit = next((n for n in names if n.endswith(_SYNONYM_SUFFIXES)), None)
+    if not hit:
+        return {}
+
+    def produce():
+        url = _url(coll_path, hit)
+        try:
+            _validate_url(url)
+            raw = _get_bytes(url, BED_MAX_BYTES)
+            text = gzip.GzipFile(fileobj=io.BytesIO(raw)).read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - an unreadable synonym file is not fatal
+            return {}
+        index: dict = {}
+        for line in text.splitlines():
+            if line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            current, old = parts[0].strip(), parts[1].strip()
+            if current and old:
+                index.setdefault(old.lower(), current)
+        return index
+    return _cached(f"syn:{coll_path}", produce)
+
+
+def _alias_candidates(gene: str, path: str, names):
+    """Yield (candidate_id, how_it_was_found) for a query that matched nothing exactly."""
+    parts = path.split("/")
+    if len(parts) >= 2:
+        genus, species = parts[0], parts[1]
+        abbrev = (genus[:3] + species[:2]).lower()
+        for gid, synopsis, doi in _traits_symbols(genus, species, abbrev).get(gene.lower(), []):
+            note = f"curated symbol {gene!r} in {abbrev}.traits.yml"
+            if doi:
+                note += f" (publication_doi: {doi})"
+            if synopsis:
+                note += f"\n  synopsis: {synopsis}"
+            yield gid, note
+    current = _synonyms(path, names).get(gene.lower())
+    if current:
+        yield current, f"superseded ID {gene!r} -> {current} via the collection's synonym file"
+
+
+def _bed_hits(bed: str, gene: str):
+    """Rows whose mRNA (col 4) or gene (col 7) field equals `gene`, prefixed or not.
+    Exact only: a substring match would return Glyma.12G0400001 for Glyma.12G040000."""
+    hits = []
+    for line in bed.splitlines():
+        f = line.split("\t")
+        if len(f) < 6:
+            continue
+        mrna, geneid = f[3], (f[6] if len(f) > 6 else "")
+        cands = {mrna, geneid}
+        cands |= {_GENE_PREFIX_RE.sub("", c) for c in (mrna, geneid) if c}
+        if gene in cands:
+            hits.append((f[0], int(f[1]) + 1, int(f[2]), f[5], mrna, geneid))
+    return hits
+
+
 def _gene(args) -> str:
     gene = (args.get("gene") or "").strip()
     if not gene:
@@ -386,9 +572,10 @@ def _gene(args) -> str:
     if path is None:
         return identifier
 
-    names = _checksum_files(path, identifier)
+    names, _source = _collection_files(path, identifier)
     if not names:
-        return f"error: no CHECKSUM.{identifier}.md5 under {path} — check the collection."
+        return (f"error: could not list {path} — no CHECKSUM.{identifier}.md5 and an "
+                "empty directory listing. Check the collection.")
     bed_url = _bed_url(path, identifier, names)
     if not bed_url:
         return (f"error: {identifier} publishes no gene_models_main.bed.gz, so gene "
@@ -405,30 +592,36 @@ def _gene(args) -> str:
     if bed.startswith("\x00"):
         return f"error: could not read {os.path.basename(bed_url)}: {bed[1:]}"
 
-    # Exact-ID matching only: the ID must equal the mRNA (col 4) or gene (col 7) field, or
-    # the same with the collection prefix stripped. Substring matching would silently
-    # return Glyma.12G0400001 for Glyma.12G040000.
-    hits = []
-    for line in bed.splitlines():
-        f = line.split("\t")
-        if len(f) < 6:
-            continue
-        mrna, geneid = f[3], (f[6] if len(f) > 6 else "")
-        cands = {mrna, geneid}
-        cands |= {_GENE_PREFIX_RE.sub("", c) for c in (mrna, geneid) if c}
-        if gene in cands:
-            hits.append((f[0], int(f[1]) + 1, int(f[2]), f[5], mrna, geneid))
+    # Exact ID first; only if that misses do we consult the alias sources, so a direct
+    # hit is never shadowed by a curated symbol that happens to collide.
+    label, provenance = gene, ""
+    hits = _bed_hits(bed, gene)
     if not hits:
-        return (f"no exact match for {gene!r} in {identifier}. This tool matches exact "
-                "gene/mRNA IDs only (symbols like 'GmNARK' are not resolved yet) — check "
-                "the ID, or try the unprefixed form (e.g. 'Glyma.12G040000').")
+        for candidate, note in _alias_candidates(gene, path, names):
+            found = _bed_hits(bed, candidate)
+            if found:
+                hits, label, provenance = found, candidate, note
+                break
+    if not hits:
+        tried = ["exact gene/mRNA ID"]
+        parts = path.split("/")
+        abbrev = (parts[0][:3] + parts[1][:2]).lower() if len(parts) >= 2 else ""
+        if _traits_symbols(parts[0], parts[1], abbrev) if len(parts) >= 2 else False:
+            tried.append(f"curated symbols ({abbrev}.traits.yml)")
+        if _synonyms(path, names):
+            tried.append("the collection's synonym file")
+        return (f"no match for {gene!r} in {identifier}. Consulted: {', '.join(tried)}. "
+                "Note a name from a different assembly (e.g. an A17.gnm5 ID against a "
+                "gnm4 annotation) is not a synonym and cannot be resolved here — use "
+                "lis_find to pick the matching annotation collection.")
 
     contig, start, end, strand = hits[0][0], min(h[1] for h in hits), max(h[2] for h in hits), hits[0][3]
     seq_names = sorted({h[4] for h in hits})
     # Bounds come from gene_models_main.bed, which lists mRNA rows; they can sit just
     # inside the GFF's `gene` feature. Say so rather than implying an exact gene extent —
     # the GFF call below is the authority on feature boundaries.
-    lines = [f"{gene} in {identifier}",
+    lines = [f"{label} in {identifier}"
+             + (f"\n  resolved from: {provenance}" if provenance else ""),
              f"  locus:  {contig}:{start:,}-{end:,} ({strand})   "
              f"[mRNA extent from gene_models_main.bed; "
              f"{len(hits)} model(s): {', '.join(seq_names)}]",
@@ -494,10 +687,14 @@ def lis_tools() -> list:
                                                           "<collection>', or a full URL under the store."}},
              "required": ["collection"], "additionalProperties": False}, _files),
         _mk("lis_gene",
-            "Look up an exact gene or mRNA ID in a LIS annotation and return its locus "
+            "Look up a gene in a LIS annotation and return its locus "
             "plus ready-to-use calls for its protein/CDS sequence and gene models. Bridges "
-            "the gap that tabix_query needs coordinates, not names. Exact IDs only "
-            "(e.g. 'Glyma.12G040000'); gene symbols like 'GmNARK' are not resolved. "
+            "the gap that tabix_query needs coordinates, not names. Accepts an exact ID "
+            "('Glyma.12G040000'), a curated gene symbol ('GmNARK', where the species "
+            "publishes gene_functions/<abbrev>.traits.yml), or a superseded ID "
+            "('Glyma01g00210', where the collection publishes a synonym file); the reply "
+            "says which route resolved it. A name from a DIFFERENT assembly is not a "
+            "synonym and will not resolve — use lis_find to pick the right collection. "
             "Args: {gene, collection?} — collection may be omitted if the ID is fully "
             "qualified ('glyma.Wm82.gnm4.ann1.Glyma.12G040000').",
             {"type": "object",
