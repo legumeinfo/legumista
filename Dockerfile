@@ -23,6 +23,18 @@
 #
 # samtools/bcftools need no system package: pysam's manylinux wheels bundle htslib and
 # both command suites, so the genomics tools install without a C toolchain.
+#
+# The lis_* tools read a CATALOG rather than crawling data.legumeinfo.org, which needs
+# two things this image does NOT bake in:
+#
+#   1. the `dscensor` package, for its CatalogController. It is not on PyPI yet, so it
+#      is cloned below. LIS-autocontent is NOT needed here -- it BUILDS catalogs (in CI
+#      or by hand) and the server only ever reads the JSON it produces.
+#   2. a catalog.json, mounted at run time. Deliberately not baked in: the whole point
+#      of the split is that a metadata refresh should not require rebuilding the image.
+#
+#   docker run --rm -i -v /path/to/catalog.json:/catalog.json:ro \
+#       -e LEGUMISTA_LIS_CATALOG=/catalog.json legumista
 FROM python:3.12-slim
 
 LABEL io.modelcontextprotocol.server.name="io.github.legumeinfo/legumista"
@@ -85,6 +97,36 @@ RUN set -eux; \
     esearch -help >/dev/null; \
     echo '<a><b>ok</b></a>' | xtract -pattern a -element b
 
+# --- DSCensor (catalog data structures, not its HTTP server) -------------------------
+# OPTIONAL, matching how legumista treats it in code. Leave DSCENSOR_REF empty (the
+# default) and the image builds with the catalog tools dormant; they then report how to
+# enable themselves and nothing else is affected. Set it to bake DSCensor in:
+#
+#   docker build --build-arg DSCENSOR_REF=main -t legumista .
+#
+# `dscensor` declares aiohttp/aiohttp-cors/uvloop for the server half we do not use, so
+# rather than `pip install` it we put the source on the path -- dscensor.catalog is pure
+# stdlib at import time, so none of those are pulled in. Replace this whole stanza with a
+# plain `pip install dscensor` once it is published to PyPI.
+#
+# NOTE: LIS-autocontent is deliberately NOT installed here. It *builds* catalogs, which
+# happens in CI or by hand; this server only ever reads the catalog.json it produces.
+ARG DSCENSOR_REPO=https://github.com/legumeinfo/microservices.git
+ARG DSCENSOR_REF=
+ENV LEGUMISTA_DSCENSOR_PATH=/opt/dscensor
+RUN set -eux; \
+    if [ -z "$DSCENSOR_REF" ]; then \
+      echo "DSCENSOR_REF unset - building without DSCensor; catalog tools stay dormant"; \
+    else \
+      apt-get update && apt-get install -y --no-install-recommends git; \
+      rm -rf /var/lib/apt/lists/*; \
+      git clone --depth 1 --branch "$DSCENSOR_REF" "$DSCENSOR_REPO" /tmp/microservices; \
+      mv /tmp/microservices/dscensor "$LEGUMISTA_DSCENSOR_PATH"; \
+      rm -rf /tmp/microservices; \
+      test -f "$LEGUMISTA_DSCENSOR_PATH/dscensor/catalog.py" \
+        || { echo "ERROR: $DSCENSOR_REF has no dscensor/catalog.py - point DSCENSOR_REF at a ref carrying the catalog work" >&2; exit 1; }; \
+    fi
+
 WORKDIR /src
 COPY . /src
 RUN pip install --no-cache-dir .
@@ -114,7 +156,13 @@ print('external CLIs OK')"; \
     python -c "\
 import pysam, importlib; \
 importlib.import_module('pysam.bcftools'); \
-print('htslib', pysam.__samtools_version__)"
+print('htslib', pysam.__samtools_version__)"; \
+    if [ -d "$LEGUMISTA_DSCENSOR_PATH" ]; then \
+      python -c "\
+import sys, os; sys.path.insert(0, os.environ['LEGUMISTA_DSCENSOR_PATH']); \
+from dscensor.catalog import CatalogController; \
+print('dscensor CatalogController importable')"; \
+    else echo 'dscensor not bundled (DSCENSOR_REF unset)'; fi
 
 # Everything is one command: start the MCP server with `legumista mcp` (stdio by default).
 # Extra args (e.g. -t http, --allow-write) pass straight through.

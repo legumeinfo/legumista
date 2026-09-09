@@ -207,92 +207,60 @@ confined to the project workspace.
 
 ---
 
-## LIS Data Store (`lis_find`, `lis_files`, `lis_gene`) — legume genomics data
+## LIS Data Store (`lis_find`, `lis_files`, `lis_gene`, `lis_survey`, `lis_lineage`)
 
-For legume data specifically, the LIS Data Store (https://data.legumeinfo.org) publishes
-genomes, annotations, diversity panels, GWAS and more for ~21 genera. These three tools
-**resolve; they do not retrieve** — they hand you URLs and region strings that the
-bioinformatics tools above then read. Work through them in order:
+Legume genomes, annotations, diversity panels, GWAS and more, for ~21 genera. All five
+tools read a **resident catalog** — the whole datastore in one document, held in memory —
+so they answer instantly and make no network requests. They **resolve; they do not
+retrieve**: they hand you URLs and region strings that the bioinformatics tools above
+then read.
 
-1. **`lis_find`** — discovery. No arguments lists the genera; `{taxon:"Glycine max"}` lists
-   that species' data types; `{taxon, type:"annotations"}` lists collections with their
-   synopsis, genotype and **`publication_doi`**. Always start here: a collection name ends
-   in an arbitrary four-character key (`Wm82.gnm4.ann1.T8TQ`) that you cannot guess or
-   construct. Narrow long lists with `query` (e.g. `"Wm82.gnm4"`).
-2. **`lis_files`** — given a collection path, which files are **randomly accessible** and
-   how. The store's directory listing hides the `.fai`/`.tbi` index siblings, so this is
-   the only way to know a 286 MB genome can be region-queried without downloading it. It
-   also lists files that are **not** indexed — notably the `.gfa.tsv.gz` gene-family
-   assignments and the `info_*.txt.gz` tables. Those cannot be read at all through this
-   toolset; say so rather than attempting them.
-3. **`lis_gene`** — a gene to its locus plus ready-made `fasta_fetch` and `tabix_query`
-   calls. It accepts, in this order of precedence: an exact ID (`Glyma.12G040000`, or
-   fully qualified `glyma.Wm82.gnm4.ann1.Glyma.12G040000`); a **curated symbol**
-   (`GmNARK`), resolved through `gene_functions/<abbrev>.traits.yml`, which also returns
-   that gene's own publication DOI; or a **superseded ID** (`Glyma01g00210`), resolved
-   through the collection's synonym file. The reply states which route answered, so a
-   curated-symbol hit is never mistaken for an exact one.
+1. **`lis_find`** — discovery. No arguments lists the genera; `{taxon:"Glycine max"}`
+   lists that species' data types; `{taxon, type:"annotations"}` lists collections with
+   their synopsis, genotype and **`publication_doi`**. Always start here: a collection
+   name ends in an arbitrary four-character key (`Wm82.gnm4.ann1.T8TQ`) you cannot guess.
+2. **`lis_files`** — which of a collection's files are **randomly accessible**, and how.
+   Read the provenance line before trusting a path. A file list is either authoritative
+   (from the collection's published CHECKSUM), **CONFIRMED** (built from the datastore's
+   filename convention and checked to exist), or **PREDICTED** (built from that
+   convention and *not* checked — a listed file may 404). A collection with neither
+   reports **FILE LIST UNAVAILABLE**, which means the metadata is missing, not that the
+   collection is empty. Within a list, **NOT INDEXED** means no `.fai`/`.tbi` is
+   published, so the file is a whole-file download rather than region-queryable.
+3. **`lis_gene`** — a gene to its locus plus ready-made `fasta_fetch`/`tabix_query`
+   calls. Accepts an exact ID (`Glyma.12G040000`), a **curated symbol** (`GmNARK`), or a
+   **superseded ID** (`Glyma01g00210`); the reply says which route answered. An ID from a
+   *different assembly* is not a synonym and will not resolve — use `lis_find` to pick the
+   matching collection.
+4. **`lis_survey`** — coverage across the whole store: genera and counts, the data types
+   a species has, or with `needs` which species hold several types **at once**. Reach for
+   this when the question is about **coverage or absence** — "which species lack
+   expression data" has no link to follow and is answerable only from a complete catalog.
+   A zero here is a finding, not a failed lookup.
+5. **`lis_synteny`** — syntenic blocks and whole-genome alignments between assemblies.
+   With just `{genome}` or `{gene}` it lists every partner, **including pairs stored under
+   the other genome's collection** — a pairwise file lives under whichever genome is the
+   reference, so a genome with no collection of its own still has partners. Add
+   `{partner}` and optionally `{region}` (A-side, samtools-style) for the blocks, with
+   score and `median_Ks`. Do not turn Ks into a confidence tier: it scales with lineage
+   divergence, so a cutoff meaningful for one pair is wrong for another.
 
-   Both alias sources are narrow — traits files exist for Glycine/Phaseolus/Medicago/Lotus
-   but not Vigna/Cicer/Arachis, and synonym files for only a couple of collections per
-   species — so a miss reports which sources were consulted. Critically, an ID from a
-   **different assembly** (an `A17.gnm5` name against a `gnm4` annotation) is not a
-   synonym and cannot resolve here; pick the matching collection with `lis_find` instead.
+   Synteny is published for **one, usually old, assembly per species** — soybean has it on
+   `Wm82.gnm2`, not the `gnm4` that `lis_gene` uses. Asking about an assembly without it
+   returns the one that has it; follow that rather than concluding there is no synteny.
+
+6. **`lis_lineage`** — what a collection was derived from, and every publication the
+   result depends on, de-duplicated. "Cite everything this rests on" in one call.
+
+Every reply carries the catalog's build date and source commit. A catalog is a snapshot:
+if the stamp looks old, say so rather than presenting it as current. If no catalog is
+configured, all five report that and explain how to enable one.
 
 Two things follow from the store's design and are worth exploiting. Every collection
-carries a `publication_doi` **by specification**, so any dataset you read can be traced to
-its paper with `openalex_by_doi` / `read_paper` — do that when the provenance matters.
-And the protein/CDS FASTAs are indexed **by gene ID**, so `fasta_fetch` with the sequence
-name as the region returns one protein without downloading the file.
-
----
-
-## LIS InterMine (`legumemine_gene_*`) — curated relationships for a gene
-
-Where the Data Store serves files, a LIS mine serves curated relationships. Four
-per-question tools, all taking `{gene}` (any identifier form — they use InterMine's
-LOOKUP, so `Glyma.12G040000` and the qualified `glyma.Wm82.gnm4.ann1.Glyma.12G040000`
-both work):
-
-- **`legumemine_gene_proteins`** — the protein(s) a gene encodes, with length and weight.
-  For the actual *sequence*, use `lis_gene` + `fasta_fetch` against the Data Store.
-- **`legumemine_gene_families`** — gene family assignments (`Legume.fam3.10524`) with
-  family size. The **only** route to this data: the Data Store ships family assignments as
-  an unindexed `.gfa.tsv.gz` that no tool can read.
-- **`legumemine_gene_ontology`** — GO and other ontology terms for the gene.
-- **`legumemine_gene_expression`** — expression values across samples, highest first.
-
-Two more, for the questions breeders ask:
-
-- **`legumemine_gene_symbol`** — a gene SYMBOL (`GmNARK`, `PvSYMRK`) to its identifier,
-  full name, functional synopsis and the DOIs behind the claim. **Start here whenever you
-  have a symbol rather than an ID** — `lis_gene` and the other mine tools match
-  identifiers only. Case-insensitive.
-- **`legumemine_gene_orthologs`** — a gene's counterparts in other legumes via its gene
-  family ("does my crop have this gene?"). Pass `gene` and the family is resolved first.
-
-And three that need a **species**, because QTL/GWAS/marker data lives ONLY in the
-per-species mines — the pan-legume mine has none of it. All take `taxon`:
-
-- **`lis_trait_qtls`** — QTLs mapped for a trait, with linkage group, LOD and the study.
-- **`lis_trait_gwas`** — GWAS associations for a trait, most significant first. The study
-  identifiers match the Data Store's `gwas/` collections exactly, so `lis_files` can serve
-  the underlying data for any hit.
-- **`lis_marker_position`** — a marker's physical position on every assembly carrying it.
-  Report the coordinate for the assembly the user is working on; they differ between
-  gnm1/gnm2/gnm4 for the same marker.
-
-Three things to respect in the results:
-
-1. **A bare gene name matches several assemblies.** `Glyma.12G040000` exists in gnm2, gnm4
-   and gnm6 — *different loci*. When the output says "matched N assemblies", do not mix
-   the rows; re-run with `assembly` (e.g. `gnm4`) to pick one.
-2. **Results are capped.** One gene can carry 639 expression values. When the output says
-   "N of M", you have seen N — say so, and raise `max_results` if you need more.
-3. **Read the error, don't infer absence.** These tools distinguish "no matches (the query
-   was valid)" from "the mine rejected the query" from "the mine's query service is
-   failing". Only the first means the gene lacks that data; the others mean retry
-   differently or switch `mine`.
+carries a `publication_doi` **by specification**, so any dataset can be traced to its
+paper with `openalex_by_doi`/`read_paper`. And the protein/CDS FASTAs are indexed **by
+gene ID**, so `fasta_fetch` with the sequence name as the region returns one protein
+without downloading the file.
 
 ---
 

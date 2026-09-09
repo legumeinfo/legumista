@@ -271,15 +271,29 @@ external services:
   regions are samtools-style (1-based inclusive). **Read operations run by default; write
   operations (sort/index/call/tabix_index, or any `-o` output) require the `read_write`
   permission** — pass `--allow-write` to `legumista research` or `legumista mcp`.
-- **LIS Data Store tools (`legumista_agent/tools_lis.py`)** — systematic access to
-  [data.legumeinfo.org](https://data.legumeinfo.org): `lis_find` (discover species, data
-  types and collections, with each collection's `publication_doi`), `lis_files` (which of a
-  collection's files are randomly accessible over HTTP, and the exact call to read them —
-  the store's directory listing hides the `.fai`/`.tbi` siblings), and `lis_gene` (an exact
-  gene/mRNA ID → locus + ready-made `fasta_fetch`/`tabix_query` calls). They **resolve
-  rather than retrieve**: the URLs they return are read by the bioinformatics tools above,
-  and the DOIs by `openalex_by_doi`/`read_paper`. Read-only, no disk state; base URL
-  overridable with `LEGUMISTA_LIS_BASE_URL`.
+- **LIS Data Store tools (`legumista_agent/tools_lis.py`, `tools_catalog.py`)** —
+  `lis_find` (discover species, data types and collections, with each collection's
+  `publication_doi`), `lis_files` (which files are randomly accessible over HTTP, and the
+  exact call to read them), `lis_gene` (gene ID, curated symbol or superseded ID → locus
+  + ready-made `fasta_fetch`/`tabix_query` calls), `lis_synteny` (syntenic blocks and
+  whole-genome alignments, including pairs stored under the partner's collection),
+  `lis_survey` (coverage and co-availability across the whole store, including
+  **absence**) and `lis_lineage` (provenance chain + de-duplicated citation bundle).
+
+  All five read a **resident catalog** built offline by
+  [`lis-autocontent populate-catalog`](https://github.com/legumeinfo/LIS-autocontent) and
+  loaded through **DSCensor's own `CatalogController`, in-process — not over its HTTP
+  API** — so the schema contract lives in one codebase. They contact **no metadata
+  endpoint on data.legumeinfo.org**: discovery is a dict lookup. The one remaining
+  network read is `lis_gene` fetching a collection's gene-models BED, whose URL comes
+  from the catalog; gene coordinates exist only inside that file.
+
+  Configure with `LEGUMISTA_LIS_CATALOG` (path to `catalog.json`) and, if `dscensor` is
+  not installed, `LEGUMISTA_DSCENSOR_PATH` (a dscensor source checkout). `dscensor` is an
+  optional dependency: without it these tools explain how to enable themselves and every
+  other tool is unaffected.
+
+
 - **LIS InterMine tools (`legumista_agent/tools_mine.py`)** — narrow, per-question
   PathQuery tools over a LIS mine: `legumemine_gene_proteins`, `legumemine_gene_families`,
   `legumemine_gene_ontology`, `legumemine_gene_expression`, `legumemine_gene_symbol`
@@ -292,6 +306,7 @@ external services:
   result capping with a true total, and — most importantly — InterMine reporting failure
   as HTTP 200 with `results: []` and the reason in `wasSuccessful`/`error`. Mine is
   selectable per call and via `LEGUMISTA_LIS_MINE`.
+
 - **`legumista_agent/mcp_client.py`** — *optional*: any MCP servers in
   [`.mcp.json`](.mcp.json) are discovered via the MCP SDK (bundled with FastMCP) and added
   alongside the native tools (`mcp__<server>__<tool>`).

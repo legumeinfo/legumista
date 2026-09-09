@@ -64,6 +64,7 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     from fastmcp import FastMCP
 
     import config
+    from .tools_catalog import catalog_tools
     from .tools_lis import lis_tools
     from .tools_local import local_read_tools
     from .tools_mine import mine_tools
@@ -78,12 +79,21 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
         "Read-only literature-research tools: scholarly search (OpenAlex/Crossref/"
         "arXiv/Europe PMC/bioRxiv), open-access full-text read/grep, NCBI datasets & "
         "EDirect, keyless web search, and workspace-sandboxed file grep/read.")
+    # When a catalog is loaded, append a ~1,400-token projection of it. It answers the
+    # exploratory questions ("which genera exist", "what does this species have", "what
+    # is soybean called here") that would otherwise each cost a tool call, and it is the
+    # only place absence is visible. Omitted entirely without a catalog, so the
+    # instructions never advertise knowledge the server does not have.
+    from .tools_catalog import catalog_map
+    resident_map = catalog_map()
+    if resident_map:
+        instructions = f"{instructions}\n\n---\n\n{resident_map}"
 
     server = FastMCP(name=name, instructions=instructions)
 
     _HANDLERS.clear()
     for tool in (local_read_tools() + native_tools() + lis_tools() + mine_tools()
-                 + bio_tools(allow_write=allow_write)):
+                 + catalog_tools() + bio_tools(allow_write=allow_write)):
         _HANDLERS[tool.name] = tool.run
         server.add_tool(Bridge(
             name=tool.name,

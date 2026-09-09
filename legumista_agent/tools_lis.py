@@ -1,65 +1,52 @@
 #!/usr/bin/env python3
-"""LIS Data Store tools — systematic access to https://data.legumeinfo.org.
+"""LIS Data Store tools, served from a resident catalog.
 
-The Legume Information System publishes a formally specified data store
-(github.com/legumeinfo/datastore-specifications): every "collection" (one directory of
-related files) carries four layers of machine-readable metadata —
+These tools used to discover the store by crawling https://data.legumeinfo.org --
+parsing h5ai directory listings, fetching a README/CHECKSUM/MANIFEST per collection,
+and probing for index siblings with HEAD requests. That worked, but it re-derived the
+same structure in every model context, cost a request per directory level, and could
+never see what was *absent*.
 
-  description_{Genus}_{species}.yml   taxid, abbreviation, common name  (per species)
-  README.{collection}.yml             genotype, synopsis, provenance, publication_doi
-  MANIFEST.{collection}.yml           a description per data file
-  CHECKSUM.{collection}.md5           the authoritative file list
+They now read a **catalog**: one document describing every collection in the store,
+built offline by ``lis-autocontent populate-catalog`` from the datastore-metadata
+mirror and loaded through DSCensor's own ``CatalogController`` (see ``tools_catalog.py``
+for why in-process rather than over DSCensor's HTTP API).
 
-— and `publication_doi` is REQUIRED by that spec, so every dataset points at its own
-paper. These tools surface all of it from the live service, which is the public access
-path (the datastore-metadata git repo is the upstream source of truth, but is not what
-users are meant to query).
+**No metadata endpoint on data.legumeinfo.org is contacted any more.** No directory
+listings, no README/CHECKSUM/MANIFEST fetches, no HEAD probes. Discovery is a dict
+lookup.
 
-Three problems make the store hard for an agent to use unaided, and these tools exist to
-solve exactly those:
+Two file reads over http(s) remain, and they are deliberate -- they are *data*, not
+metadata endpoints, and no catalog can carry them:
 
-1. **Collection keys are unguessable.** A collection is `Wm82.gnm4.ann1.T8TQ` — the
-   trailing four characters are arbitrary. No agent derives that from "soybean Williams 82
-   annotation v4", so `lis_find` discovers it.
-2. **Random access is invisible.** The HTML directory listing omits the `.fai`/`.tbi`/
-   `.gzi` index siblings, so nothing tells an agent that `protein_primary.faa.gz` can be
-   addressed by gene ID while `legume.fam3.*.gfa.tsv.gz` cannot be read at all. The
-   CHECKSUM file does list them, so `lis_files` reports each file's access mode.
-3. **There is no gene-name lookup.** `tabix_query` needs coordinates, so `lis_gene`
-   resolves an exact gene/mRNA ID to its locus and sequence handles.
+* ``gene_models_main.bed.gz`` -- gene coordinates. `lis_gene`'s whole job is turning a
+  name into a locus, and the loci live in this file. The catalog supplies its URL.
+* the annotation's synonym file -- superseded gene IDs, likewise a data file whose URL
+  comes from the catalog.
 
-Design: these tools **resolve, they do not retrieve**. They return URLs and sequence names
-that the existing toolset consumes — `fasta_fetch`, `tabix_query`, `bcftools`, `samtools`
-for data; `openalex_by_doi`, `read_paper` for the publication. Nothing here duplicates a
-data path that already exists.
+Curated gene *symbols* used to be a third such read; they are now carried in the
+catalog itself, so ``GmNARK`` resolves without touching the network at all.
 
-State: none on disk. Like `read_paper`, everything is fetched into memory; a small
-process-lifetime cache keeps repeat lookups (notably the ~0.9 MB BED backing `lis_gene`)
-free within a session without introducing the toolset's first persistent state.
+Design, unchanged: these tools **resolve, they do not retrieve**. They return URLs and
+sequence names that `fasta_fetch`, `tabix_query`, `bcftools` and `samtools` read, and
+DOIs that `openalex_by_doi`/`read_paper` follow.
 """
 import asyncio
 import gzip
 import io
 import os
 import re
-import threading
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
 from .tool import Tool
-from .tools_native import (BlockedURLError, HTTP_TIMEOUT, MAX_CHARS, _cap, _get,
-                           _get_bytes, _validate_url)
+from .tools_catalog import catalog_stamp, catalog_unavailable, controller
+from .tools_native import _cap, _get_bytes, _validate_url
 
-BASE_URL = os.environ.get("LEGUMISTA_LIS_BASE_URL", "https://data.legumeinfo.org").rstrip("/")
 MAX_RESULTS = int(os.environ.get("LEGUMISTA_LIS_MAX_RESULTS", "10"))
 BED_MAX_BYTES = int(os.environ.get("LEGUMISTA_LIS_BED_MAX_BYTES", str(64_000_000)))
 
-# Collection directories are "<strain>.<gnmN>[.annN].<KEY>" or "<...>.<type>.<Author_Year>".
-# The genome/annotation forms are what `lis_gene` can parse a gene ID against.
-_COLLECTION_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(?:gnm\d+|gen)\b")
-# A fully-qualified LIS gene ID is "<abbrev>.<strain>.<gnmN>.<annN>.<GeneName>[.N]" —
-# note it carries the annotation STEM but NOT the collection's 4-character key, so the
-# key still has to be recovered by listing the annotations directory.
+# A fully-qualified LIS gene ID is "<abbrev>.<strain>.<gnmN>.<annN>.<GeneName>[.N]" --
+# it carries the annotation STEM but NOT the collection's 4-character key, so the key
+# is recovered from the catalog rather than by listing a directory.
 _QUALIFIED_GENE_RE = re.compile(
     r"^(?P<abbrev>[a-z]{4,6})\.(?P<stem>[A-Za-z0-9_-]+\.gnm\d+\.ann\d+)\.(?P<name>.+)$")
 # The same stem prefix, for reducing a BED id to its bare gene name.
@@ -74,210 +61,77 @@ _ACCESS_BY_INDEX = {
     ".crai": ("samtools", "samtools(args=['view', URL, 'contig:start-end'])"),
 }
 _VARIANT_EXT = (".vcf.gz", ".bcf")
-
-_CACHE: dict = {}
-_CACHE_LOCK = threading.Lock()
+_SYNONYM_SUFFIXES = (".synonym.txt.gz", ".info_synonyms.txt.gz")
 
 
-def _cached(key: str, produce):
-    """Memoize for the life of the process. The store is versioned and effectively
-    immutable (a revision is a new collection), so there is nothing to invalidate."""
-    with _CACHE_LOCK:
-        if key in _CACHE:
-            return _CACHE[key]
-    value = produce()
-    with _CACHE_LOCK:
-        _CACHE[key] = value
-    return value
+def _file_url(record, name):
+    """Absolute URL for one file in a catalog collection."""
+    return "{0}/{1}".format(record["base_url"].rstrip("/"), name)
 
 
-def _url(*parts: str) -> str:
-    return "/".join([BASE_URL] + [str(p).strip("/") for p in parts if str(p).strip("/")])
-
-
-def _fetch_text(url: str, limit: int = 4_000_000) -> str:
-    """GET a datastore text file, or "" when it is absent. Metadata files are optional in
-    practice (an older collection may lack a MANIFEST), so a miss must not be fatal."""
-    def produce():
-        try:
-            _validate_url(url)
-            return _get_bytes(url, limit).decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001 - absent/unreadable metadata degrades, never raises
-            return ""
-    return _cached(f"text:{url}", produce)
-
-
-def _list_dir(path: str):
-    """List one datastore directory. The service renders an h5ai index whose no-JS
-    fallback is a plain <a href> table, which is what we parse. Returns (dirs, files)."""
-    def produce():
-        url = _url(path) + "/"
-        try:
-            _validate_url(url)
-            html = _get(url, accept="text/html")
-        except (BlockedURLError, Exception):  # noqa: BLE001
-            return [], []
-        prefix = "/" + path.strip("/") + "/" if path.strip("/") else "/"
-        dirs, files = [], []
-        for href in re.findall(r'href="([^"]+)"', html):
-            if not href.startswith(prefix) or href == prefix:
-                continue
-            rest = href[len(prefix):]
-            if not rest or "/" in rest.rstrip("/"):
-                continue          # a grandchild or the parent link, not a direct child
-            (dirs if rest.endswith("/") else files).append(rest.rstrip("/"))
-        return sorted(set(dirs)), sorted(set(files))
-    return _cached(f"dir:{path}", produce)
-
-
-def _yaml_docs(text: str):
-    """Parse a datastore YAML file into dicts. PyYAML is already a dependency."""
-    if not text.strip():
-        return []
-    try:
-        import yaml
-        return [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
-    except Exception:  # noqa: BLE001 - a malformed README must not sink the whole listing
-        return []
-
-
-def _readme(coll_path: str, identifier: str) -> dict:
-    docs = _yaml_docs(_fetch_text(_url(coll_path, f"README.{identifier}.yml")))
-    return docs[0] if docs else {}
-
-
-def _checksum_files(coll_path: str, identifier: str):
-    """The authoritative file list. Unlike the HTML index this DOES include the
-    .fai/.tbi/.gzi index siblings, which is what makes access modes knowable."""
-    text = _fetch_text(_url(coll_path, f"CHECKSUM.{identifier}.md5"))
-    names = []
-    for line in text.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            names.append(parts[1].strip().lstrip("./"))
-    return names
-
-
-# Only CHECKSUM enumerates the index siblings. h5ai filters .fai/.tbi/.gzi out of BOTH
-# the HTML index and its JSON API (verified: 24 files listed either way vs 46 in CHECKSUM,
-# and zero occurrences of those extensions anywhere in the page), and MANIFEST describes
-# data files rather than their indexes. So when a collection ships no CHECKSUM — every
-# qtl/ and gwas/ collection checked lacks one — there is no listing anywhere that answers
-# "is this file indexed?", and the only way to find out is to ask the server about each
-# candidate URL. Probing runs on the fallback path only, and the collections that need it
-# are the small ones (a QTL collection holds ~4 files), so the cost stays bounded.
-_PROBE_SUFFIXES = tuple(_ACCESS_BY_INDEX)
-MAX_PROBES = int(os.environ.get("LEGUMISTA_LIS_MAX_PROBES", "200"))
-
-# A file's own type decides which index siblings are even possible, so the listing tells
-# us what is worth asking about: htslib pairs .fai with FASTA, .bai/.csi with BAM, .crai
-# with CRAM, and .tbi/.csi with any bgzipped tabbed file. Probing a .tsv.gz for a .bai is
-# a guaranteed 404. Order matters — the specific compressed types must be tested before
-# the generic ".gz" tabbed group.
-#
-# This narrows the probe set; it does NOT replace probing. Inferring presence from type
-# alone would be wrong here: every qtl/ and gwas/ .tsv.gz on the live store has no index
-# at all (.tbi/.csi/.fai all 404), so assuming one would mark the entire QTL corpus
-# randomly accessible when none of it is.
-_PLAUSIBLE_INDEXES = (
-    ((".fa", ".fa.gz", ".fasta", ".fasta.gz", ".fna", ".fna.gz",
-      ".faa", ".faa.gz"), (".fai",)),
-    ((".bam",), (".bai", ".csi")),
-    ((".cram",), (".crai",)),
-    ((".vcf.gz", ".bcf"), (".tbi", ".csi")),
-    ((".gff.gz", ".gff3.gz", ".gtf.gz", ".bed.gz", ".sam.gz",
-      ".tsv.gz", ".txt.gz"), (".tbi", ".csi")),
-)
-
-
-def _plausible_index_suffixes(name: str):
-    """Index suffixes worth probing for this file. An unrecognized type falls back to the
-    full set rather than silently skipping a file that turns out to be indexed — the cost
-    of a wrong guess here is mislabelling streamable data as unreadable."""
-    low = name.lower()
-    for extensions, indexes in _PLAUSIBLE_INDEXES:
-        if low.endswith(extensions):
-            return indexes
-    return _PROBE_SUFFIXES
-_UA = "legumista-agent/1.0 (research)"
-
-
-def _url_exists(url: str) -> bool:
-    """HEAD one datastore URL. Used only to recover index status on the fallback path."""
-    def produce():
-        try:
-            _validate_url(url)
-            req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": _UA})
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                return 200 <= getattr(resp, "status", 200) < 300
-        except Exception:  # noqa: BLE001 - a 404 (or any failure) means "no index"
-            return False
-    return _cached(f"head:{url}", produce)
-
-
-def _collection_files(coll_path: str, identifier: str):
-    """The collection's file list plus where it came from: ('checksum'|'probe'|'none').
-
-    CHECKSUM is preferred — it is authoritative and free. Falling back to the directory
-    listing recovers the data files but silently loses every index sibling, which would
-    make `lis_files` report a streamable file as unreadable; probing restores that on
-    evidence rather than assumption."""
-    names = _checksum_files(coll_path, identifier)
-    if names:
-        return names, "checksum"
-    _dirs, files = _list_dir(coll_path)
-    if not files:
-        return [], "none"
-    data = [f for f in files
-            if not f.startswith(("README.", "MANIFEST.", "CHANGES.", "CHECKSUM."))]
-    probes = [f + suffix
-              for f in data for suffix in _plausible_index_suffixes(f)][:MAX_PROBES]
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        found = list(pool.map(lambda n: _url_exists(_url(coll_path, n)), probes))
-    return files + [n for n, ok in zip(probes, found) if ok], "probe"
-
-
-def _manifest_map(coll_path: str, identifier: str) -> dict:
-    """MANIFEST files are a YAML *list* of {name, description} - safe_load_all yields the
-    list as one document, so flatten whichever shape we get."""
-    text = _fetch_text(_url(coll_path, f"MANIFEST.{identifier}.yml"))
-    if not text.strip():
-        return {}
-    try:
-        import yaml
-        loaded = list(yaml.safe_load_all(text))
-    except Exception:  # noqa: BLE001
-        return {}
-    out = {}
-    for doc in loaded:
-        entries = doc if isinstance(doc, list) else [doc]
-        for e in entries:
-            if isinstance(e, dict) and e.get("name"):
-                out[str(e["name"])] = str(e.get("description") or "").strip()
-    return out
-
-
-def _access_mode(name: str, present: set):
-    """How can the existing toolset read this file? Returns (tool, how) or (None, why not).
-
-    Decided by which index siblings the collection actually ships, which is the only
-    honest signal — extension alone would promise random access the server cannot serve."""
-    for suffix, (tool, how) in _ACCESS_BY_INDEX.items():
-        if name + suffix in present:
-            if suffix in (".tbi", ".csi") and name.endswith(_VARIANT_EXT):
-                return "bcftools", "bcftools(args=['view','-H','-r','contig:start-end',URL])"
+def _access_for(entry):
+    """(tool, how) for a catalog file entry, or (None, "") when it has no index."""
+    for suffix in entry.get("i") or []:
+        if suffix in (".tbi", ".csi") and entry["n"].endswith(_VARIANT_EXT):
+            return "bcftools", "bcftools(args=['view','-H','-r','contig:start-end',URL])"
+        tool, how = _ACCESS_BY_INDEX.get(suffix, (None, ""))
+        if tool:
             return tool, how
-    return None, "no index published - not randomly accessible; whole-file download only"
+    return None, ""
+
+
+def _normalize_collection(spec):
+    """Accept a datastore path, a full datastore URL, or a bare collection id.
+
+    Returns (path, identifier). `path` is None when only a bare id was given, in which
+    case `identifier` is that id -- or an "error:" string the caller returns verbatim.
+    """
+    spec = (spec or "").strip().rstrip("/")
+    if not spec:
+        return None, ("error: missing 'collection' — a datastore path like "
+                      "'Glycine/max/annotations/Wm82.gnm4.ann1.T8TQ' (lis_find prints "
+                      "these), or a bare collection id.")
+    if spec.startswith(("http://", "https://")):
+        spec = "/".join([p for p in spec.split("/") if p][2:])  # drop scheme + host
+    parts = [p for p in spec.split("/") if p]
+    if len(parts) == 1:  # a bare id; resolved against the catalog by the caller
+        return None, parts[0]
+    if len(parts) < 4:
+        return None, (f"error: {spec!r} is not a collection path. Expected "
+                      "'<Genus>/<species>/<type>/<collection>'.")
+    return "/".join(parts[:4]), parts[3]
+
+
+def _lookup(spec):
+    """Resolve a collection spec to a catalog record. Returns (record, error_text)."""
+    ctl = controller()
+    if ctl is None:
+        return None, catalog_unavailable()
+    path, identifier = _normalize_collection(spec)
+    if path is None and identifier.startswith("error:"):
+        return None, identifier
+    if path is not None:
+        record = ctl.get_collection(path)
+        if record is None:
+            return None, (f"no collection at {path!r} in the catalog. "
+                          f"{catalog_stamp(ctl)} Use lis_find to list what exists.")
+        return record, None
+    matches = [c for c in ctl.collections if c["id"] == identifier]
+    if not matches:
+        return None, (f"no collection with id {identifier!r} in the catalog. "
+                      f"{catalog_stamp(ctl)}")
+    if len(matches) > 1:
+        paths = ", ".join(m["path"] for m in matches[:5])
+        return None, (f"{identifier!r} is ambiguous ({len(matches)} matches): {paths}. "
+                      "Pass the full path.")
+    return matches[0], None
 
 
 # --- lis_find -------------------------------------------------------------------------
-def _species_description(genus: str, species: str) -> dict:
-    docs = _yaml_docs(_fetch_text(
-        _url(genus, species, "about_this_collection", f"description_{genus}_{species}.yml")))
-    return docs[0] if docs else {}
-
-
 def _find(args) -> str:
+    ctl = controller()
+    if ctl is None:
+        return catalog_unavailable()
     genus = (args.get("genus") or "").strip()
     species = (args.get("species") or "").strip()
     taxon = (args.get("taxon") or "").strip()
@@ -292,354 +146,507 @@ def _find(args) -> str:
         if len(bits) > 1 and not species:
             species = bits[1].lower()
 
+    stamp = catalog_stamp(ctl)
+
     if not genus:
-        genera, _ = _list_dir("")
-        genera = [g for g in genera if g[:1].isupper()]
+        genera = sorted({c["genus"] for c in ctl.collections})
         return (f"{len(genera)} genera in the LIS Data Store (pass one as 'genus', or a "
-                f"full 'taxon' like 'Glycine max'):\n  " + ", ".join(genera))
+                "full 'taxon' like 'Glycine max'):\n  " + ", ".join(genera)
+                + f"\n{stamp}")
 
     if not species:
-        specs, _ = _list_dir(genus)
-        return (f"{genus}: {len(specs)} species/collection group(s):\n  " + ", ".join(specs)
-                + "\n\nPass one as 'species' to see its data types.")
+        specs = sorted({c["species"] for c in ctl.collections if c["genus"] == genus})
+        if not specs:
+            return f"no collections for genus {genus!r} in the catalog. {stamp}"
+        return (f"{genus}: {len(specs)} species/collection group(s):\n  "
+                + ", ".join(specs)
+                + "\n\nPass one as 'species' to see its data types."
+                + f"\n{stamp}")
+
+    scoped = [c for c in ctl.collections
+              if c["genus"] == genus and c["species"] == species]
+    if not scoped:
+        return f"no collections for {genus} {species!r} in the catalog. {stamp}"
 
     if not ctype:
-        types, _ = _list_dir(f"{genus}/{species}")
-        desc = _species_description(genus, species)
+        types = sorted({c["type"] for c in scoped})
         head = f"{genus} {species}"
-        if desc.get("commonName"):
-            head += f" ({desc['commonName']})"
-        if desc.get("taxid"):
-            head += f"  taxid:{desc['taxid']}"
-        if desc.get("abbrev"):
-            head += f"  abbrev:{desc['abbrev']}"
+        sample = scoped[0]
+        if sample.get("taxid"):
+            head += f"  taxid:{sample['taxid']}"
+        if sample.get("scientific_name_abbrev"):
+            head += f"  abbrev:{sample['scientific_name_abbrev']}"
         return (head + f"\n{len(types)} data type(s):\n  " + ", ".join(types)
-                + "\n\nPass one as 'type' to list its collections (with publication DOIs).")
+                + "\n\nPass one as 'type' to list its collections (with publication "
+                  "DOIs)." + f"\n{stamp}")
 
+    colls = [c for c in scoped if c["type"] == ctype]
     base = f"{genus}/{species}/{ctype}"
-    colls, _ = _list_dir(base)
     if not colls:
-        types, _ = _list_dir(f"{genus}/{species}")
+        types = sorted({c["type"] for c in scoped})
         return (f"no collections under {base}. Available types for {genus} {species}: "
-                + ", ".join(types))
+                + ", ".join(types) + f"\n{stamp}")
     if query:
-        colls = [c for c in colls if query in c.lower()]
+        colls = [c for c in colls if query in c["id"].lower()]
         if not colls:
-            return f"no collection under {base} matching {query!r}."
-    shown, total = colls[:limit], len(colls)
-
-    # READMEs are one fetch each; bounded by `limit` and fetched concurrently.
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        readmes = list(pool.map(lambda c: _readme(f"{base}/{c}", c), shown))
+            return f"no collection under {base} matching {query!r}. {stamp}"
+    total = len(colls)
+    shown = sorted(colls, key=lambda c: c["id"])[:limit]
 
     lines = [f"{total} collection(s) under {base}"
              + (f" matching {query!r}" if query else "")
              + (f"; showing {len(shown)}" if total > len(shown) else "") + ":"]
-    for coll, rm in zip(shown, readmes):
-        lines.append(f"\n  {coll}")
-        lines.append(f"    path: {base}/{coll}")
-        if rm.get("synopsis"):
-            lines.append(f"    synopsis: {rm['synopsis']}")
-        geno = rm.get("genotype")
-        if geno:
-            lines.append(f"    genotype: {', '.join(map(str, geno)) if isinstance(geno, list) else geno}")
-        if rm.get("publication_doi"):
-            lines.append(f"    publication_doi: {rm['publication_doi']}"
+    for record in shown:
+        lines.append(f"\n  {record['id']}")
+        lines.append(f"    path: {record['path']}")
+        if record.get("synopsis"):
+            lines.append(f"    synopsis: {record['synopsis']}")
+        genotype = record.get("genotype")
+        if genotype:
+            joined = (", ".join(map(str, genotype))
+                      if isinstance(genotype, list) else genotype)
+            lines.append(f"    genotype: {joined}")
+        if record.get("publication_doi"):
+            lines.append(f"    publication_doi: {record['publication_doi']}"
                          "   -> openalex_by_doi / read_paper")
-        if rm.get("source"):
-            lines.append(f"    source: {rm['source']}")
+        if record.get("source"):
+            lines.append(f"    source: {record['source']}")
     lines.append("\nPass a 'path' above to lis_files to see what is randomly accessible.")
+    lines.append(stamp)
     return _cap("\n".join(lines))
 
 
 # --- lis_files ------------------------------------------------------------------------
-def _normalize_collection(spec: str):
-    """Accept a datastore path, or a full URL under the datastore, and return
-    (path, identifier) or (None, error)."""
-    spec = (spec or "").strip().rstrip("/")
-    if not spec:
-        return None, ("error: missing 'collection' — a datastore path like "
-                      "'Glycine/max/annotations/Wm82.gnm4.ann1.T8TQ' (lis_find prints these).")
-    if spec.startswith("http://") or spec.startswith("https://"):
-        if not spec.startswith(BASE_URL):
-            return None, f"error: only URLs under {BASE_URL} are supported."
-        spec = spec[len(BASE_URL):].strip("/")
-    parts = [p for p in spec.split("/") if p]
-    if len(parts) < 2:
-        return None, (f"error: {spec!r} is not a collection path. Expected "
-                      "'<Genus>/<species>/<type>/<collection>'.")
-    return "/".join(parts), parts[-1]
-
-
 def _files(args) -> str:
-    path, identifier = _normalize_collection(args.get("collection"))
-    if path is None:
-        return identifier
-    names, source = _collection_files(path, identifier)
-    if not names:
-        return (f"error: could not list {path} — it publishes no "
-                f"CHECKSUM.{identifier}.md5 and its directory listing is empty. Check "
-                "the path (lis_find prints exact paths).")
-    present = set(names)
-    manifest = _manifest_map(path, identifier)
-    rm = _readme(path, identifier)
+    record, err = _lookup(args.get("collection"))
+    if record is None:
+        return err
+    ctl = controller()
+    data = record.get("files", [])
 
-    index_suffixes = tuple(_ACCESS_BY_INDEX) + (".gzi", ".md5")
-    data = [n for n in names
-            if not n.endswith(index_suffixes)
-            and not os.path.basename(n).startswith(("README.", "MANIFEST.", "CHANGES.",
-                                                    "CHECKSUM."))]
-    head = [f"collection: {identifier}", f"path: {path}"]
-    if rm.get("synopsis"):
-        head.append(f"synopsis: {rm['synopsis']}")
-    if rm.get("publication_doi"):
-        head.append(f"publication_doi: {rm['publication_doi']}   -> openalex_by_doi / read_paper")
-    head.append(f"{len(data)} data file(s); base URL {_url(path)}/")
-    if source == "probe":
-        head.append(f"file list: directory listing — {identifier} publishes no CHECKSUM, "
-                    "so index status below was determined by probing each candidate URL, "
-                    "not read from a manifest.")
+    head = [f"collection: {record['id']}", f"path: {record['path']}"]
+    if record.get("synopsis"):
+        head.append(f"synopsis: {record['synopsis']}")
+    if record.get("publication_doi"):
+        head.append(f"publication_doi: {record['publication_doi']}"
+                    "   -> openalex_by_doi / read_paper")
+    if record.get("license"):
+        head.append(f"license: {record['license']}")
+    head.append(f"{len(data)} data file(s); base URL {record['base_url']}/")
+
+    status = record.get("index_status", "unknown")
+    if status == "unknown" or not data:
+        # Nothing could be resolved: no CHECKSUM, and no documented convention to fall
+        # back on. Report the gap as itself rather than as an empty collection.
+        return _cap("\n".join(head + [
+            "",
+            "FILE LIST UNAVAILABLE — this collection publishes no CHECKSUM and its type "
+            "has no documented filename convention, so nothing can be listed. That is a "
+            "gap in the published metadata, not an empty collection: files are reachable "
+            "under the base URL above if you already know their names.",
+            catalog_stamp(ctl),
+        ]))
+
+    # How the file list was obtained. `checksum` is authoritative; the other two were
+    # constructed from the datastore's documented filename convention, and only
+    # `verified` has been confirmed to exist. Saying which is the difference between
+    # a fact and a good guess.
+    provenance = {
+        "known": None,
+        "verified": ("file list resolved from the datastore's documented filename "
+                     "convention and CONFIRMED to exist (this collection publishes no "
+                     "CHECKSUM)"),
+        "inferred": ("file list PREDICTED from the datastore's documented filename "
+                     "convention and not confirmed — a listed file may not exist "
+                     "(this collection publishes no CHECKSUM)"),
+    }.get(status)
+    if provenance:
+        head.append(provenance)
 
     addressable, plain = [], []
-    for name in sorted(data):
-        tool, how = _access_mode(name, present)
-        desc = manifest.get(os.path.basename(name), "")
-        (addressable if tool else plain).append((name, tool, how, desc))
+    for entry in sorted(data, key=lambda f: f["n"]):
+        tool, how = _access_for(entry)
+        (addressable if tool else plain).append(
+            (entry["n"], tool, how, entry.get("description", "")))
 
     lines = head + ["", f"RANDOMLY ACCESSIBLE ({len(addressable)}) — stream a region "
                         "without downloading the file:"]
     for name, tool, how, desc in addressable:
         lines.append(f"  {name}")
-        if desc and desc != "MISSING":
+        if desc:
             lines.append(f"      {desc}")
         lines.append(f"      via {tool}: {how}")
-        lines.append(f"      url {_url(path, name)}")
+        lines.append(f"      url {_file_url(record, name)}")
     lines.append("")
-    evidence = ("no .fai/.tbi sibling found when probed" if source == "probe"
-                else "no .fai/.tbi published")
-    lines.append(f"NOT INDEXED ({len(plain)}) — {evidence}, so these cannot be "
-                 "region-queried or read through this toolset; they are whole-file "
+    lines.append(f"NOT INDEXED ({len(plain)}) — no .fai/.tbi published, so these cannot "
+                 "be region-queried or read through this toolset; they are whole-file "
                  "downloads only:")
-    for name, _t, _h, desc in plain:
-        lines.append(f"  {name}" + (f"   — {desc}" if desc and desc != "MISSING" else ""))
+    for name, _tool, _how, desc in plain:
+        lines.append(f"  {name}" + (f"   — {desc}" if desc else ""))
+    lines.append("")
+    lines.append(catalog_stamp(ctl))
     return _cap("\n".join(lines))
 
 
 # --- lis_gene -------------------------------------------------------------------------
-def _resolve_gene_collection(gene: str, collection: str):
-    """Work out which annotation collection to search. An explicit collection wins; else
-    derive it from a fully-qualified gene ID.
-
-    LIS abbreviations are the first three letters of the genus plus the first two of the
-    species (glyma = Glycine max, phavu = Phaseolus vulgaris), so the species resolves
-    with two directory listings rather than a scan of every description file."""
+def _annotation_for_gene(gene, collection):
+    """The annotation collection to search. Returns (record, error_text)."""
     if collection:
-        return _normalize_collection(collection)
-    m = _QUALIFIED_GENE_RE.match(gene)
-    if not m:
-        return None, ("error: pass 'collection' (a path from lis_find), or a fully "
-                      "qualified gene ID like 'glyma.Wm82.gnm4.ann1.Glyma.12G040000'.")
-    abbrev, stem = m.group("abbrev"), m.group("stem")
-    genera, _ = _list_dir("")
-    for genus in genera:
-        if not genus[:1].isupper() or not abbrev.startswith(genus[:3].lower()):
-            continue
-        species_list, _ = _list_dir(genus)
-        for sp in species_list:
-            if abbrev != (genus[:3] + sp[:2]).lower():
-                continue
-            colls, _ = _list_dir(f"{genus}/{sp}/annotations")
-            for c in colls:
-                if c.startswith(stem + "."):
-                    return f"{genus}/{sp}/annotations/{c}", c
-            return None, (f"error: no annotation collection {stem}.* under "
-                          f"{genus}/{sp}/annotations.")
-    return None, (f"error: could not map abbreviation {abbrev!r} to a species. Pass "
-                  "'collection' explicitly (lis_find prints paths).")
+        return _lookup(collection)
+    ctl = controller()
+    if ctl is None:
+        return None, catalog_unavailable()
+    match = _QUALIFIED_GENE_RE.match(gene)
+    if not match:
+        return None, ("error: pass 'collection' (a path or id from lis_find), or a "
+                      "fully qualified gene ID like "
+                      "'glyma.Wm82.gnm4.ann1.Glyma.12G040000'.")
+    abbrev, stem = match.group("abbrev"), match.group("stem")
+    # The qualified ID carries the annotation stem but not the 4-character key, so the
+    # key comes from the catalog -- this used to mean listing a directory.
+    for record in ctl.collections:
+        if (record["type"] == "annotations"
+                and record.get("scientific_name_abbrev") == abbrev
+                and record["id"].startswith(stem + ".")):
+            return record, None
+    return None, (f"no annotation collection {stem}.* for {abbrev!r} in the catalog. "
+                  f"{catalog_stamp(ctl)}")
 
 
-
-def _bed_url(path: str, identifier: str, names) -> str:
-    for n in names:
-        if n.endswith(".gene_models_main.bed.gz"):
-            return _url(path, n)
-    return ""
-
-
-# --- alias resolution: symbols and superseded IDs -------------------------------------
-# Two independent sources, both optional and both narrow — report which one answered so an
-# agent never mistakes a curated symbol hit for an exact-ID hit.
-#
-#   symbols  gene_functions/<abbrev>.traits.yml — curated, carries the gene's DOI too.
-#            Published for Glycine, Phaseolus, Medicago, Lotus; NOT for Vigna/Cicer/Arachis.
-#   synonyms <collection>.synonym.txt.gz or .info_synonyms.txt.gz — "current \t superseded",
-#            e.g. Glyma.01G000100.1 <- Glyma01g00210. Rare: 2 of 55 Glycine annotation
-#            collections, 1 of 5 Phaseolus, 0 of 19 Medicago.
-#
-# Note what this deliberately does NOT do: a name from a DIFFERENT assembly (A17 gnm5's
-# MtrunA17_Chr1g* vs gnm4's Medtr*) is not a synonym but a cross-assembly mapping, and no
-# store file expresses it. Such a lookup fails, and the message says so rather than
-# implying the gene is absent.
-_SYNONYM_SUFFIXES = (".synonym.txt.gz", ".info_synonyms.txt.gz")
+def _fetch_gz_text(url, limit=BED_MAX_BYTES):
+    """Fetch and decompress a gzipped datastore data file. Returns (text, error)."""
+    try:
+        _validate_url(url)
+        raw = _get_bytes(url, limit)
+        text = gzip.GzipFile(fileobj=io.BytesIO(raw)).read().decode("utf-8", "replace")
+        return text, None
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
 
 
-def _traits_symbols(genus: str, species: str, abbrev: str) -> dict:
-    """Lowercased gene symbol -> [(full_gene_id, synopsis, doi)] from the curated file."""
-    def produce():
-        text = _fetch_text(_url(genus, species, "gene_functions", f"{abbrev}.traits.yml"))
-        index: dict = {}
-        for doc in _yaml_docs(text):
-            gid = (doc.get("gene_model_full_id") or "").strip()
-            if not gid:
-                continue
-            refs = [r.get("doi") for r in (doc.get("references") or [])
-                    if isinstance(r, dict) and r.get("doi")]
-            entry = (gid, (doc.get("phenotype_synopsis") or "").strip(),
-                     refs[0] if refs else "")
-            for sym in (doc.get("gene_symbols") or []):
-                index.setdefault(str(sym).strip().lower(), []).append(entry)
-        return index
-    return _cached(f"traits:{genus}/{species}", produce)
+def _synonyms(record):
+    """Superseded gene ID -> current ID, from the annotation's synonym file.
 
-
-def _synonyms(coll_path: str, names) -> dict:
-    """Lowercased superseded ID -> current ID, from whichever synonym file exists."""
-    hit = next((n for n in names if n.endswith(_SYNONYM_SUFFIXES)), None)
-    if not hit:
+    A data file, not a metadata endpoint: its URL comes from the catalog, but the
+    mapping itself exists only inside the file.
+    """
+    name = next((f["n"] for f in record.get("files", [])
+                 if f["n"].endswith(_SYNONYM_SUFFIXES)), None)
+    if not name:
         return {}
-
-    def produce():
-        url = _url(coll_path, hit)
-        try:
-            _validate_url(url)
-            raw = _get_bytes(url, BED_MAX_BYTES)
-            text = gzip.GzipFile(fileobj=io.BytesIO(raw)).read().decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001 - an unreadable synonym file is not fatal
-            return {}
-        index: dict = {}
-        for line in text.splitlines():
-            if line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 2:
-                continue
-            current, old = parts[0].strip(), parts[1].strip()
-            if current and old:
-                index.setdefault(old.lower(), current)
-        return index
-    return _cached(f"syn:{coll_path}", produce)
+    text, err = _fetch_gz_text(_file_url(record, name))
+    if err:
+        return {}
+    index = {}
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
+            index.setdefault(parts[1].strip().lower(), parts[0].strip())
+    return index
 
 
-def _alias_candidates(gene: str, path: str, names):
+def _alias_candidates(gene, record):
     """Yield (candidate_id, how_it_was_found) for a query that matched nothing exactly."""
-    parts = path.split("/")
-    if len(parts) >= 2:
-        genus, species = parts[0], parts[1]
-        abbrev = (genus[:3] + species[:2]).lower()
-        for gid, synopsis, doi in _traits_symbols(genus, species, abbrev).get(gene.lower(), []):
-            note = f"curated symbol {gene!r} in {abbrev}.traits.yml"
-            if doi:
-                note += f" (publication_doi: {doi})"
-            if synopsis:
-                note += f"\n  synopsis: {synopsis}"
-            yield gid, note
-    current = _synonyms(path, names).get(gene.lower())
+    ctl = controller()
+    if ctl is not None:
+        abbrev = record.get("scientific_name_abbrev", "")
+        for entry in ctl.resolve_symbol(gene, abbrev):
+            note = (f"curated symbol {gene!r} "
+                    f"({entry['abbrev']}.traits.yml, carried in the catalog)")
+            if entry.get("doi"):
+                note += f" (publication_doi: {entry['doi']})"
+            if entry.get("synopsis"):
+                note += f"\n  synopsis: {entry['synopsis']}"
+            yield entry["gene"], note
+    current = _synonyms(record).get(gene.lower())
     if current:
-        yield current, f"superseded ID {gene!r} -> {current} via the collection's synonym file"
+        yield current, (f"superseded ID {gene!r} -> {current} via the collection's "
+                        "synonym file")
 
 
-def _bed_hits(bed: str, gene: str):
+def _bed_hits(bed, gene):
     """Rows whose mRNA (col 4) or gene (col 7) field equals `gene`, prefixed or not.
     Exact only: a substring match would return Glyma.12G0400001 for Glyma.12G040000."""
     hits = []
     for line in bed.splitlines():
-        f = line.split("\t")
-        if len(f) < 6:
+        fields = line.split("\t")
+        if len(fields) < 6:
             continue
-        mrna, geneid = f[3], (f[6] if len(f) > 6 else "")
+        mrna, geneid = fields[3], (fields[6] if len(fields) > 6 else "")
         cands = {mrna, geneid}
         cands |= {_GENE_PREFIX_RE.sub("", c) for c in (mrna, geneid) if c}
         if gene in cands:
-            hits.append((f[0], int(f[1]) + 1, int(f[2]), f[5], mrna, geneid))
+            hits.append((fields[0], int(fields[1]) + 1, int(fields[2]), fields[5],
+                         mrna, geneid))
     return hits
 
 
 def _gene(args) -> str:
     gene = (args.get("gene") or "").strip()
     if not gene:
-        return "error: missing 'gene' — an exact gene or mRNA ID, e.g. 'Glyma.12G040000'."
-    path, identifier = _resolve_gene_collection(gene, (args.get("collection") or "").strip())
-    if path is None:
-        return identifier
+        return "error: missing 'gene' — a gene ID, mRNA ID, or curated symbol."
+    record, err = _annotation_for_gene(gene, (args.get("collection") or "").strip())
+    if record is None:
+        return err
+    ctl = controller()
 
-    names, _source = _collection_files(path, identifier)
-    if not names:
-        return (f"error: could not list {path} — no CHECKSUM.{identifier}.md5 and an "
-                "empty directory listing. Check the collection.")
-    bed_url = _bed_url(path, identifier, names)
-    if not bed_url:
-        return (f"error: {identifier} publishes no gene_models_main.bed.gz, so gene "
+    if record.get("index_status") != "known":
+        return (f"{record['id']} publishes no CHECKSUM, so the catalog has no file list "
+                f"for it and cannot locate its gene models. {catalog_stamp(ctl)}")
+    by_name = {f["n"]: f for f in record.get("files", [])}
+    bed_name = next((n for n in by_name if n.endswith(".gene_models_main.bed.gz")), None)
+    if not bed_name:
+        return (f"error: {record['id']} publishes no gene_models_main.bed.gz, so gene "
                 "lookup is unavailable for this collection.")
 
-    def produce():
-        try:
-            _validate_url(bed_url)
-            raw = _get_bytes(bed_url, BED_MAX_BYTES)
-            return gzip.GzipFile(fileobj=io.BytesIO(raw)).read().decode("utf-8", "replace")
-        except Exception as e:  # noqa: BLE001
-            return f"\x00error {type(e).__name__}: {e}"
-    bed = _cached(f"bed:{bed_url}", produce)
-    if bed.startswith("\x00"):
-        return f"error: could not read {os.path.basename(bed_url)}: {bed[1:]}"
+    # The only remaining data read: gene coordinates live in this file and nowhere else.
+    bed, err = _fetch_gz_text(_file_url(record, bed_name))
+    if err:
+        return f"error: could not read {bed_name}: {err}"
 
-    # Exact ID first; only if that misses do we consult the alias sources, so a direct
-    # hit is never shadowed by a curated symbol that happens to collide.
     label, provenance = gene, ""
     hits = _bed_hits(bed, gene)
     if not hits:
-        for candidate, note in _alias_candidates(gene, path, names):
+        for candidate, note in _alias_candidates(gene, record):
             found = _bed_hits(bed, candidate)
             if found:
                 hits, label, provenance = found, candidate, note
                 break
     if not hits:
-        tried = ["exact gene/mRNA ID"]
-        parts = path.split("/")
-        abbrev = (parts[0][:3] + parts[1][:2]).lower() if len(parts) >= 2 else ""
-        if _traits_symbols(parts[0], parts[1], abbrev) if len(parts) >= 2 else False:
-            tried.append(f"curated symbols ({abbrev}.traits.yml)")
-        if _synonyms(path, names):
-            tried.append("the collection's synonym file")
-        return (f"no match for {gene!r} in {identifier}. Consulted: {', '.join(tried)}. "
+        return (f"no match for {gene!r} in {record['id']}. Consulted: exact gene/mRNA "
+                "ID, the catalog's curated symbols, and the collection's synonym file. "
                 "Note a name from a different assembly (e.g. an A17.gnm5 ID against a "
                 "gnm4 annotation) is not a synonym and cannot be resolved here — use "
-                "lis_find to pick the matching annotation collection.")
+                f"lis_find to pick the matching collection. {catalog_stamp(ctl)}")
 
-    contig, start, end, strand = hits[0][0], min(h[1] for h in hits), max(h[2] for h in hits), hits[0][3]
+    contig = hits[0][0]
+    start, end = min(h[1] for h in hits), max(h[2] for h in hits)
+    strand = hits[0][3]
     seq_names = sorted({h[4] for h in hits})
-    # Bounds come from gene_models_main.bed, which lists mRNA rows; they can sit just
-    # inside the GFF's `gene` feature. Say so rather than implying an exact gene extent —
-    # the GFF call below is the authority on feature boundaries.
-    lines = [f"{label} in {identifier}"
+
+    lines = [f"{label} in {record['id']}"
              + (f"\n  resolved from: {provenance}" if provenance else ""),
              f"  locus:  {contig}:{start:,}-{end:,} ({strand})   "
              f"[mRNA extent from gene_models_main.bed; "
              f"{len(hits)} model(s): {', '.join(seq_names)}]",
              f"  region string for tabix_query/samtools: {contig}:{start}-{end}"]
-    for label, suffix in (("protein", ".protein_primary.faa.gz"),
-                          ("CDS", ".cds_primary.fna.gz")):
-        hit = next((n for n in names if n.endswith(suffix)), None)
-        if hit and f"{hit}.fai" in set(names):
-            lines.append(f"  {label}: fasta_fetch(path='{_url(path, hit)}', "
-                         f"region='{seq_names[0]}')")
-    gff = next((n for n in names if n.endswith(".gene_models_main.gff3.gz")), None)
-    if gff and f"{gff}.tbi" in set(names):
-        lines.append(f"  models: tabix_query(path='{_url(path, gff)}', "
+    for label_text, suffix in (("protein", ".protein_primary.faa.gz"),
+                               ("CDS", ".cds_primary.fna.gz")):
+        hit = next((n for n in by_name if n.endswith(suffix)), None)
+        if hit and ".fai" in (by_name[hit].get("i") or []):
+            lines.append(f"  {label_text}: fasta_fetch("
+                         f"path='{_file_url(record, hit)}', region='{seq_names[0]}')")
+    gff = next((n for n in by_name if n.endswith(".gene_models_main.gff3.gz")), None)
+    if gff and ".tbi" in (by_name[gff].get("i") or []):
+        lines.append(f"  models: tabix_query(path='{_file_url(record, gff)}', "
                      f"region='{contig}:{start}-{end}')")
-    rm = _readme(path, identifier)
-    if rm.get("publication_doi"):
-        lines.append(f"  publication_doi: {rm['publication_doi']}   -> openalex_by_doi")
+    if record.get("publication_doi"):
+        lines.append(f"  publication_doi: {record['publication_doi']}"
+                     "   -> openalex_by_doi")
+    lines.append(f"  {catalog_stamp(ctl)}")
     return _cap("\n".join(lines))
+
+
+
+# --- lis_synteny ----------------------------------------------------------------------
+# Synteny blocks live in DAGchainer GFF3s that carry no .tbi (0 of 102 files are indexed),
+# so a region query means fetching the file -- ~23 KB gzipped -- and filtering in memory.
+# Everything else the tool needs is already in the catalog: which genomes are paired, which
+# file holds each pair, and which assemblies exist for a species. In particular the pair
+# graph is derived at catalog-build time from filenames, so a genome that owns no synteny
+# collection (Medicago owns none) still resolves to its partners.
+_BLOCK_RE = re.compile(
+    r"^Name=(?P<contig>[^;]+);matches=(?P<b>[^:]+):(?P<start>\d+)\.\.(?P<end>\d+)"
+    r"(?:;median_Ks=(?P<ks>[0-9.eE+-]+))?"
+)
+MAX_BLOCKS = int(os.environ.get("LEGUMISTA_LIS_MAX_BLOCKS", "200"))
+
+
+def _genome_of(spec):
+    """Reduce a gene ID or genome string to `abbrev.strain.gnmN`."""
+    spec = (spec or "").strip()
+    match = _QUALIFIED_GENE_RE.match(spec)
+    if match:
+        stem = match.group("stem").rsplit(".ann", 1)[0]
+        return f"{match.group('abbrev')}.{stem}"
+    parts = spec.split(".")
+    for i, part in enumerate(parts):
+        if part.startswith("gnm"):
+            return ".".join(parts[: i + 1])
+    return spec
+
+
+def _species_of_genome(ctl, genome):
+    """(genus, species) for a genome string, from the catalog."""
+    abbrev = genome.split(".")[0]
+    for collection in ctl.collections:
+        if collection.get("scientific_name_abbrev") == abbrev:
+            return collection["genus"], collection["species"]
+    return "", ""
+
+
+def _no_synteny_message(ctl, genome):
+    """Route to an assembly that does have synteny, rather than reporting nothing.
+
+    Synteny is published for one, usually old, assembly per species; the common request
+    arrives on a newer one. Naming the alternative turns a dead end into a next step.
+    """
+    genus, species = _species_of_genome(ctl, genome)
+    available = sorted({p["a"] for p in ctl.pairwise()} | {p["b"] for p in ctl.pairwise()})
+    same_species = [g for g in available if g.split(".")[0] == genome.split(".")[0]]
+    lines = [f"no synteny or alignment data for {genome!r}."]
+    if same_species:
+        lines.append("Published for this species against: " + ", ".join(same_species) + ".")
+        if genus:
+            lines.append(f"Re-run with a gene or region on one of those, e.g. "
+                         f"lis_find(taxon='{genus} {species}', type='annotations', "
+                         f"query='{same_species[0].split('.', 1)[1]}').")
+    else:
+        lines.append("No assembly of this species has synteny or alignment data in the "
+                     "catalog. This is a gap in the store, not a lookup failure.")
+    lines.append(catalog_stamp(ctl))
+    return "\n".join(lines)
+
+
+def _parse_blocks(text, region_contig, lo, hi, cap):
+    """DAGchainer syntenic_region rows, optionally filtered on the A-side interval."""
+    blocks, total = [], 0
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 9 or fields[2] != "syntenic_region":
+            continue
+        a_contig, a_start, a_end = fields[0], int(fields[3]), int(fields[4])
+        if region_contig:
+            if a_contig != region_contig:
+                continue
+            if lo is not None and (a_end < lo or a_start > hi):
+                continue
+        total += 1
+        if len(blocks) >= cap:
+            continue
+        match = _BLOCK_RE.match(fields[8])
+        if not match:
+            continue
+        blocks.append({
+            "a": f"{a_contig}:{a_start}-{a_end}",
+            "b": f"{match.group('b')}:{match.group('start')}-{match.group('end')}",
+            "strand": fields[6],
+            "score": fields[5],
+            "ks": match.group("ks"),
+        })
+    return blocks, total
+
+
+def _synteny(args) -> str:
+    ctl = controller()
+    if ctl is None:
+        return catalog_unavailable()
+    gene = (args.get("gene") or "").strip()
+    genome = _genome_of(args.get("genome") or gene)
+    if not genome:
+        return ("error: pass 'genome' (e.g. 'glyma.Wm82.gnm2') or 'gene' (a gene ID whose "
+                "assembly it will be taken from).")
+    partner = (args.get("partner") or "").strip()
+    region = (args.get("region") or "").strip()
+    cap = max(1, min(int(args.get("max_blocks") or MAX_BLOCKS), MAX_BLOCKS))
+
+    pairs = ctl.pairwise(genome=genome)
+    if not pairs:
+        return _no_synteny_message(ctl, genome)
+
+    # No partner and no region: orient the caller. Answered from the catalog alone.
+    if not partner and not region:
+        by_partner = {}
+        for pair in pairs:
+            by_partner.setdefault(pair["b"], []).append(pair)
+        lines = [f"{genome}: {len(by_partner)} partner(s) across {len(pairs)} file(s)"]
+        for name in sorted(by_partner):
+            entries = by_partner[name]
+            kinds = sorted({e["kind"] for e in entries})
+            epochs = sorted({e["epoch"] for e in entries if e.get("epoch")})
+            note = f"  {name}  [{', '.join(kinds)}]"
+            if entries[0].get("self"):
+                note += "  (self-comparison"
+                note += f", {', '.join(epochs)})" if epochs else ")"
+            if entries[0]["direction"] == "query":
+                note += "  (stored under the partner's collection)"
+            if any(e.get("i") for e in entries):
+                note += "  indexed — readable with samtools"
+            lines.append(note)
+        lines.append("\nPass 'partner' and optionally 'region' for the blocks themselves.")
+        lines.append(catalog_stamp(ctl))
+        return _cap("\n".join(lines))
+
+    candidates = [p for p in pairs if p["kind"] == "synteny"]
+    if partner:
+        wanted = _genome_of(partner)
+        candidates = [p for p in candidates
+                      if p["b"] == wanted or p["b"].startswith(wanted + ".")]
+        if not candidates:
+            others = sorted({p["b"] for p in pairs})
+            return (f"no synteny file pairs {genome} with {partner!r}. "
+                    f"Partners: {', '.join(others)}. {catalog_stamp(ctl)}")
+    if not candidates:
+        return (f"{genome} has alignment files but no synteny blocks. "
+                f"{catalog_stamp(ctl)}")
+
+    contig, lo, hi = "", None, None
+    if region:
+        contig, lo, hi, err = _parse_region(region)
+        if err:
+            return err
+
+    out = [f"{genome}" + (f" x {partner}" if partner else "")
+           + (f"  region {region}" if region else "")]
+    for pair in candidates[:6]:
+        text, err = _fetch_gz_text(pair["url"])
+        if err:
+            out.append(f"\n  {pair['b']}: error reading {pair['file']}: {err}")
+            continue
+        blocks, total = _parse_blocks(text, contig, lo, hi, cap)
+        header = f"\n  {genome} x {pair['b']}"
+        if pair.get("epoch"):
+            header += f" ({pair['epoch']})"
+        if pair["direction"] == "query":
+            header += "  [stored under the partner's collection; A-side normalised]"
+        out.append(header)
+        if not blocks:
+            out.append("    no blocks overlap that region (the file was read; this is an "
+                       "empty result, not an error)")
+            continue
+        out.append(f"    {len(blocks)} of {total} block(s)"
+                   + ("  [capped]" if total > len(blocks) else "") + ":")
+        for block in blocks:
+            ks = f"  median_Ks={block['ks']}" if block["ks"] else ""
+            out.append(f"      {block['a']}  ->  {block['b']}  "
+                       f"({block['strand']}) score={block['score']}{ks}")
+        out.append(f"    source: {pair['collection']}")
+    out.append(f"\n{catalog_stamp(ctl)}")
+    return _cap("\n".join(out))
+
+
+def _parse_region(region):
+    """samtools-style region -> (contig, lo, hi, error). 1-based inclusive."""
+    region = region.strip()
+    if ":" not in region:
+        return region, None, None, None
+    contig, span = region.rsplit(":", 1)
+    span = span.replace(",", "")
+    try:
+        if "-" in span:
+            lo_s, hi_s = span.split("-", 1)
+            lo, hi = int(lo_s), int(hi_s)
+        else:
+            lo = hi = int(span)
+    except ValueError:
+        return "", None, None, f"error: could not parse region {region!r}."
+    if lo > hi:
+        return "", None, None, f"error: region {region!r} has start > end."
+    return contig, lo, hi, None
 
 
 # --- registry -------------------------------------------------------------------------
@@ -651,56 +658,85 @@ def _mk(name, description, params, sync_fn):
 
 
 def lis_tools() -> list:
-    """Read-only tools for the LIS Data Store (https://data.legumeinfo.org)."""
+    """Read-only tools for the LIS Data Store, served from the resident catalog."""
     return [
         _mk("lis_find",
             "Discover data in the LIS Data Store (legume genomes/annotations/diversity/"
-            "GWAS/…). Drills down: no args lists genera; {taxon} lists that species' data "
-            "types; {taxon, type} lists collections with their synopsis, genotype and "
-            "publication DOI. Use this first — collection names end in an arbitrary "
-            "4-character key ('Wm82.gnm4.ann1.T8TQ') that cannot be guessed. "
+            "GWAS/…) from a resident catalog — no network. Drills down: no args lists "
+            "genera; {taxon} lists that species' data types; {taxon, type} lists "
+            "collections with their synopsis, genotype and publication DOI. Use this "
+            "first — collection names end in an arbitrary 4-character key "
+            "('Wm82.gnm4.ann1.T8TQ') that cannot be guessed. "
             "Args: {taxon?, genus?, species?, type?, query?, max_results?}.",
             {"type": "object",
              "properties": {
                  "taxon": {"type": "string",
-                           "description": "Species name, e.g. 'Glycine max' or 'Phaseolus vulgaris'."},
-                 "genus": {"type": "string", "description": "Genus alone, e.g. 'Glycine'."},
-                 "species": {"type": "string", "description": "Species epithet, e.g. 'max'."},
+                           "description": "Species name, e.g. 'Glycine max'."},
+                 "genus": {"type": "string",
+                           "description": "Genus alone, e.g. 'Glycine'."},
+                 "species": {"type": "string",
+                             "description": "Species epithet, e.g. 'max'."},
                  "type": {"type": "string",
-                          "description": "Data type: genomes, annotations, diversity, gwas, "
-                                         "expression, markers, qtl, synteny, …"},
+                          "description": "Data type: genomes, annotations, diversity, "
+                                         "gwas, expression, markers, qtl, synteny, …"},
                  "query": {"type": "string",
-                           "description": "Substring filter on collection names, e.g. 'Wm82' or '2021'."},
-                 "max_results": {"type": "integer", "description": "Collections to detail, 1–25 (default 10)."}},
+                           "description": "Substring filter on collection names."},
+                 "max_results": {"type": "integer",
+                                 "description": "Collections to detail, 1–25 "
+                                                "(default 10)."}},
              "additionalProperties": False}, _find),
         _mk("lis_files",
             "List a LIS collection's files and — the important part — which ones are "
-            "RANDOMLY ACCESSIBLE over HTTP, with the exact call to read them. The store's "
-            "directory listing hides the .fai/.tbi index siblings, so this is the only way "
-            "to know that a 286 MB genome can be region-queried without downloading it. "
-            "Also reports files that are NOT indexed and therefore unreadable through this "
-            "toolset. Args: {collection} — a path from lis_find, e.g. "
-            "'Glycine/max/annotations/Wm82.gnm4.ann1.T8TQ'.",
+            "RANDOMLY ACCESSIBLE over HTTP, with the exact call to read them. Answers "
+            "from the resident catalog, so it is instant and complete. Reports files "
+            "that are NOT indexed and therefore unreadable through this toolset, and "
+            "distinguishes both from a collection whose index status is UNKNOWN because "
+            "it publishes no CHECKSUM. Args: {collection} — a path from lis_find, e.g. "
+            "'Glycine/max/annotations/Wm82.gnm4.ann1.T8TQ', or a bare collection id.",
             {"type": "object",
              "properties": {"collection": {"type": "string",
-                                           "description": "Datastore path '<Genus>/<species>/<type>/"
-                                                          "<collection>', or a full URL under the store."}},
+                                           "description": "Datastore path, collection "
+                                                          "id, or full datastore URL."}},
              "required": ["collection"], "additionalProperties": False}, _files),
         _mk("lis_gene",
-            "Look up a gene in a LIS annotation and return its locus "
-            "plus ready-to-use calls for its protein/CDS sequence and gene models. Bridges "
-            "the gap that tabix_query needs coordinates, not names. Accepts an exact ID "
-            "('Glyma.12G040000'), a curated gene symbol ('GmNARK', where the species "
-            "publishes gene_functions/<abbrev>.traits.yml), or a superseded ID "
-            "('Glyma01g00210', where the collection publishes a synonym file); the reply "
-            "says which route resolved it. A name from a DIFFERENT assembly is not a "
-            "synonym and will not resolve — use lis_find to pick the right collection. "
-            "Args: {gene, collection?} — collection may be omitted if the ID is fully "
-            "qualified ('glyma.Wm82.gnm4.ann1.Glyma.12G040000').",
+            "Look up a gene in a LIS annotation and return its locus plus ready-to-use "
+            "calls for its protein/CDS sequence and gene models. Bridges the gap that "
+            "tabix_query needs coordinates, not names. Accepts an exact ID "
+            "('Glyma.12G040000'), a curated gene symbol ('GmNARK', resolved from the "
+            "catalog), or a superseded ID ('Glyma01g00210', resolved from the "
+            "collection's synonym file); the reply says which route resolved it. A name "
+            "from a DIFFERENT assembly is not a synonym and will not resolve — use "
+            "lis_find to pick the right collection. Args: {gene, collection?}.",
             {"type": "object",
              "properties": {"gene": {"type": "string",
-                                     "description": "Exact gene or mRNA ID, prefixed or not."},
+                                     "description": "Gene ID, mRNA ID, or curated "
+                                                    "symbol."},
                             "collection": {"type": "string",
-                                           "description": "Annotation collection path from lis_find."}},
+                                           "description": "Annotation collection path "
+                                                          "or id."}},
              "required": ["gene"], "additionalProperties": False}, _gene),
+        _mk("lis_synteny",
+            "Syntenic blocks and whole-genome alignments between legume assemblies. With "
+            "just {genome} or {gene}, lists every partner that assembly is paired with — "
+            "including pairs stored under the OTHER genome's collection, which a "
+            "directory listing would miss. Add {partner} and optionally {region} "
+            "(A-side, samtools-style) for the blocks themselves, with score and "
+            "median_Ks. Synteny is published for one, usually OLD, assembly per species "
+            "(soybean: Wm82.gnm2, not gnm4); if you ask about an assembly without it, "
+            "the reply names the one that has it. Args: {genome?, gene?, partner?, "
+            "region?, max_blocks?}.",
+            {"type": "object",
+             "properties": {
+                 "genome": {"type": "string",
+                            "description": "Assembly, e.g. 'glyma.Wm82.gnm2'."},
+                 "gene": {"type": "string",
+                          "description": "Gene ID; its assembly is used."},
+                 "partner": {"type": "string",
+                             "description": "Restrict to one partner assembly."},
+                 "region": {"type": "string",
+                            "description": "A-side region, 'contig' or "
+                                           "'contig:start-end' (1-based inclusive)."},
+                 "max_blocks": {"type": "integer",
+                                "description": "Block cap per pair (default 200)."}},
+             "additionalProperties": False}, _synteny),
     ]
