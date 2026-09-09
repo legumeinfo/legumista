@@ -2,7 +2,7 @@
 """Native, in-package research tools — so the pipeline needs no MCP servers.
 
 Everything here is implemented in Python against **keyless** public APIs (OpenAlex,
-Crossref, arXiv, Europe PMC) plus local grep and keyless web search (DuckDuckGo via
+Crossref, Europe PMC) plus local grep and keyless web search (DuckDuckGo via
 `ddgs`). Users can still plug in MCP servers (see .mcp.json) — those tools are added
 alongside these. Each tool returns a compact text result for the model, and blocking
 work is offloaded with `asyncio.to_thread` so it never stalls the agent's event loop.
@@ -35,7 +35,7 @@ def _cap(text: str) -> str:
 
 
 # --- SSRF guard: only fetch public http(s) hosts, and re-check every redirect ---
-# Model-supplied URLs (web_fetch, read_paper/fulltext_grep, and the scholarly APIs)
+# Model-supplied URLs (web_fetch, read_paper, and the scholarly APIs)
 # must never be turned into requests against loopback, link-local (incl. the cloud
 # metadata endpoint 169.254.169.254), or private/RFC-1918 addresses. We resolve the
 # host up front and reject blocked targets, then follow redirects through a handler
@@ -251,40 +251,7 @@ def _web_search(args) -> str:
     return _cap("\n".join(out))
 
 
-# --- OpenAlex (keyless; the DOI-anchored workhorse) -------------------------
-def _openalex_search(args) -> str:
-    query = args.get("query") or ""
-    if not query:
-        return "error: missing 'query'"
-    n = min(int(args.get("max_results") or 8), 25)
-    parts = [f"search={urllib.parse.quote(query)}", f"per-page={n}",
-             f"mailto={config.contact_email()}", "sort=relevance_score:desc"]
-    ymin, ymax = config.years()
-    if args.get("from_year") or args.get("to_year"):
-        lo = args.get("from_year") or ymin
-        hi = args.get("to_year") or ymax
-        parts.append(f"filter=from_publication_date:{lo}-01-01,to_publication_date:{hi}-12-31")
-    try:
-        data = _get(f"https://api.openalex.org/works?{'&'.join(parts)}")
-    except Exception as e:  # noqa: BLE001
-        return f"error: OpenAlex request failed: {type(e).__name__}: {e}"
-    papers = []
-    for w in data.get("results", []):
-        papers.append({
-            "title": w.get("title"),
-            "doi": _norm_doi(w.get("doi") or ""),
-            "year": w.get("publication_year"),
-            "cited_by": w.get("cited_by_count"),
-            "venue": (((w.get("primary_location") or {}).get("source")) or {}).get("display_name"),
-            "authors": [(a.get("author") or {}).get("display_name")
-                        for a in (w.get("authorships") or [])[:8]
-                        if (a.get("author") or {}).get("display_name")],
-            "abstract": _reconstruct_abstract(w.get("abstract_inverted_index")),
-            "source": "openalex",
-        })
-    return _fmt(papers)
-
-
+# --- OpenAlex (keyless) -----------------------------------------------------
 def _openalex_by_doi(args) -> str:
     doi = _norm_doi(args.get("doi") or "")
     if not doi:
@@ -302,64 +269,6 @@ def _openalex_by_doi(args) -> str:
                      for a in (w.get("authorships") or []) if (a.get("author") or {}).get("display_name")],
          "abstract": _reconstruct_abstract(w.get("abstract_inverted_index")), "source": "openalex"}
     return _fmt([p]) + f"\n\nreferenced_works: {len(refs)} | cited_by: {w.get('cited_by_count')}"
-
-
-# --- Crossref (keyless) -----------------------------------------------------
-def _crossref_search(args) -> str:
-    query = args.get("query") or ""
-    if not query:
-        return "error: missing 'query'"
-    n = min(int(args.get("max_results") or 8), 25)
-    url = (f"https://api.crossref.org/works?query={urllib.parse.quote(query)}"
-           f"&rows={n}&mailto={config.contact_email()}")
-    try:
-        data = _get(url)
-    except Exception as e:  # noqa: BLE001
-        return f"error: Crossref request failed: {type(e).__name__}: {e}"
-    papers = []
-    for it in (data.get("message") or {}).get("items", []):
-        issued = ((it.get("issued") or {}).get("date-parts") or [[None]])[0][0]
-        papers.append({
-            "title": _clean_abstract((it.get("title") or ["(untitled)"])[0]),
-            "doi": _norm_doi(it.get("DOI") or ""), "year": issued,
-            "cited_by": it.get("is-referenced-by-count"),
-            "venue": (it.get("container-title") or [None])[0],
-            "authors": [f"{a.get('given','')} {a.get('family','')}".strip()
-                        for a in (it.get("author") or [])[:8]],
-            "abstract": _clean_abstract(it.get("abstract") or ""),
-            "source": "crossref"})
-    return _fmt(papers)
-
-
-# --- arXiv (keyless Atom API) -----------------------------------------------
-def _arxiv_search(args) -> str:
-    query = args.get("query") or ""
-    if not query:
-        return "error: missing 'query'"
-    n = min(int(args.get("max_results") or 8), 25)
-    url = (f"http://export.arxiv.org/api/query?search_query=all:{urllib.parse.quote(query)}"
-           f"&max_results={n}&sortBy=relevance")
-    try:
-        xml = _get(url, accept="application/atom+xml")
-    except Exception as e:  # noqa: BLE001
-        return f"error: arXiv request failed: {type(e).__name__}: {e}"
-    import xml.etree.ElementTree as ET
-    ns = {"a": "http://www.w3.org/2005/Atom"}
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError as e:
-        return f"error: arXiv parse failed: {e}"
-    papers = []
-    for e in root.findall("a:entry", ns):
-        aid = (e.findtext("a:id", "", ns) or "").rsplit("/", 1)[-1]
-        papers.append({
-            "title": " ".join((e.findtext("a:title", "", ns) or "").split()),
-            "doi": "", "year": (e.findtext("a:published", "", ns) or "")[:4],
-            "venue": f"arXiv:{aid}",
-            "authors": [a.findtext("a:name", "", ns) for a in e.findall("a:author", ns)][:8],
-            "abstract": " ".join((e.findtext("a:summary", "", ns) or "").split()),
-            "source": "arxiv"})
-    return _fmt(papers)
 
 
 # --- Europe PMC (keyless; PubMed/PMC/preprints) -----------------------------
@@ -382,43 +291,6 @@ def _europepmc_search(args) -> str:
             "venue": r.get("journalTitle") or r.get("source"),
             "authors": [a.strip() for a in (r.get("authorString") or "").split(",")[:8] if a.strip()],
             "abstract": r.get("abstractText") or "", "source": "europepmc"})
-    return _fmt(papers)
-
-
-# --- bioRxiv / medRxiv (keyless; via Crossref member 246) --------------------
-def _biorxiv_search(args) -> str:
-    """Keyword search of bioRxiv/medRxiv preprints. Cold Spring Harbor Lab (Crossref
-    member 246) registers both as `posted-content`; we query Crossref filtered to that
-    member/type — keyless and robust (no fragile HTML scraping)."""
-    query = args.get("query") or ""
-    if not query:
-        return "error: missing 'query'"
-    n = min(int(args.get("max_results") or 8), 25)
-    server = (args.get("server") or "").strip().lower()   # "biorxiv" | "medrxiv" | ""
-    url = (f"https://api.crossref.org/works?query={urllib.parse.quote(query)}"
-           f"&filter=type:posted-content,member:246&rows={min(n * 3, 60)}"
-           f"&mailto={config.contact_email()}")
-    try:
-        data = _get(url)
-    except Exception as e:  # noqa: BLE001
-        return f"error: bioRxiv/Crossref request failed: {type(e).__name__}: {e}"
-    papers = []
-    for it in (data.get("message") or {}).get("items", []):
-        inst = " ".join(i.get("name", "") for i in (it.get("institution") or [])).lower()
-        group = (it.get("group-title") or "").lower()
-        src = "medrxiv" if ("medrxiv" in inst or "medrxiv" in group) else "biorxiv"
-        if server and server not in src:
-            continue
-        posted = ((it.get("posted") or it.get("created") or {}).get("date-parts")
-                  or [[None]])[0][0]
-        papers.append({
-            "title": _clean_abstract((it.get("title") or ["(untitled)"])[0]), "doi": _norm_doi(it.get("DOI") or ""),
-            "year": posted, "cited_by": it.get("is-referenced-by-count"),
-            "venue": src, "authors": [f"{a.get('given','')} {a.get('family','')}".strip()
-                                      for a in (it.get("author") or [])[:8]],
-            "abstract": _clean_abstract(it.get("abstract") or ""), "source": src})
-        if len(papers) >= n:
-            break
     return _fmt(papers)
 
 
@@ -479,31 +351,27 @@ def _fetch_pdf_text(doi: str, url: str, max_pages):
 
 
 def _read_paper(args) -> str:
-    """Download an open-access PDF (by DOI or direct url) and extract its text."""
-    text, url, npages, extracted, err = _fetch_pdf_text(
-        args.get("doi"), args.get("url"), args.get("max_pages") or 30)
-    if err:
-        return err
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    head = f"[{npages} pages; extracted {extracted}] source: {url}\n\n"
-    return head + (_cap(text) if text else "(no extractable text — likely a scanned/image PDF)")
-
-
-def _fulltext_grep(args) -> str:
-    """Fetch an OA PDF (by DOI or url) and return only the lines matching a regex —
-    so you can pull a specific stat (N50, 2n=, p<0.05, an accession) without dumping
-    the whole paper into context."""
+    """Download an open-access PDF (by DOI or direct url) and extract its text; with a
+    `pattern`, return only the lines matching it. One fetch, two output shapes — pulling
+    a single figure (an N50, a '2n=', an accession) out of a paper is the same call as
+    reading it, so the model never has to pick between two tools over one download."""
     pattern = args.get("pattern") or ""
-    if not pattern:
-        return "error: missing 'pattern'"
-    try:
-        rx = re.compile(pattern, re.IGNORECASE if args.get("ignore_case", True) else 0)
-    except re.error as e:
-        return f"error: bad regex: {e}"
-    text, url, npages, _extracted, err = _fetch_pdf_text(
-        args.get("doi"), args.get("url"), args.get("max_pages"))   # all pages by default
+    rx = None
+    if pattern:
+        try:
+            rx = re.compile(pattern, re.IGNORECASE if args.get("ignore_case", True) else 0)
+        except re.error as e:
+            return f"error: bad regex: {e}"
+    # A grep wants every page searched; a plain read wants a bounded dump it can afford
+    # to put in context — hence the different max_pages defaults.
+    text, url, npages, extracted, err = _fetch_pdf_text(
+        args.get("doi"), args.get("url"), args.get("max_pages") or (None if rx else 30))
     if err:
         return err
+    if rx is None:
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        head = f"[{npages} pages; extracted {extracted}] source: {url}\n\n"
+        return head + (_cap(text) if text else "(no extractable text — likely a scanned/image PDF)")
     if not text:
         return f"(no extractable text from {url} — likely a scanned/image PDF)"
     hits = []
@@ -710,15 +578,60 @@ def _edirect(args) -> str:
 
 
 # --- aggregator: fan out + dedupe by DOI ------------------------------------
+# Ask each source for this many times `max_results`, then return only `max_results`.
+# Fetching exactly n per source and truncating the merged list to n discarded almost
+# everything the second source contributed (measured: 9-10 of every 10 Crossref hits
+# never survived the cut), which made the aggregate no broader than a single source —
+# the whole point of merging. Fetching wider gives the dedupe something to work on.
+_FANOUT = 3
+_FANOUT_CAP = 60
+
+
+def _crossref_row(it, source, date_key="issued"):
+    """Map one Crossref `items` entry onto the common paper dict. `date_key` differs by
+    record type: journal articles carry `issued`, preprints `posted`."""
+    dated = ((it.get(date_key) or it.get("created") or {}).get("date-parts") or [[None]])[0][0]
+    return {"title": _clean_abstract((it.get("title") or ["(untitled)"])[0]),
+            "doi": _norm_doi(it.get("DOI") or ""), "year": dated,
+            "cited_by": it.get("is-referenced-by-count"),
+            "venue": (it.get("container-title") or [None])[0] or source,
+            "authors": [f"{x.get('given','')} {x.get('family','')}".strip()
+                        for x in (it.get("author") or [])[:6]],
+            "abstract": _clean_abstract(it.get("abstract") or ""), "source": source}
+
+
+def _preprint_source(it) -> str:
+    """Cold Spring Harbor Lab (Crossref member 246) registers bioRxiv and medRxiv alike
+    as `posted-content`; only the institution/group name tells the two servers apart."""
+    inst = " ".join(i.get("name", "") for i in (it.get("institution") or [])).lower()
+    group = (it.get("group-title") or "").lower()
+    return "medrxiv" if ("medrxiv" in inst or "medrxiv" in group) else "biorxiv"
+
+
 def _paper_search(args) -> str:
     query = args.get("query") or ""
     if not query:
         return "error: missing 'query'"
     n = min(int(args.get("max_results") or 8), 20)
+    wide = min(n * _FANOUT, _FANOUT_CAP)
     merged, seen, rows = [], set(), []      # fan out at the data layer, dedupe by DOI
+    sources = ["OpenAlex", "Crossref"]
+    # Year bounds. Each API spells this differently, so build the fragments once rather
+    # than filtering after the fact -- post-filtering would silently shrink the page and
+    # make `max_results` mean something different when a year is given.
+    from_year, to_year = args.get("from_year"), args.get("to_year")
+    oa_filter, cr_filter = [], []
+    if from_year:
+        oa_filter.append(f"from_publication_date:{int(from_year)}-01-01")
+        cr_filter.append(f"from-pub-date:{int(from_year)}-01-01")
+    if to_year:
+        oa_filter.append(f"to_publication_date:{int(to_year)}-12-31")
+        cr_filter.append(f"until-pub-date:{int(to_year)}-12-31")
+    oa_q = "&filter=" + urllib.parse.quote(",".join(oa_filter)) if oa_filter else ""
+    cr_q = "&filter=" + urllib.parse.quote(",".join(cr_filter)) if cr_filter else ""
     try:
         oa = _get(f"https://api.openalex.org/works?search={urllib.parse.quote(query)}"
-                  f"&per-page={n}&mailto={config.contact_email()}").get("results", [])
+                  f"&per-page={wide}{oa_q}&mailto={config.contact_email()}").get("results", [])
         for w in oa:
             rows.append({"title": w.get("title"), "doi": _norm_doi(w.get("doi") or ""),
                          "year": w.get("publication_year"), "cited_by": w.get("cited_by_count"),
@@ -731,22 +644,28 @@ def _paper_search(args) -> str:
         pass
     try:
         cr = (_get(f"https://api.crossref.org/works?query={urllib.parse.quote(query)}"
-                   f"&rows={n}&mailto={config.contact_email()}").get("message") or {}).get("items", [])
-        for it in cr:
-            issued = ((it.get("issued") or {}).get("date-parts") or [[None]])[0][0]
-            rows.append({"title": _clean_abstract((it.get("title") or ["(untitled)"])[0]), "doi": _norm_doi(it.get("DOI") or ""),
-                         "year": issued, "cited_by": it.get("is-referenced-by-count"),
-                         "venue": (it.get("container-title") or [None])[0],
-                         "authors": [f"{x.get('given','')} {x.get('family','')}".strip() for x in (it.get("author") or [])[:6]],
-                         "abstract": _clean_abstract(it.get("abstract") or ""), "source": "crossref"})
+                   f"&rows={wide}{cr_q}&mailto={config.contact_email()}").get("message")
+              or {}).get("items", [])
+        rows += [_crossref_row(it, "crossref") for it in cr]
     except Exception:  # noqa: BLE001
         pass
+    if args.get("include_preprints"):
+        # Preprints are off by default: they are unreviewed, and a corpus built from
+        # them reads as settled literature unless the caller asked for them.
+        sources.append("bioRxiv/medRxiv")
+        try:
+            pp = (_get(f"https://api.crossref.org/works?query={urllib.parse.quote(query)}"
+                       f"&filter=type:posted-content,member:246&rows={wide}"
+                       f"&mailto={config.contact_email()}").get("message") or {}).get("items", [])
+            rows += [_crossref_row(it, _preprint_source(it), date_key="posted") for it in pp]
+        except Exception:  # noqa: BLE001
+            pass
     for r in rows:
         key = r["doi"] or (r.get("title") or "").lower()[:80]
         if key and key not in seen:
             seen.add(key)
             merged.append(r)
-    return _fmt(merged[:n]) + f"\n\n({len(merged)} unique across OpenAlex+Crossref)"
+    return _fmt(merged[:n]) + f"\n\n({len(merged)} unique across {'+'.join(sources)})"
 
 
 def _mk(name, description, params, sync_fn, read_only=True):
@@ -766,7 +685,7 @@ def native_tools() -> list:
         _mk("grep", "Search local files for a regular expression and return matching "
             "`file:line: text` lines (capped at 200). Use to find text in project files; "
             "this searches the local filesystem, not the web (use web_search) or paper PDFs "
-            "(use fulltext_grep).",
+            "(use read_paper with a pattern).",
             {"type": "object",
              "properties": {"pattern": {"type": "string",
                                         "description": "Python regular expression to match."},
@@ -780,48 +699,31 @@ def native_tools() -> list:
         _mk("web_search", "Search the open web (DuckDuckGo, keyless) and return "
             "title/URL/snippet per hit. Use for non-bibliographic context (a lab site, a "
             "data portal, a news item). Never cite a paper from here — confirm it via "
-            "openalex_search/crossref_search to get a real DOI first.",
+            "paper_search/openalex_by_doi to get a real DOI first.",
             {"type": "object", "properties": q, "required": ["query"],
              "additionalProperties": False}, _web_search),
-        _mk("openalex_search", "Search OpenAlex for scholarly works by topic; returns "
-            "DOI-anchored metadata (title, authors, year, venue, cited-by, abstract). "
-            "The primary DOI discovery tool. Args: {query, max_results?, from_year?, to_year?}.",
-            {"type": "object",
-             "properties": {**q, "from_year": {"type": "integer"}, "to_year": {"type": "integer"}},
-             "required": ["query"]}, _openalex_search),
         _mk("openalex_by_doi", "Fetch one work from OpenAlex by DOI (metadata + "
             "reference/citation counts). Args: {doi}.",
             {"type": "object", "properties": {"doi": {"type": "string"}}, "required": ["doi"]},
             _openalex_by_doi),
-        _mk("crossref_search", "Search Crossref (DOI registry) by topic. Args: {query, max_results?}.",
-            {"type": "object", "properties": q, "required": ["query"]}, _crossref_search),
-        _mk("arxiv_search", "Search arXiv preprints (physics/CS/quant-bio/…). Args: {query, max_results?}.",
-            {"type": "object", "properties": q, "required": ["query"]}, _arxiv_search),
         _mk("europepmc_search", "Search Europe PMC (PubMed/PMC/preprints, life sciences), "
             "with abstracts. Args: {query, max_results?}.",
             {"type": "object", "properties": q, "required": ["query"]}, _europepmc_search),
-        _mk("biorxiv_search", "Keyword search of bioRxiv/medRxiv preprints (via "
-            "Crossref, keyless). Args: {query, max_results?, server?}. server is "
-            "'biorxiv' or 'medrxiv' to restrict; omit for both.",
-            {"type": "object",
-             "properties": {**q, "server": {"type": "string", "enum": ["biorxiv", "medrxiv"]}},
-             "required": ["query"]}, _biorxiv_search),
         _mk("read_paper", "Download an open-access PDF (by DOI or direct URL) and "
-            "extract its full text. Args: {doi?, url?, max_pages?}. Provide one of "
-            "doi/url. Returns extracted text (image-only PDFs yield nothing).",
+            "extract its text. Args: {doi?, url?, pattern?, ignore_case?, max_pages?}. "
+            "Provide one of doi/url. With `pattern` (a regex) it returns only the "
+            "matching lines — e.g. pull an N50, '2n=', or an accession without loading "
+            "the whole paper; without it, the full extracted text (default 30 pages; "
+            "a pattern search covers every page). Image-only PDFs yield nothing.",
             {"type": "object",
              "properties": {"doi": {"type": "string"}, "url": {"type": "string"},
-                            "max_pages": {"type": "integer", "description": "cap (default 30)"}}},
+                            "pattern": {"type": "string",
+                                        "description": "Regex; return only matching lines."},
+                            "ignore_case": {"type": "boolean",
+                                            "description": "Case-insensitive pattern (default: true)."},
+                            "max_pages": {"type": "integer",
+                                          "description": "Page cap (default 30, or all pages with a pattern)"}}},
             _read_paper),
-        _mk("fulltext_grep", "Fetch an open-access PDF (by DOI or URL) and return only "
-            "the lines matching a regex — e.g. pull N50, '2n=', 'p<0.05', or an "
-            "accession without reading the whole paper. Args: {pattern, doi?, url?, "
-            "ignore_case?, max_pages?}.",
-            {"type": "object",
-             "properties": {"pattern": {"type": "string"}, "doi": {"type": "string"},
-                            "url": {"type": "string"}, "ignore_case": {"type": "boolean"},
-                            "max_pages": {"type": "integer"}},
-             "required": ["pattern"]}, _fulltext_grep),
         _mk("ncbi_datasets", "Run the NCBI `datasets` CLI (genome/gene/taxonomy data). "
             "Args: {args: [string,...]} — the subcommand + flags, e.g. "
             "[\"summary\",\"genome\",\"taxon\",\"Homo sapiens\",\"--as-json-lines\"]. "
@@ -852,7 +754,23 @@ def native_tools() -> list:
                             "retmax": {"type": "integer", "description": "1–200 (default 20)"}},
              "required": ["db", "query"]}, _edirect),
         _mk("paper_search", "Broad literature search across OpenAlex + Crossref, "
-            "deduplicated by DOI. Use for breadth; the per-source tools for depth. "
-            "Args: {query, max_results?}.",
-            {"type": "object", "properties": q, "required": ["query"]}, _paper_search),
+            "deduplicated by DOI — each source is queried wider than the result set so "
+            "the merge is genuinely multi-source. The main discovery tool; use "
+            "europepmc_search alongside it for life-science coverage it does not reach. "
+            "Args: {query, max_results?, from_year?, to_year?, include_preprints?}. "
+            "include_preprints also pulls bioRxiv/medRxiv posted-content (unreviewed; "
+            "off by default).",
+            {"type": "object",
+             "properties": {**q,
+                            "from_year": {
+                                "type": "integer",
+                                "description": "Earliest publication year (inclusive)."},
+                            "to_year": {
+                                "type": "integer",
+                                "description": "Latest publication year (inclusive)."},
+                            "include_preprints": {
+                                "type": "boolean",
+                                "description": "Also search bioRxiv/medRxiv preprints "
+                                               "(default: false)."}},
+             "required": ["query"]}, _paper_search),
     ]

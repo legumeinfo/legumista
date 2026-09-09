@@ -22,101 +22,40 @@ deduplicate on DOI; when a search returns nothing, say so exactly and broaden th
 
 ---
 
-## openalex_search — the primary DOI-discovery tool
+## paper_search — the primary discovery tool
 
-Search [OpenAlex](https://openalex.org) (a free, keyless index of ~250M scholarly works)
-by topic and get back **DOI-anchored** metadata for each hit: title, authors, publication
-year, venue, citation count, and a reconstructed abstract. Results are ranked by OpenAlex
-relevance score.
+Fans out across OpenAlex and Crossref and dedupes by DOI, querying each source wider than
+the result set so the merge is genuinely multi-source rather than one index with a second
+one truncated off the end.
 
-**When to use:** first, for almost any `{{SUBJECT}}`-type question. It is the fastest way
-to turn a topic into real, resolvable DOIs you can trust and carry into a corpus. Start
-broad, read the hits, then refine.
+- **Args:** `{query, max_results?, from_year?, to_year?, include_preprints?}`.
+- `include_preprints` adds bioRxiv/medRxiv posted-content. Off by default: preprints are
+  unreviewed, and a corpus built from them reads as settled literature unless asked for.
+- **Always run `europepmc_search` alongside it.** Measured on legume queries, Europe PMC's
+  hits and `paper_search`'s barely overlap — Europe PMC is not one of the indexes it fans
+  out to, so running only `paper_search` silently leaves out most of the life-sciences
+  literature.
 
-**When not to use:** to read a paper's contents (use `read_paper`), or to get the actual
-list of a work's references/citations (OpenAlex gives you *counts*, not the DOI lists —
-see `openalex_by_doi`).
+## europepmc_search — life-sciences coverage nothing else reaches
 
-- **Arguments:**
-  - `query` *(string, required)* — natural-language topic or keywords.
-  - `max_results` *(int, optional, default 8, capped at 25)*.
-  - `from_year` / `to_year` *(int, optional)* — restrict by publication date. If either is
-    set, the other defaults to the project scope ({{YEAR_MIN}}–{{YEAR_MAX}}).
-- **Returns:** a numbered list; each entry is `title (year)` then a metadata line
-  (`doi:… | venue | cited-by:N | src:openalex`), the first authors, and a truncated abstract.
-- **Notes:** abstracts are reconstructed from OpenAlex's inverted index, so spacing/casing
-  can be imperfect — fine for triage, not for quotation. Titles without a registered DOI
-  show no `doi:` field; treat those as "no DOI located," not an error to patch.
-- **Example:** `{ "query": "chromosome-scale genome assembly Hi-C scaffolding", "from_year": 2020 }`
+PubMed/PMC/preprints, with abstracts. Args: `{query, max_results?}`. For this domain it is
+not an alternative to `paper_search`, it is the other half.
 
-## openalex_by_doi — one work, with graph counts
+## openalex_by_doi — one work, by identifier
 
-Fetch a single OpenAlex work by DOI: full metadata plus how many works it **references**
-and how many works **cite** it.
+Fetch a single work's metadata plus reference/citation counts. Args: `{doi}`. This is the
+verification path, not a discovery path — and the one you want constantly, because every
+LIS collection publishes a `publication_doi`.
 
-**When to use:** to confirm a specific DOI resolves and to gauge a paper's connectivity
-(is this a landmark with 800 citers, or a leaf node?) before deciding whether to expand it.
+## read_paper — open-access full text, whole or filtered
 
-- **Arguments:** `doi` *(string, required)* — bare (`10.1101/…`) or a `doi.org` URL; it is
-  normalized for you.
-- **Returns:** the work (as in `openalex_search`) plus a trailing
-  `referenced_works: N | cited_by: N`.
-- **Important limitation:** this returns **counts, not the DOIs** of the references/citers.
-  The deterministic crawl walks the citation graph for you; this tool is for verification
-  and connectivity, not for harvesting a reference list.
+Download an OA PDF (by DOI or URL) and extract its text, so you read the actual
+methods/results rather than an abstract. Args: `{doi?, url?, pattern?, ignore_case?,
+max_pages?}`.
 
-## paper_search — breadth across sources
-
-Run one query against **OpenAlex + Crossref**, merge the hits, and **deduplicate by DOI**
-(falling back to a title key when a record has no DOI).
-
-**When to use:** the first broad sweep of a new topic, when you want coverage across two
-indexes in a single call and don't yet know which source is richest.
-
-**When not to use:** for depth in one source (use the per-source tools), or when you need
-year filtering (use `openalex_search`).
-
-- **Arguments:** `query` *(string, required)*; `max_results` *(int, default 8, capped 20)*.
-- **Returns:** the deduplicated list, with a trailing `(N unique across OpenAlex+Crossref)`.
-
-## crossref_search / arxiv_search / europepmc_search / biorxiv_search — per-source depth
-
-Use these when you know which corner of the literature you're in, or to cross-check a hit
-found elsewhere. Each takes `query` *(string, required)* and `max_results`
-*(int, default 8, capped 25)*.
-
-- **`crossref_search`** — the DOI registry itself. Best for exact publication metadata
-  (journal, volume/issue/pages, registered abstract). Strong for published journal
-  articles; weaker for grey literature.
-- **`arxiv_search`** — arXiv preprints (physics, CS, math, quantitative biology).
-  Returns **arXiv IDs, not DOIs** (`venue: arXiv:2401.01234`); year is the submission year.
-- **`europepmc_search`** — Europe PMC, covering **PubMed + PMC + life-science preprints**,
-  with abstracts and citation counts. The default choice for biology/medicine.
-- **`biorxiv_search`** — **bioRxiv/medRxiv preprints** (via Crossref member 246 — keyless,
-  no scraping). Adds `server` *(optional, `"biorxiv"` | `"medrxiv"`)* to restrict; omit for
-  both. Use for the most recent, not-yet-peer-reviewed genomics work. Treat every hit as a
-  **preprint** (unreviewed) when you cite it.
-
-## read_paper / fulltext_grep — open-access full text
-
-Read what a paper actually says, not just its abstract. Both resolve an open-access PDF
-(via OpenAlex OA locations, then Unpaywall) and extract text with `pypdf`.
-
-- **`read_paper`** — download and return the extracted text.
-  - **Arguments:** `doi` *(string)* **or** `url` *(string)* — supply one; `max_pages`
-    *(int, default 30)* caps how many pages are extracted.
-  - **Returns:** a header `[N pages; extracted M] source: <url>` then the text (size-capped).
-  - **Failure modes, each reported plainly:** no open-access copy found ("read the abstract
-    via `openalex_by_doi` instead"); the URL served a landing page not a PDF; a
-    scanned/image-only PDF (no extractable text). None of these are a reason to invent
-    content — report what you could and could not read.
-- **`fulltext_grep`** — same fetch, but return **only the lines matching a regex**. Use
-  this to pull one fact from a long paper (a `N50`, a `2n=` chromosome count, a `p < 0.05`,
-  an SRA/GenBank accession) without loading the whole thing into context.
-  - **Arguments:** `pattern` *(string, required — a Python regex)*; `doi` **or** `url`;
-    `ignore_case` *(bool, default true)*; `max_pages` *(int, default: all pages)*.
-  - **Returns:** the matching lines (capped at 100), or a clear "No matches … in <url>".
-  - **Example:** `{ "doi": "10.1371/journal.pone.0064799", "pattern": "N50|scaffold|genome size" }`
+Pass `pattern` to get back only the lines matching a regex — pull one figure (an N50,
+`2n=`, `p<0.05`, an accession) without loading the whole paper into context. Same fetch
+either way; `pattern` only changes what is returned.
 
 ## Genomic records — NCBI (`ncbi_assembly_status`, `sra_runs`, `ncbi_datasets`, `edirect`)
 
@@ -157,20 +96,16 @@ a database/portal, a software repo, a news item, an author's affiliation.
 - **Arguments:** `query` *(string, required)*; `max_results` *(int, default 8)*.
 - **Returns:** title / URL / snippet per hit.
 - **Rule:** never cite a *paper* from web search. If a result looks like a paper, confirm it
-  through `openalex_search`/`crossref_search` to get a real DOI before you carry it forward.
+  through `paper_search` or `openalex_by_doi` to get a real DOI before you carry it forward.
 
-## read_file / grep / web_fetch — local files and arbitrary URLs
+## web_fetch — arbitrary URLs
 
-- **`read_file`** — read a local text file. Arguments: `path` *(string, required)*. Use for
-  project files (`corpus/corpus_digest.md`, ledgers, context inputs). Not for URLs (use
-  `web_fetch`) or scholarly PDFs (use `read_paper`).
-- **`grep`** — regex-search local files. Arguments: `pattern` *(string, required)*; `path`
-  *(dir or file, default `.`)*; `glob` *(e.g. `**/*.md`)*; `ignore_case` *(bool, default true)*.
-  Returns `file:line: match`, capped at 200 hits.
-- **`web_fetch`** — fetch a URL and return readable text (size-capped). Arguments: `url`
-  *(string, required)*. For a scholarly PDF prefer `read_paper`, which resolves the OA copy.
+Fetch an http(s) URL and return its readable text (HTML stripped, size-capped). For a
+scholarly paper prefer `read_paper`, which resolves the open-access PDF.
 
----
+**There is no `read_file` or `grep` here.** Reading and searching local files is your
+client's job — it almost certainly has better tools for it than a sandboxed duplicate
+would be. If you need a file's contents, use the client's own file tools.
 
 ## Bioinformatics tools (pysam / htslib) — query indexed genomics files
 
@@ -207,7 +142,7 @@ confined to the project workspace.
 
 ---
 
-## LIS Data Store (`lis_find`, `lis_files`, `lis_gene`, `lis_survey`, `lis_lineage`)
+## LIS Data Store (`lis_find`, `lis_files`, `lis_gene`, `lis_synteny`, `lis_survey`, `lis_lineage`)
 
 Legume genomes, annotations, diversity panels, GWAS and more, for ~21 genera. All five
 tools read a **resident catalog** — the whole datastore in one document, held in memory —

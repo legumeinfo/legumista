@@ -255,11 +255,15 @@ external services:
   `tool_calls`, run them, feed the results back as `role:"tool"` messages, and repeat
   until a final answer (bounded by `LEGUMISTA_AGENT_MAX_TURNS`, default 8).
 - **Native tools (`legumista_agent/tools_native.py`, `tools_local.py`)** — in-package,
-  keyless, no MCP required: `openalex_search`/`openalex_by_doi` (DOI discovery),
-  `crossref_search`, `arxiv_search`, `europepmc_search`, `biorxiv_search` (preprints),
-  `paper_search` (fan-out + dedupe), `read_paper` (OA PDF → text via `pypdf`),
+  keyless, no MCP required: `paper_search` (OpenAlex + Crossref
+  fan-out, deduped by DOI, with optional year bounds and preprints), `europepmc_search`
+  (life-sciences coverage `paper_search` does not reach), `openalex_by_doi` (one work by
+  identifier), `read_paper` (OA PDF → text via `pypdf`, optionally regex-filtered),
   `ncbi_datasets`/`edirect` (NCBI genomes/assemblies/SRA via the local NCBI CLIs),
-  `web_search` (DuckDuckGo), and `grep`/`read_file`/`web_fetch`. Documented for the model in
+  `web_search` (DuckDuckGo), and `web_search`/`web_fetch`. `read_file` and `grep` exist for the internal
+  `legumista research` agent but are **not served over MCP** — an MCP client already has
+  file tools, and a sandboxed duplicate only makes the model choose between two ways to
+  read a file. Documented for the model in
   [`prompts/tools_native.md`](legumista_assets/prompts/tools_native.md), appended to the
   system prompt.
 - **Bioinformatics tools (`legumista_agent/tools_pysam.py`)** — htslib access to indexed

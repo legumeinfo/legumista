@@ -23,6 +23,13 @@ model. Each tool below owns a single tested PathQuery, so the traps are handled 
    `annotation` narrow it.
 4. **Unbounded result sets.** One gene has 639 expression values, so queries are capped and
    the total is reported via a `format=count` pre-flight rather than truncating silently.
+5. **A mine that does not exist.** Only ~10 genera have a mine; the store holds ~48 species
+   that have none. Routing them by name produced a 404 the model reads as an outage, so
+   the catalog's published mines are checked BEFORE any request (see `_known_mines`).
+
+Successful responses are memoized for the life of the process (`_cached`): an agent working
+one gene re-issues the same PathQuery — `legumemine_gene_orthologs` re-derives the family
+`legumemine_gene_families` just fetched. Errors are never cached, so a retry retries.
 
 Mine selection: `MINE` (env `LEGUMISTA_LIS_MINE`) with a per-call `mine` override. The
 default is `legumemine`, the pan-legume mine — it spans 55 organisms, so its gene families
@@ -33,9 +40,12 @@ result names the mine that answered, so an agent can never misattribute.
 """
 import asyncio
 import os
+import re
+import threading
 import urllib.parse
 from xml.sax.saxutils import quoteattr
 
+from . import tools_catalog
 from .tool import Tool
 from .tools_native import _cap, _get, _validate_url
 
@@ -72,16 +82,57 @@ def _url(mine: str, xml: str, fmt: str, size: int = None) -> str:
     return f"{_service(mine)}/query/results?" + urllib.parse.urlencode(params)
 
 
+# --- response cache --------------------------------------------------------------------
+# A mine answer is deterministic for the life of a request: the same PathQuery at the same
+# size returns the same rows. An agent working one gene re-issues them anyway — asking for
+# a gene's orthologs re-derives the gene->family mapping `legumemine_gene_families` just
+# fetched — so identical queries are collapsed to one round trip.
+#
+# ONLY successes are cached. Caching an error would turn a transient outage into a
+# permanent one for this process, and the "retry later" advice we hand back would be a lie.
+_CACHE: dict = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _cached(key, compute):
+    """Memoize `compute()` under `key`, unless it reports failure.
+
+    `compute` returns (value, cacheable); the miss is recomputed every time when
+    `cacheable` is false. Same shape as tools_catalog's lazy load: a plain dict behind a
+    lock, since the values are immutable results and the cost of a double-compute race is
+    one extra request, not corruption."""
+    with _CACHE_LOCK:
+        if key in _CACHE:
+            return _CACHE[key]
+    value, cacheable = compute()
+    if cacheable:
+        with _CACHE_LOCK:
+            _CACHE[key] = value
+    return value
+
+
+def reset_cache():
+    """Forget every cached mine response. For tests, and for a future reload command."""
+    with _CACHE_LOCK:
+        _CACHE.clear()
+    with _MINES_LOCK:
+        _KNOWN.clear()
+        _PROBED.clear()
+
+
 def _count(mine: str, xml: str):
     """Total matching rows, or None if the count itself failed (never fatal — a missing
     count only costs the caller the 'showing N of M' line)."""
-    try:
-        url = _url(mine, xml, "count")
-        _validate_url(url)
-        text = _get(url, accept="text/plain").strip()
-        return int(text) if text.isdigit() else None
-    except Exception:  # noqa: BLE001
-        return None
+    def compute():
+        try:
+            url = _url(mine, xml, "count")
+            _validate_url(url)
+            text = _get(url, accept="text/plain").strip()
+        except Exception:  # noqa: BLE001
+            return None, False
+        return (int(text), True) if text.isdigit() else (None, False)
+
+    return _cached(("count", mine, xml), compute)
 
 
 def _run(mine: str, xml: str, size: int):
@@ -89,6 +140,17 @@ def _run(mine: str, xml: str, size: int):
 
     The whole point: InterMine reports failure inside a 200 body, so `wasSuccessful` is
     checked before `results` is trusted."""
+    return _cached(("run", mine, xml, size), lambda: _run_uncached(mine, xml, size))
+
+
+def _run_uncached(mine: str, xml: str, size: int):
+    """One PathQuery round trip. Returns ((rows, columns, error), cacheable) — an error is
+    never cacheable, so a retry after an outage really retries."""
+    result = _fetch(mine, xml, size)
+    return result, result[2] is None
+
+
+def _fetch(mine: str, xml: str, size: int):
     try:
         url = _url(mine, xml, "json", size)
         _validate_url(url)
@@ -155,11 +217,90 @@ def _assembly_note(rows, idx):
     return ""
 
 
-# Every LIS mine is named "<genus>mine" in lower case — aeschynomenemine, arachismine,
-# cajanusmine, cicermine, glycinemine, lensmine, lupinusmine, medicagomine, phaseolusmine,
-# vignamine — so a taxon routes to its mine without a lookup table.
+# --- which mines exist -----------------------------------------------------------------
+# Every LIS mine is named "<genus>mine" in lower case, so a taxon routes to its mine
+# without a lookup table. The guess is right for every genus that HAS a mine — but the
+# store holds ~48 species that have none, and for those the guess used to produce a doomed
+# request whose 404 reads like an outage ("viciamine request failed: HTTP Error 404"). The
+# model cannot tell "this species has no mine" from "the mine is down", so it retries or
+# concludes the data does not exist. The catalog knows which mines are published, so an
+# unpublished one is refused before any request is made.
+_MINE_URL = re.compile(r"^https?://[^/]+/([A-Za-z0-9_-]+mine)(?:/|$)", re.IGNORECASE)
+
+# The catalog's per-taxon `resources` are curated for the web site and list 8 of the 10
+# live genus mines -- cajanusmine and lensmine answer /service/version but appear nowhere
+# in it. Trusting the catalog alone would therefore refuse two real mines (pigeonpea and
+# lentil, both with breeding data), so a name the catalog does not know is PROBED once
+# before being refused rather than being carried in a hardcoded list. A list would drift
+# silently in the refusing direction every time LIS adds a mine; a probe self-corrects,
+# and only ever runs on the miss path.
+_KNOWN: dict = {}
+_PROBED: dict = {}
+_MINES_LOCK = threading.Lock()
+
+
+def _known_mines():
+    """The set of mine names known to exist, or None when no catalog is loaded.
+
+    None is not an empty set: it means we cannot know, and callers must fall back to the
+    genus guess rather than refuse everything."""
+    with _MINES_LOCK:
+        if "mines" in _KNOWN:
+            return _KNOWN["mines"]
+    ctl = tools_catalog.controller()
+    mines = None
+    if ctl is not None:
+        # Some `resources` entries are split across several dicts (Aeschynomene's name,
+        # URL and description each sit in their own), so scan for URLs, not for names.
+        found = set()
+        for meta in (ctl.document.get("taxa") or {}).values():
+            resources = meta.get("resources") if isinstance(meta, dict) else None
+            for resource in resources or []:
+                url = resource.get("URL") if isinstance(resource, dict) else None
+                match = _MINE_URL.match(str(url or ""))
+                if match:
+                    found.add(match.group(1).lower())
+        # MINE is the configured default (the pan-legume mine); it is a mine of no genus,
+        # so no taxon lists it and it must be added by hand.
+        mines = found | {MINE.lower()}
+    with _MINES_LOCK:
+        _KNOWN["mines"] = mines
+    return mines
+
+
 def _mine_for_taxon(taxon: str) -> str:
     return (taxon or "").replace("_", " ").split()[0].lower() + "mine"
+
+
+def _mine_exists(mine: str) -> bool:
+    """Does this mine answer? Asked only when the catalog has not heard of it.
+
+    One cheap /service/version call, cached for the process. This is what keeps the
+    catalog's incompleteness from hardening into a wrong refusal: the catalog is the
+    fast path, the probe is the correction.
+    """
+    with _MINES_LOCK:
+        if mine in _PROBED:
+            return _PROBED[mine]
+    try:
+        url = f"{_service(mine)}/version"
+        _validate_url(url)
+        _get(url, accept="text/plain")
+        alive = True
+    except Exception:  # noqa: BLE001 - a 404 (or anything else) means "not usable"
+        alive = False
+    with _MINES_LOCK:
+        _PROBED[mine] = alive
+    return alive
+
+
+def _no_mine(taxon: str, mine: str) -> str:
+    """The honest answer for a species with no mine — no request, no ambiguous 404."""
+    return (f"{taxon} has no InterMine ({mine} is not a published LIS mine, so this is "
+            "not an outage and retrying will not help). QTL/GWAS/marker/gene data for it, "
+            f"if any, is in the LIS Data Store — try lis_find(taxon={taxon!r}, type='qtl') "
+            "(also 'gwas', 'markers', 'maps', 'annotations'), then lis_files for the "
+            "files themselves.")
 
 
 def _resolve_mine(args, require_taxon=False):
@@ -170,10 +311,15 @@ def _resolve_mine(args, require_taxon=False):
     would raise a model error rather than return an honest empty result."""
     explicit = (args.get("mine") or "").strip()
     if explicit:
+        # An explicit mine is the caller's own assertion; we route, we do not veto.
         return explicit, None
     taxon = (args.get("taxon") or args.get("genus") or "").strip()
     if taxon:
-        return _mine_for_taxon(taxon), None
+        mine = _mine_for_taxon(taxon)
+        known = _known_mines()
+        if known is not None and mine not in known and not _mine_exists(mine):
+            return None, _no_mine(taxon, mine)
+        return mine, None
     if require_taxon:
         return None, ("error: missing 'taxon' — QTL/GWAS/marker data lives only in the "
                       "per-species mines (legumemine has none of it), so name the species, "
@@ -183,7 +329,7 @@ def _resolve_mine(args, require_taxon=False):
 
 def _execute(args, title, view, constraints, sort=None, assembly_col=1,
              subject_key="gene", subject_hint="a gene identifier such as 'Glyma.12G040000'",
-             require_taxon=False):
+             require_taxon=False, footer=None):
     mine, mine_err = _resolve_mine(args, require_taxon)
     if mine_err:
         return mine_err
@@ -197,7 +343,14 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
         return err
     total = _count(mine, xml) if len(rows) >= min(size, COUNT_THRESHOLD) else len(rows)
     note = _assembly_note(rows, assembly_col) if assembly_col is not None else ""
-    return _render(title, mine, subject, rows, cols, total, size, note)
+    out = _render(title, mine, subject, rows, cols, total, size, note)
+    # A footer names the next tool the rows unlock. It goes in the OUTPUT rather than a
+    # docstring because the hand-off is only discoverable once you are holding the values.
+    if footer and rows:
+        extra = footer(rows)
+        if extra:
+            out = _cap(out + "\n\n" + extra)
+    return out
 
 
 # --- the four tools -------------------------------------------------------------------
@@ -244,12 +397,59 @@ def _gene_expression(args) -> str:
         assembly_col=None)
 
 
+def _abbrev_for_taxon(ctl, taxon: str) -> str:
+    """Datastore abbreviation ('glyma') for a taxon, or "" — used only to scope a symbol
+    lookup, so a miss is harmless (the search just stays cross-species)."""
+    bits = (taxon or "").replace("_", " ").split()
+    if len(bits) < 2:
+        return ""
+    meta = (ctl.document.get("taxa") or {}).get(
+        f"{bits[0].capitalize()}/{bits[1].lower()}") or {}
+    return str(meta.get("abbrev") or "")
+
+
+def _catalog_symbol(args) -> str:
+    """Curated symbol -> gene from the resident catalog, or "" on a miss.
+
+    Checked BEFORE the mine because it is instant, offline, and has no ID-namespace
+    problem: it stores the fully-qualified gene id, whereas the mine answer still has to
+    be disambiguated across assemblies. The mine keeps the fall-through because its
+    curation is broader (344 symbols here) and it carries every publication, not one DOI.
+    """
+    ctl = tools_catalog.controller()
+    if ctl is None:
+        return ""
+    symbol = (args.get("symbol") or "").strip()
+    taxon = (args.get("taxon") or args.get("genus") or "").strip()
+    try:
+        hits = ctl.resolve_symbol(symbol, _abbrev_for_taxon(ctl, taxon))
+    except Exception:  # noqa: BLE001 - a catalog miss must never sink the mine query
+        return ""
+    if not hits:
+        return ""
+    lines = [f"Gene symbol — {symbol} [source: curated LIS catalog, NOT a mine query]",
+             f"{len(hits)} curated record(s)  {tools_catalog.catalog_stamp(ctl)}",
+             "  species | gene | doi | synopsis"]
+    for hit in hits:
+        lines.append("  " + " | ".join(str(hit.get(k) or "")
+                                       for k in ("abbrev", "gene", "doi", "synopsis")))
+    lines.append("The gene id is fully qualified — pass it straight to lis_gene, "
+                 "legumemine_gene_families or fasta_fetch. For every publication behind "
+                 "the symbol rather than the primary DOI, re-run with an explicit 'mine'.")
+    return _cap("\n".join(lines))
+
+
 def _gene_symbol(args) -> str:
     """Resolve a gene SYMBOL to its gene ID(s) — the lookup `lis_gene` cannot do.
 
-    `=` is case-insensitive in InterMine (GmNARK / gmnark / GMNARK all match), so exact
-    matching is safe here. One row per publication, because the DOIs are the point: they
-    hand the literature tools a citation for the functional claim."""
+    The catalog is consulted first (see `_catalog_symbol`); the mine query below is the
+    fall-through. `=` is case-insensitive in InterMine (GmNARK / gmnark / GMNARK all
+    match), so exact matching is safe here. One row per publication, because the DOIs are
+    the point: they hand the literature tools a citation for the functional claim."""
+    if (args.get("symbol") or "").strip():
+        curated = _catalog_symbol(args)
+        if curated:
+            return curated
     return _execute(
         args, "Gene symbol",
         ["GeneFunction.symbol", "GeneFunction.symbolLong",
@@ -312,18 +512,68 @@ def _trait_qtls(args) -> str:
         subject_hint="a trait name or fragment such as 'seed protein'")
 
 
+def _catalog_gwas_ids():
+    """Ids of every gwas collection in the catalog, or None when none is loaded."""
+    with _MINES_LOCK:
+        if "gwas" in _KNOWN:
+            return _KNOWN["gwas"]
+    ctl = tools_catalog.controller()
+    ids = None
+    if ctl is not None:
+        ids = {c["id"] for c in ctl.collections if c.get("type") == "gwas" and c.get("id")}
+    with _MINES_LOCK:
+        _KNOWN["gwas"] = ids
+    return ids
+
+
+def _gwas_bridge(rows) -> str:
+    """Tell the caller the study identifiers they are holding are lis_files handles.
+
+    The mine's `gwas.primaryIdentifier` and the Data Store's gwas/ collection names are
+    the same strings, so the association result and the underlying data are one call
+    apart — but only if someone says so. Where the catalog is loaded each identifier is
+    CHECKED against it, so a present one is stated as fact and an absent one is not
+    claimed at all."""
+    # Column 3 is GWASResult.gwas.primaryIdentifier — fixed by the view above.
+    studies = sorted({str(r[3]) for r in rows if len(r) > 3 and r[3]})
+    if not studies:
+        return ""
+    known = _catalog_gwas_ids()
+    if known is None:
+        return ("The study identifier(s) above (" + ", ".join(studies[:5]) + ") are "
+                "formatted like LIS Data Store gwas/ collection names, so "
+                f"lis_files(collection={studies[0]!r}) may reach the underlying data. "
+                "Not verified — no catalog is loaded.")
+    present = [x for x in studies if x in known]
+    missing = [x for x in studies if x not in known]
+    lines = []
+    if present:
+        lines.append("These studies ARE LIS Data Store gwas/ collections — pass the "
+                     "identifier to lis_files for the underlying data:")
+        lines += [f"  lis_files(collection={x!r})" for x in present[:10]]
+        if len(present) > 10:
+            lines.append(f"  ... and {len(present) - 10} more")
+    if missing:
+        lines.append("No gwas/ collection in the catalog is named "
+                     + ", ".join(repr(x) for x in missing[:5])
+                     + " — the mine holds the result, the Data Store does not hold the "
+                       "study files.")
+    return "\n".join(lines)
+
+
 def _trait_gwas(args) -> str:
     """Trait -> GWAS associations, most significant first. Per-species mine only.
 
-    The qtlStudy/gwas identifiers match the Data Store's gwas/ collection names exactly
-    (e.g. mixed.gwas.Bandillo_Jarquin_2015), so lis_files can serve the underlying data."""
+    The gwas identifiers match the Data Store's gwas/ collection names exactly (e.g.
+    mixed.gwas.Bandillo_Jarquin_2015), so lis_files can serve the underlying data —
+    `_gwas_bridge` puts that in the output, where the caller is holding the values."""
     return _execute(
         args, "GWAS associations",
         ["GWASResult.trait.name", "GWASResult.markerName", "GWASResult.pValue",
          "GWASResult.gwas.primaryIdentifier"],
         [("GWASResult.trait.name", "CONTAINS", (args.get("trait") or "").strip())],
         sort="GWASResult.pValue asc", assembly_col=None, subject_key="trait",
-        require_taxon=True,
+        require_taxon=True, footer=_gwas_bridge,
         subject_hint="a trait name or fragment such as 'seed protein'")
 
 
@@ -364,7 +614,9 @@ _ASSEMBLY_ARGS = {
 _TAXON_ARG = {
     "taxon": {"type": "string",
               "description": "Species whose mine to query, e.g. 'Glycine max' or "
-                             "'Phaseolus vulgaris'. Routes to <genus>mine."},
+                             "'Phaseolus vulgaris'. Routes to <genus>mine; a species "
+                             "whose genus has no mine is reported as such without a "
+                             "request."},
     "mine": {"type": "string", "description": "Explicit mine name; overrides 'taxon'."},
     "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
 }
@@ -406,9 +658,12 @@ def mine_tools() -> list:
             {**_GENE_ARG}, _gene_expression),
         _mk("legumemine_gene_symbol",
             "Resolve a gene SYMBOL (e.g. 'GmNARK', 'PvSYMRK') to its gene identifier, "
-            "full name, functional synopsis and the DOIs behind the claim. Use this FIRST "
-            "when you have a symbol rather than an ID — lis_gene and the other mine tools "
-            "match identifiers only. Feed the DOIs to openalex_by_doi / read_paper.",
+            "full name, functional synopsis and the DOIs behind the claim. Answered from "
+            "the resident curated catalog when it knows the symbol (instant, offline, "
+            "fully-qualified id) and from the mine otherwise; the reply says which. Use "
+            "this FIRST when you have a symbol rather than an ID — lis_gene and the other "
+            "mine tools match identifiers only. Feed the DOIs to openalex_by_doi / "
+            "read_paper.",
             {"symbol": {"type": "string",
                         "description": "Gene symbol, e.g. 'GmNARK'. Case-insensitive, exact."},
              **_TAXON_ARG}, _gene_symbol, required=("symbol",)),

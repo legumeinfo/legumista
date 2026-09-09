@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """FastMCP server — expose legumista's native research tools over the Model Context
 Protocol, so any MCP-speaking client (Claude Desktop, an IDE, another agent) can drive
-the same OpenAlex/Crossref/arXiv/Europe PMC/bioRxiv search, read_paper, NCBI
-datasets+EDirect, web search, and grep/read tools the `legumista research` agent uses.
+the same literature search (paper_search, europepmc_search, openalex_by_doi), read_paper,
+NCBI datasets+EDirect, web search, and genomics tools the `legumista research` agent uses.
 
 We already model every tool as a `legumista_agent.tool.Tool` (name + JSON-schema
 parameters + read-only flag + async `run(args) -> str`). This module bridges each one
@@ -15,6 +15,15 @@ module top) so merely importing this module stays cheap until you actually serve
 server is started only via `legumista mcp` (there is no separate server binary — the whole
 tool is one `legumista` command).
 """
+
+
+# Tools we implement but do NOT serve over MCP: an MCP client essentially always has
+# file tools of its own (Claude Code has Read/Grep; so do the IDE integrations), and ours
+# are strictly more restricted (workspace sandbox, size caps). Shipping both only makes
+# the model choose between two ways to read the same file. The internal `legumista
+# research` agent (runtime.py) keeps them — it has no host to borrow file tools from.
+# That asymmetry is deliberate: the server assumes a capable client, the agent does not.
+_CLIENT_PROVIDED = {"read_file", "grep"}
 
 
 # Registry mapping tool name -> the legumista async handler. Kept module-level (not a
@@ -77,8 +86,8 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     # one-liner when the project ships no such prompt.
     instructions = config.tools_spec() or (
         "Read-only literature-research tools: scholarly search (OpenAlex/Crossref/"
-        "arXiv/Europe PMC/bioRxiv), open-access full-text read/grep, NCBI datasets & "
-        "EDirect, keyless web search, and workspace-sandboxed file grep/read.")
+        "Europe PMC), open-access full-text read/grep, NCBI datasets & EDirect, "
+        "keyless web search, and legume genomics data.")
     # When a catalog is loaded, append a ~1,400-token projection of it. It answers the
     # exploratory questions ("which genera exist", "what does this species have", "what
     # is soybean called here") that would otherwise each cost a tool call, and it is the
@@ -94,6 +103,8 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     _HANDLERS.clear()
     for tool in (local_read_tools() + native_tools() + lis_tools() + mine_tools()
                  + catalog_tools() + bio_tools(allow_write=allow_write)):
+        if tool.name in _CLIENT_PROVIDED:
+            continue
         _HANDLERS[tool.name] = tool.run
         server.add_tool(Bridge(
             name=tool.name,

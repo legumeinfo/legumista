@@ -1,14 +1,90 @@
 """LIS InterMine tool tests — PathQuery construction, InterMine's in-body failure
-reporting, assembly disambiguation, and result capping.
+reporting, assembly disambiguation, result capping, catalog-driven mine routing and the
+response cache.
 
 No network: `_get` is stubbed with a fake mine that records the URLs it was asked for, so
 these pin OUR query construction and result handling rather than the mine's uptime."""
 import json
+import sys
 import urllib.parse
 
 import pytest
 
+from legumista_agent import tools_catalog as C
 from legumista_agent import tools_mine as M
+
+# Same source-checkout override the module honours at runtime, so the catalog-backed tests
+# run against a dscensor working tree without installing it (and its server-only deps).
+if C.DSCENSOR_PATH and C.DSCENSOR_PATH not in sys.path:
+    sys.path.insert(0, C.DSCENSOR_PATH)
+
+
+@pytest.fixture(autouse=True)
+def clean():
+    """Every test starts with an empty response cache and NO catalog loaded.
+
+    Prevents two cross-test leaks that would make results depend on test order: a cached
+    response answering the next test's identical query without touching the fake mine,
+    and the repo's real catalog.json silently steering mine routing and symbol lookup."""
+    saved = (C.CATALOG_PATH, C._CANDIDATES)
+    C.CATALOG_PATH, C._CANDIDATES = "", ()
+    C.reset()
+    M.reset_cache()
+    yield
+    C.CATALOG_PATH, C._CANDIDATES = saved
+    C.reset()
+    M.reset_cache()
+
+
+@pytest.fixture
+def catalog(tmp_path, clean):
+    """A catalog holding one taxon WITH a mine, one WITHOUT, one curated symbol and one
+    gwas collection — enough to pin the wiring without depending on store contents."""
+    pytest.importorskip(
+        "dscensor.catalog",
+        reason="dscensor is optional: set LEGUMISTA_DSCENSOR_PATH to a source checkout")
+    document = {
+        "schema": 1,
+        "built_at": "2026-09-08T12:00:00Z",
+        "source_commit": "abc123def4567890",
+        "stats": {"collections": 1},
+        "taxa": {
+            "Glycine/max": {
+                "abbrev": "glyma",
+                "resources": [{"name": "GlycineMine",
+                               "URL": "https://mines.legumeinfo.org/glycinemine/begin.do"}],
+            },
+            # Split across dicts, exactly as the real catalog stores Aeschynomene's — the
+            # URL must still be found when it has no 'name' beside it.
+            "Phaseolus/vulgaris": {"abbrev": "phavu"},
+            "Phaseolus": {"resources": [
+                {"name": "PhaseolusMine"},
+                {"URL": "https://mines.legumeinfo.org/phaseolusmine/begin.do"}]},
+            "Vicia/villosa": {"abbrev": "vicvi", "resources": [
+                {"name": "Genome Context Viewer",
+                 "URL": "https://gcv.legumeinfo.org/gene;lis=vicvi.X"}]},
+        },
+        "gene_symbols": {
+            "glyma": {"gmnark": {"gene": "glyma.Wm82.gnm4.ann1.Glyma.12G040000",
+                                 "doi": "10.1126/science.1077937",
+                                 "synopsis": "Long-distance control of nodulation."}},
+        },
+        "collections": [{
+            "path": "Glycine/max/gwas/mixed.gwas.Bandillo_Jarquin_2015",
+            "id": "mixed.gwas.Bandillo_Jarquin_2015",
+            "type": "gwas", "genus": "Glycine", "species": "max",
+            "base_url": "https://data.legumeinfo.org/Glycine/max/gwas/"
+                        "mixed.gwas.Bandillo_Jarquin_2015",
+            "index_status": "known", "files": [],
+        }],
+    }
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps(document))
+    C.CATALOG_PATH = str(path)
+    C.reset()
+    M.reset_cache()
+    yield document
+    C.reset()
 
 
 def _parse(url):
@@ -20,8 +96,14 @@ def _parse(url):
 @pytest.fixture
 def mine(monkeypatch):
     """A fake mine. `state['body']` is what the next JSON query returns; `state['urls']`
-    records every request so tests can assert on the query that was built."""
-    state = {"urls": [], "count": "7", "body": None}
+    records every request so tests can assert on the query that was built.
+
+    `state['live']` is the set of mine names whose /service/version answers — the fake
+    store of which mines exist. A name outside it raises, exactly as a real 404 does, so
+    the existence probe can be exercised without the network."""
+    state = {"urls": [], "count": "7", "body": None,
+             "live": {"glycinemine", "phaseolusmine", "cajanusmine", "lensmine",
+                      "legumemine"}}
 
     def default_body():
         return {"wasSuccessful": True,
@@ -31,6 +113,11 @@ def mine(monkeypatch):
 
     def fake_get(url, accept="application/json"):
         state["urls"].append(url)
+        if url.endswith("/version"):
+            name = url.rsplit("/service/", 1)[0].rsplit("/", 1)[-1]
+            if name not in state["live"]:
+                raise OSError(f"HTTP Error 404: {name}")
+            return "5.0.0"
         if "format=count" in url:
             return state["count"]
         return json.loads(json.dumps(state["body"] if state["body"] is not None
@@ -344,3 +431,254 @@ def test_gwas_is_sorted_most_significant_first(mine):
     M._trait_gwas({"trait": "seed protein", "taxon": "Glycine max"})
     xml, _ = _parse(mine["urls"][0])
     assert 'sortOrder="GWASResult.pValue asc"' in xml
+
+
+# --- catalog-driven mine routing ------------------------------------------------------
+def test_species_without_a_mine_is_refused_without_a_doomed_query(mine, catalog):
+    """The defect this replaced: 'Vicia villosa' guessed 'viciamine', got a raw HTTP 404
+    from a full PathQuery, and the agent could not tell 'no such mine' from 'the mine is
+    down' — so it retried, or concluded the data does not exist.
+
+    The catalog does not list viciamine, so the name is probed once (/service/version)
+    and then refused. What must never happen again is issuing the QUERY itself."""
+    out = M._trait_qtls({"trait": "seed protein", "taxon": "Vicia villosa"})
+    assert "has no InterMine" in out
+    assert "not an outage" in out
+    assert "lis_find(taxon='Vicia villosa', type='qtl')" in out
+    assert all("/query/results" not in u for u in mine["urls"]), (
+        "a species with no mine must never be queried, only probed")
+
+
+def test_a_live_mine_the_catalog_omits_is_probed_rather_than_refused(mine, catalog):
+    """The catalog lists 8 of the 10 live genus mines — cajanusmine and lensmine answer
+    /service/version but appear nowhere in it. Refusing on the catalog alone would deny
+    pigeonpea and lentil, both real crops with breeding data. A hardcoded allowance would
+    drift silently every time LIS adds a mine, so an unknown name is probed instead."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["QTL > Name"],
+                    "results": [["qSeed-1"]]}
+    out = M._trait_qtls({"trait": "seed protein", "taxon": "Cajanus cajan"})
+    assert "has no InterMine" not in out
+    assert "cajanusmine" in out
+    assert any("/query/results" in u for u in mine["urls"]), "the query must be issued"
+
+
+def test_the_existence_probe_is_asked_once_per_mine(mine, catalog):
+    """The probe only pays for itself if it is cached; otherwise every call to a
+    catalog-unlisted mine costs an extra round trip."""
+    M._trait_qtls({"trait": "seed", "taxon": "Vicia villosa"})
+    M._trait_qtls({"trait": "pod", "taxon": "Vicia villosa"})
+    probes = [u for u in mine["urls"] if u.endswith("/version")]
+    assert len(probes) == 1, f"expected one probe, got {len(probes)}"
+
+
+def test_a_species_with_a_mine_still_routes_there(mine, catalog):
+    """Refusing unknown mines must not refuse the real ones: the catalog publishes
+    glycinemine and phaseolusmine, and both must still be reached."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["QTL > Name"],
+                    "results": [["Seed protein 1-1"]]}
+    assert "[mine: glycinemine]" in M._trait_qtls({"trait": "protein",
+                                                   "taxon": "Glycine max"})
+    assert "[mine: phaseolusmine]" in M._trait_qtls({"trait": "protein",
+                                                     "taxon": "Phaseolus vulgaris"})
+    assert all("/glycinemine/" in u or "/phaseolusmine/" in u for u in mine["urls"])
+
+
+def test_known_mines_reads_urls_not_names(catalog):
+    """Phaseolus' resource is split across dicts in the catalog (a name-only entry and a
+    URL-only entry, as Aeschynomene really is stored); keying on 'name' would lose it."""
+    known = M._known_mines()
+    assert "phaseolusmine" in known and "glycinemine" in known
+    assert "viciamine" not in known
+    # legumemine belongs to no genus, so nothing lists it — it must be added by hand or
+    # every default-mine gene query would be refused.
+    assert M.MINE.lower() in known
+
+
+def test_mines_absent_from_the_catalog_are_still_reachable(catalog):
+    """cajanusmine and lensmine answer /service/version but appear nowhere in the
+    catalog's resources. Trusting the catalog alone would refuse pigeonpea and lentil —
+    two real mines with breeding data."""
+    assert M._resolve_mine({"taxon": "Cajanus cajan"}) == ("cajanusmine", None)
+    assert M._resolve_mine({"taxon": "Lens culinaris"}) == ("lensmine", None)
+
+
+def test_without_a_catalog_routing_falls_back_to_the_guess(mine):
+    """The catalog is optional. With none loaded we cannot know which mines exist, so the
+    tools must keep working on the genus guess rather than refuse everything."""
+    assert M._known_mines() is None
+    assert M._resolve_mine({"taxon": "Vicia villosa"}) == ("viciamine", None)
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["QTL > Name"],
+                    "results": [["X"]]}
+    out = M._trait_qtls({"trait": "protein", "taxon": "Vicia villosa"})
+    assert "[mine: viciamine]" in out and "/viciamine/service" in mine["urls"][0]
+
+
+def test_an_explicit_mine_is_never_vetoed(mine, catalog):
+    """'mine' is the caller's own assertion — a brand-new mine the catalog predates must
+    not be blocked by our staleness."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Gene > Name"],
+                    "results": [["G"]]}
+    out = M._gene_proteins({"gene": "G", "mine": "brandnewmine"})
+    assert "[mine: brandnewmine]" in out
+
+
+# --- response cache -------------------------------------------------------------------
+def test_an_identical_query_is_not_reissued(mine):
+    """Measured: a 5-call agent sequence about one gene made 7 requests, one an exact
+    duplicate. A second identical call must cost nothing."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Gene > Name"],
+                    "results": [["Glyma.12G040000"]]}
+    first = M._gene_families({"gene": "Glyma.12G040000"})
+    assert len(mine["urls"]) == 1
+    assert M._gene_families({"gene": "Glyma.12G040000"}) == first
+    assert len(mine["urls"]) == 1, "the second identical query must not hit the network"
+
+
+def test_the_cache_key_separates_mine_query_and_size(mine):
+    """A cache that ignored any of the three would answer one question with another's
+    rows — worse than no cache at all."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Gene > Name"],
+                    "results": [["G"]]}
+    M._gene_families({"gene": "G"})
+    M._gene_families({"gene": "G", "mine": "glycinemine"})   # different mine
+    M._gene_families({"gene": "OTHER"})                      # different xml
+    M._gene_families({"gene": "G", "max_results": 3})        # different size
+    assert len({u for u in mine["urls"]}) == 4
+
+
+def test_a_repeated_ortholog_call_reuses_both_of_its_round_trips(mine):
+    """legumemine_gene_orthologs is the two-request tool (gene->family, then family->
+    members), so an agent circling back to it is where duplicate traffic accumulates.
+
+    NOTE: it still cannot reuse legumemine_gene_families' response — that tool selects
+    five views and this step selects one, so the PathQueries differ and the cache key
+    (mine, xml, size) rightly separates them."""
+    mine["body"] = {"wasSuccessful": True,
+                    "columnHeaders": ["Gene Family > Identifier"],
+                    "results": [["Legume.fam3.10524"]]}
+    M._gene_orthologs({"gene": "Glyma.12G040000"})
+    before = len(mine["urls"])
+    M._gene_orthologs({"gene": "Glyma.12G040000"})
+    assert len(mine["urls"]) == before
+
+
+def test_errors_are_not_cached_so_a_retry_really_retries(mine):
+    """Caching a transient outage would make it permanent for the process, and the
+    'retry later' advice we hand back would be a lie."""
+    mine["body"] = {"wasSuccessful": False, "results": [],
+                    "error": "Service failed. Please contact support."}
+    assert "query service is failing" in M._gene_families({"gene": "G"})
+    assert len(mine["urls"]) == 1
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Gene > Name"],
+                    "results": [["G"]]}
+    out = M._gene_families({"gene": "G"})
+    assert len(mine["urls"]) == 2, "the retry must actually reach the mine"
+    assert "Gene families" in out and "error" not in out.lower()
+
+
+def test_a_failed_count_is_not_cached(mine):
+    """Same rule for the pre-flight count: a failed count must not pin 'unknown total'
+    onto every later call for the same query."""
+    mine["count"] = "boom"
+    assert M._count("glycinemine", "<query/>") is None
+    mine["count"] = "639"
+    assert M._count("glycinemine", "<query/>") == 639
+    assert M._count("glycinemine", "<query/>") == 639
+    assert sum("format=count" in u for u in mine["urls"]) == 2
+
+
+def test_reset_cache_clears_it(mine):
+    """The hook tests rely on; without it every test would inherit the last one's rows."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Gene > Name"],
+                    "results": [["G"]]}
+    M._gene_families({"gene": "G"})
+    M.reset_cache()
+    M._gene_families({"gene": "G"})
+    assert len(mine["urls"]) == 2
+
+
+# --- symbol precedence ----------------------------------------------------------------
+def test_symbol_resolution_prefers_the_curated_catalog(mine, catalog):
+    """The catalog answers offline, instantly, with a FULLY QUALIFIED gene id — no mine
+    round trip and no assembly ambiguity to resolve afterwards."""
+    out = M._gene_symbol({"symbol": "GmNARK"})
+    assert "glyma.Wm82.gnm4.ann1.Glyma.12G040000" in out
+    assert "10.1126/science.1077937" in out
+    assert not mine["urls"], "a curated hit must not query the mine"
+
+
+def test_a_catalog_answer_says_it_came_from_the_catalog(mine, catalog):
+    """Mislabelling the source would let a reader attribute a curated claim to the mine's
+    own curation, which is a different (broader) body of evidence."""
+    out = M._gene_symbol({"symbol": "gmnark"})       # matching is case-insensitive
+    assert "curated LIS catalog" in out
+    assert "NOT a mine query" in out
+    assert "[mine:" not in out
+
+
+def test_a_symbol_the_catalog_lacks_falls_through_to_the_mine(mine, catalog):
+    """The catalog holds 344 symbols; the mine's curation is broader, so a miss must not
+    become 'no such symbol'."""
+    mine["body"] = {"wasSuccessful": True,
+                    "columnHeaders": ["GeneFunction > Symbol", "GeneFunction > Gene > Name"],
+                    "results": [["PvSYMRK", "Phvul.001G001000"]]}
+    out = M._gene_symbol({"symbol": "PvSYMRK"})
+    assert "Phvul.001G001000" in out
+    assert "curated LIS catalog" not in out
+    xml, _ = _parse(mine["urls"][0])
+    assert 'path="GeneFunction.symbol" op="=" value="PvSYMRK"' in xml
+
+
+def test_taxon_scopes_the_curated_lookup(mine, catalog):
+    """One symbol can be curated in several species; 'taxon' must narrow it rather than
+    be ignored — and a taxon with no curated entry falls through to the mine."""
+    assert "glyma" in M._gene_symbol({"symbol": "GmNARK", "taxon": "Glycine max"})
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["GeneFunction > Symbol"],
+                    "results": [["GmNARK"]]}
+    out = M._gene_symbol({"symbol": "GmNARK", "taxon": "Phaseolus vulgaris"})
+    assert "curated LIS catalog" not in out and mine["urls"]
+
+
+# --- the GWAS -> lis_files bridge -----------------------------------------------------
+def _gwas_body():
+    return {"wasSuccessful": True,
+            "columnHeaders": ["GWAS Result > Trait > Name", "GWAS Result > Marker Name",
+                              "GWAS Result > P Value", "GWAS Result > GWAS > Identifier"],
+            "results": [["seed protein", "ss715614263", "1e-11",
+                         "mixed.gwas.Bandillo_Jarquin_2015"]]}
+
+
+def test_gwas_output_hands_the_study_id_to_lis_files(mine, catalog):
+    """The study identifiers ARE Data Store collection names, but that was only stated in
+    a docstring the model never sees — so the association result and the underlying data
+    stayed one undiscovered call apart."""
+    mine["body"] = _gwas_body()
+    out = M._trait_gwas({"trait": "seed protein", "taxon": "Glycine max"})
+    assert "lis_files(collection='mixed.gwas.Bandillo_Jarquin_2015')" in out
+
+
+def test_an_identifier_absent_from_the_catalog_is_not_claimed(mine, catalog):
+    """Do not promise data we can see is not there: the catalog knows every gwas
+    collection, so an unmatched identifier is reported as unmatched."""
+    body = _gwas_body()
+    body["results"] = [["seed protein", "m1", "1e-9", "mixed.gwas.Nobody_2099"]]
+    mine["body"] = body
+    out = M._trait_gwas({"trait": "seed protein", "taxon": "Glycine max"})
+    assert "No gwas/ collection in the catalog is named" in out
+    assert "lis_files(collection='mixed.gwas.Nobody_2099')" not in out
+
+
+def test_without_a_catalog_the_bridge_is_a_suggestion_not_a_claim(mine):
+    """With nothing to check against, the hand-off must be offered without asserting the
+    collection exists."""
+    mine["body"] = _gwas_body()
+    out = M._trait_gwas({"trait": "seed protein", "taxon": "Glycine max"})
+    assert "may reach the underlying data" in out and "Not verified" in out
+    assert "ARE LIS Data Store" not in out
+
+
+def test_the_bridge_is_absent_when_there_are_no_rows(mine, catalog):
+    """An empty result must not carry a hand-off to a collection nobody named."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["x"], "results": []}
+    out = M._trait_gwas({"trait": "nothing", "taxon": "Glycine max"})
+    assert "lis_files" not in out and "no matches" in out
