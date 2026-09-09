@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "legumista"
 version = "0.1.4"
-description = "Autonomous research discovery → synthesis → ideation pipeline driven by any OpenAI-compatible LLM."
+description = "An MCP server for legume genomics: the LIS Data Store catalog, InterMine queries, scholarly literature, NCBI, and samtools/bcftools."
 readme = "README.md"
-requires-python = ">=3.11"          # 3.11+ baseline (stdlib features used across the pipeline)
+requires-python = ">=3.11"          # 3.11+ baseline (tomllib, stdlib typing features)
 license = "MIT"                     # SPDX expression; full text in LICENSE
 authors = [{name = "Matt Wiese"}]
 keywords = [
-    "research", "literature-review", "citation-graph",
-    "llm", "openalex", "agent",
+    "mcp", "model-context-protocol", "bioinformatics", "genomics",
+    "legume", "intermine", "openalex", "samtools",
 ]
 classifiers = [
     # NOTE: no "License :: OSI Approved :: MIT License" classifier — PEP 639
@@ -21,23 +21,18 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering",
-    "Topic :: Text Processing :: Linguistic",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Intended Audience :: Science/Research",
 ]
-# Everything ships in one package — `pip install legumista` gives the whole application:
-# the pipeline, agentic `research`, and the `legumista mcp` tool server, with all tools.
-# The paper/OpenAlex/grep/read tools are stdlib; the `ncbi_datasets`/`edirect` tools shell
-# out to the NCBI CLIs if installed (optional; they report cleanly when absent). FastMCP
-# runs the MCP server (and bundles the MCP SDK used to connect to external servers via
-# .mcp.json); pysam backs the genomics tools.
+# `pip install legumista` gives the whole server. The LIS, literature, InterMine and
+# OpenAlex tools are stdlib-only; the `ncbi_datasets`/`edirect` tools shell out to the
+# NCBI CLIs if installed (optional — they report cleanly when absent).
 dependencies = [
     "typer>=0.12",     # <0.12 breaks with Click >=8.2 help rendering
-    "PyYAML>=6",       # parse the project config (legumista.yml)
-    "ddgs>=6",         # keyless web search (web_search native tool)
-    "pypdf>=4",        # OA full-text extraction (read_paper native tool)
-    "fastmcp>=2.9",    # the `legumista mcp` server (+ the MCP client SDK it bundles)
-    "pysam>=0.22",     # htslib bindings for the samtools/bcftools genomics tools
+    "ddgs>=6",         # keyless web search (web_search tool)
+    "pypdf>=4",        # OA full-text extraction (read_paper tool)
+    "fastmcp>=2.9",    # the `legumista mcp` server itself
+    "pysam>=0.22",     # htslib bindings for the samtools/bcftools/tabix tools
     "certifi>=2023.7", # CA bundle for htslib's vendored libcurl (remote genomics I/O)
 ]
 
@@ -47,23 +42,17 @@ Repository = "https://github.com/legumeinfo/legumista"
 Issues = "https://github.com/legumeinfo/legumista/issues"
 
 [project.scripts]
-# One command for the whole application. Every capability — the pipeline, `research`, and
-# the `mcp` tool server — is a subcommand of `legumista` (there is deliberately no separate
-# server binary; start the MCP server with `legumista mcp`).
+# `legumista mcp` starts the server. `mcp` is kept as a subcommand rather than collapsed
+# into a bare `legumista` because it is what every published client config and the
+# container ENTRYPOINT already invoke.
 legumista = "legumista_cli:main"
 
-# Flat layout: all importable modules live at the repo root and install as
-# py-modules; the bundled default prompts + example config ship in the legumista_assets
-# package (package-data) so a NON-editable `pip install .` works too. Project data
-# (legumista.yml, ledgers, prompts overrides) lives in each project directory, found
-# at runtime via config.py (cwd / -C / $LEGUMISTA_HOME) — see PIPELINE.md.
+# Flat layout: legumista_cli and config live at the repo root and install as py-modules;
+# the tool implementations are the legumista_agent package, and the served instructions
+# (prompts/tools_native.md) ship as package data so a NON-editable `pip install .` works.
 [tool.setuptools]
-py-modules = [
-    "legumista_cli", "config", "llm", "orchestrator", "ideation",
-    "build_digest", "build_ideation_report", "expand_ideas",
-    "merge_corpora",
-]
+py-modules = ["legumista_cli", "config"]
 packages = ["legumista_assets", "legumista_agent"]
 
 [tool.setuptools.package-data]
-legumista_assets = ["prompts/*.md", "legumista.example.yml", "system-prompt.md", "ideation-goal.md"]
+legumista_assets = ["prompts/*.md", "legumista.png"]

@@ -1,16 +1,18 @@
-"""legumista_agent — a small OpenAI tool-calling agent harness.
+"""legumista_agent — the tools legumista serves, and the MCP bridge that serves them.
 
-Everything needed to let a model use tools and iterate to an answer, and nothing more
-(no UI, telemetry, or sub-agents):
+  tool.py           the Tool interface every tool is built from (name, description,
+                    JSON-schema parameters, read_only flag, async run, optional per-call
+                    `writes(args)` classifier)
+  mcp_server.py     the FastMCP bridge: assembles every family below and serves it
 
-  tool.py         Tool interface + OpenAI function-spec conversion
-  permissions.py  per-tool allow/deny gate (modes: read_only | allow_all | deny_all)
-  mcp_client.py   connect to optional MCP servers (official `mcp` SDK) and expose them
-  loop.py         the agent loop: messages + tools -> /chat/completions -> run
-                  tool_calls -> feed results back -> repeat until a final answer
-  agent.py        blocking entry point that assembles the toolset and runs the loop
+  tools_catalog.py  the resident LIS catalog (lis_survey, lis_lineage) and the
+                    CatalogController the lis_* tools read through
+  tools_lis.py      LIS Data Store discovery and gene lookup
+  tools_mine.py     InterMine PathQueries against the LIS mines
+  tools_native.py   literature (OpenAlex/Crossref/Europe PMC), NCBI CLIs, web search
+  tools_local.py    web_fetch
+  tools_pysam.py    samtools/bcftools/tabix over local and remote indexed files
 
-The model path is `llm.complete` (OpenAI /chat/completions). The deterministic
-discovery/ideation pipelines do NOT use this package — it backs only the tool-using
-`legumista research` command (and, when enabled, the per-phase tool loop).
+Every tool is read-only unless the server was started with --allow-write, which only the
+genomics dispatchers act on.
 """

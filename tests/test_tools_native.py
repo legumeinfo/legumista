@@ -1,29 +1,23 @@
 """Native-tool tests — the workspace confinement guard (`_sandbox_path` /
-`_is_sensitive`), the local `grep`, the `paper_search` fan-out, and `read_paper`'s two
-output shapes. No network: every HTTP/PDF entry point is stubbed."""
+`_is_sensitive`), the `paper_search` fan-out, and `read_paper`'s two output shapes.
+No network: every HTTP/PDF entry point is stubbed.
+
+The guard is tested here because this is where it lives, but its consumer is now
+tools_pysam: every local path handed to samtools/bcftools/tabix passes through it."""
 import os
 
 import config
 from legumista_agent import tools_native as N
-from legumista_agent.tools_native import _grep, _is_sensitive, _sandbox_path
+from legumista_agent.tools_native import _is_sensitive, _sandbox_path
 
 
 def test_workspace_root_is_not_sensitive():
     """The workspace root itself must be allowed. `os.path.relpath(root, root)` is a
-    bare '.', which used to be mistaken for a hidden component and refused — regression
-    for a default-path grep/read of the project refusing itself."""
+    bare '.', which used to be mistaken for a hidden component and refused — a
+    regression that made the workspace root refuse itself."""
     assert _is_sensitive(config.WORKSPACE) is False
     rp, err = _sandbox_path(".")
     assert err is None and rp == os.path.realpath(config.WORKSPACE)
-
-
-def test_grep_default_path_searches_workspace(tmp_path, monkeypatch):
-    """`grep` with no `path` defaults to '.' and must search the workspace, not refuse."""
-    monkeypatch.setattr(config, "WORKSPACE", str(tmp_path))
-    (tmp_path / "note.md").write_text("alpha beta gamma\n", encoding="utf-8")
-    out = _grep({"pattern": "beta", "glob": "**/*.md"})
-    assert "note.md" in out and "beta" in out
-    assert not out.startswith("error")
 
 
 def test_sandbox_still_refuses_hidden_and_secret_files():

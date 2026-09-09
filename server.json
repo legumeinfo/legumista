@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.legumeinfo/legumista",
   "title": "Legumista",
-  "description": "Scholarly search, open-access full-text, NCBI/EDirect, and pysam genomics tools over MCP.",
+  "description": "Legume genomics over MCP: the LIS Data Store catalog, InterMine queries, scholarly search, NCBI/EDirect, and pysam tools.",
   "repository": {
     "url": "https://github.com/legumeinfo/legumista",
     "source": "github"
@@ -30,7 +30,7 @@
       "environmentVariables": [
         {
           "name": "LEGUMISTA_HOME",
-          "description": "Project directory whose files the tools may read (grep/read_file/genomics are sandboxed to it). Defaults to the working directory.",
+          "description": "Directory the genomics tools may read local files from (they are sandboxed to it). Defaults to the working directory; also settable with `legumista mcp -C DIR`.",
           "isRequired": false,
           "isSecret": false
         },

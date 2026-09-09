@@ -190,42 +190,6 @@ def _clean_abstract(text: str) -> str:
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text)).split())
 
 
-# --- grep (local, stdlib) ---------------------------------------------------
-def _grep(args) -> str:
-    pattern = args.get("pattern") or ""
-    if not pattern:
-        return "error: missing 'pattern'"
-    root = args.get("path") or "."
-    globpat = args.get("glob") or "**/*"
-    try:
-        rx = re.compile(pattern, re.IGNORECASE if args.get("ignore_case", True) else 0)
-    except re.error as e:
-        return f"error: bad regex: {e}"
-    root_rp, err = _sandbox_path(root)     # confine the search to the workspace
-    if err:
-        return err
-    hits, n = [], 0
-    base = Path(root_rp)
-    paths = [base] if base.is_file() else sorted(base.glob(globpat))
-    for path in paths:
-        if not path.is_file():
-            continue
-        if _sandbox_path(str(path))[1]:    # skip files outside the sandbox / secret-like
-            continue
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                for lineno, line in enumerate(f, 1):
-                    if rx.search(line):
-                        hits.append(f"{path}:{lineno}: {line.rstrip()[:200]}")
-                        n += 1
-                        if n >= 200:
-                            hits.append("… [200-match cap]")
-                            return _cap("\n".join(hits))
-        except (OSError, UnicodeError):
-            continue
-    return _cap("\n".join(hits)) if hits else "No matches."
-
-
 # --- web search (DuckDuckGo, keyless) ---------------------------------------
 def _web_search(args) -> str:
     query = args.get("query") or ""
@@ -682,20 +646,6 @@ def native_tools() -> list:
          "max_results": {"type": "integer",
                          "description": "Max hits to return, 1–25 (default 8)."}}
     return [
-        _mk("grep", "Search local files for a regular expression and return matching "
-            "`file:line: text` lines (capped at 200). Use to find text in project files; "
-            "this searches the local filesystem, not the web (use web_search) or paper PDFs "
-            "(use read_paper with a pattern).",
-            {"type": "object",
-             "properties": {"pattern": {"type": "string",
-                                        "description": "Python regular expression to match."},
-                            "path": {"type": "string",
-                                     "description": "Directory or file to search (default: current dir)."},
-                            "glob": {"type": "string",
-                                     "description": "Filename glob to filter files, e.g. '**/*.md'."},
-                            "ignore_case": {"type": "boolean",
-                                            "description": "Case-insensitive match (default: true)."}},
-             "required": ["pattern"], "additionalProperties": False}, _grep),
         _mk("web_search", "Search the open web (DuckDuckGo, keyless) and return "
             "title/URL/snippet per hit. Use for non-bibliographic context (a lab site, a "
             "data portal, a news item). Never cite a paper from here — confirm it via "

@@ -13,10 +13,6 @@ __pycache__/
 .DS_Store
 *.swp
 
-# NOTE: this is the code repository's ignore file. Per-PROJECT generated artifacts
-# (corpus/, papers/, reviews/, ideas/, ledgers) are ignored by each project's own
-# .gitignore — see examples/lupinus/.gitignore and the one `legumista init` writes.
-
 # htslib caches remote index files into the process CWD when reading a remote
 # bgzf/tabix file, so a server or test run started here can drop these.
 *.tbi

@@ -15,16 +15,16 @@ Read vs write, and the permission model:
 - The read-only helpers are always available.
 - The dispatchers classify each call: a subcommand in the per-tool read-only allowlist
   with no output-file flag is a read (allowed by default); anything else is a **write**
-  and needs the `read_write` permission (`legumista research`/`mcp --allow-write`). The
-  same classifier feeds `permissions.check` (agent loop) and the tool's own guard (the
-  MCP server, which has no permission gate) — writes fail closed in both.
+  and runs only when the server was started with `legumista mcp --allow-write`. The MCP
+  server has no permission gate, so that flag is the sole control and the classifier is
+  enforced by the tool's own guard — writes fail closed without it.
 
 Safety, matching tools_native.py: pysam/htslib I/O is offloaded with `asyncio.to_thread`;
-local path arguments are confined to the project workspace (same sandbox as grep/
-read_file) and rewritten to absolute so the process cwd is irrelevant; http(s) URL
+local path arguments are confined to the workspace by the shared `_sandbox_path` guard
+and rewritten to absolute so the process cwd is irrelevant; http(s) URL
 arguments pass the native SSRF guard (other schemes refused). pysam is a dependency of
 legumista, imported lazily (only when a genomics tool actually runs) so the heavy htslib
-extension isn't loaded by pipeline/research runs that never touch it.
+extension isn't loaded by sessions that never touch a genomics tool.
 
 Coordinates: `region` in the helpers is samtools-style — `seqid`, `seqid:start`, or
 `seqid:start-end`, 1-based inclusive — converted to pysam's 0-based half-open internally.
@@ -246,8 +246,8 @@ def _open_err(e: Exception, target: str) -> str:
 
 # --- general dispatchers: samtools / bcftools ---------------------------------------
 # Read-only subcommands (write only to stdout, no filesystem side effects). Anything not
-# listed — or any call carrying an output-file flag — is treated as a write and needs the
-# read_write permission. Conservative on purpose: unknown/omitted => write (fail closed).
+# listed — or any call carrying an output-file flag — is treated as a write and needs
+# --allow-write. Conservative on purpose: unknown/omitted => write (fail closed).
 _SAM_READ = {"view", "flagstat", "idxstats", "stats", "depth", "coverage", "bedcov",
              "quickcheck", "head", "dict", "consensus", "fasta", "fastq", "samples",
              "ampliconstats", "cram_size", "checksum"}
@@ -434,8 +434,8 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
                 f"Standard ones include: {common}.")
     if _mk_writes(readset)(args) and not allow_write:
         return (f"error: '{module_name} {argv[0]}' is a write operation and writes are "
-                "disabled. Re-run with write access: `legumista research --allow-write` or "
-                "`legumista mcp --allow-write` (the read_write permission).")
+                "disabled. The server must be restarted with `legumista mcp "
+                "--allow-write` to permit it.")
     guarded, err = _guard_argv(argv[1:])
     if err:
         return err

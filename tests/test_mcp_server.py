@@ -33,10 +33,10 @@ def test_served_toolset_conforms_to_mcp_spec():
     inputSchema, and a readOnlyHint that matches the source tool's read_only flag (so
     write-capable dispatchers like samtools are correctly advertised as not-read-only)."""
     from fastmcp import Client
-    from legumista_agent.mcp_server import _CLIENT_PROVIDED, build_server
+    from legumista_agent.mcp_server import build_server
 
     source = _source_tools()
-    expected = set(source) - _CLIENT_PROVIDED
+    expected = set(source)
 
     async def check():
         async with Client(build_server()) as c:
@@ -54,11 +54,12 @@ def test_served_toolset_conforms_to_mcp_spec():
     _run(check())
 
 
-def test_served_surface_omits_file_tools_the_client_already_has():
-    """MCP clients ship their own file tools, so serving ours too made the model pick
-    between two ways to read a file — and ours is the more restricted one. The served
-    surface must not carry read_file/grep, and calling one must be a hard miss rather
-    than a hidden handler."""
+def test_no_local_file_tools_are_served():
+    """legumista carried a `read_file` and a `grep` for its own agent loop, and filtered
+    them out of the served surface because MCP clients ship their own — more capable, not
+    workspace-sandboxed. With the agent loop gone they were deleted rather than left as
+    dead code. This guards the deletion: reintroducing either would put a second, weaker
+    way to read a file in front of the model."""
     from fastmcp import Client
     from legumista_agent.mcp_server import _HANDLERS, build_server
 
@@ -66,23 +67,9 @@ def test_served_surface_omits_file_tools_the_client_already_has():
         async with Client(build_server()) as c:
             names = {t.name for t in await c.list_tools()}
             assert not ({"read_file", "grep"} & names)
-            assert "web_fetch" in names        # tools_local's other tool must survive
+            assert "web_fetch" in names        # tools_local's remaining tool must survive
     _run(check())
     assert not ({"read_file", "grep"} & set(_HANDLERS)), "unadvertised handler still callable"
-
-
-def test_internal_agent_keeps_the_file_tools_the_server_drops():
-    """The asymmetry is the point: `legumista research` runs with no host to borrow file
-    tools from, so dropping them from the MCP surface must not strip them from the
-    internal agent loop as well."""
-    from legumista_agent.runtime import AgentRuntime
-
-    rt = AgentRuntime().open()          # no MCP servers -> local toolset only, no network
-    try:
-        names = {t.name for t in rt.tools}
-    finally:
-        rt.close()
-    assert {"read_file", "grep"} <= names
 
 
 def test_tool_call_returns_single_text_block():

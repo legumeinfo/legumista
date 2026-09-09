@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Local, read-only tools for the harness.
+"""`web_fetch` — retrieve a URL as readable text.
 
-Only safe, read-only capabilities are exposed — no shell, file-writing, or
-code-execution tools. `read_file` opens a local text file; `web_fetch` GETs a URL and
-returns readable text. Both are size-capped and never mutate anything.
+The one tool here. It GETs an http(s) URL through the shared SSRF guard, strips HTML to
+text, and caps the result. Read-only and non-mutating, like everything the server serves.
 """
 import os
 import re
@@ -11,7 +10,7 @@ import urllib.error
 import urllib.request
 
 from .tool import Tool
-from .tools_native import BlockedURLError, _open_guarded, _sandbox_path
+from .tools_native import BlockedURLError, _open_guarded
 
 MAX_CHARS = int(os.environ.get("LEGUMISTA_TOOL_MAX_CHARS", "20000"))
 FETCH_TIMEOUT = int(os.environ.get("LEGUMISTA_TOOL_FETCH_TIMEOUT", "30"))
@@ -20,25 +19,6 @@ _UA = {"User-Agent": "legumista-agent/1.0 (research; +https://openrouter.ai)"}
 
 def _cap(text: str) -> str:
     return text if len(text) <= MAX_CHARS else text[:MAX_CHARS] + f"\n… [truncated to {MAX_CHARS} chars]"
-
-
-async def _read(args) -> str:
-    raw_path = args.get("path") or args.get("file_path") or ""
-    path, err = _sandbox_path(raw_path)   # confine reads to the project workspace
-    if err:
-        return err
-    if not os.path.exists(path):
-        return f"error: no such file: {raw_path}"
-    if os.path.isdir(path):
-        return f"error: {raw_path} is a directory"
-    try:
-        with open(path, "rb") as f:
-            raw = f.read(MAX_CHARS * 4 + 8)
-        if b"\x00" in raw[:4096]:            # crude binary sniff (e.g. PDF)
-            return f"error: {path} looks binary ({os.path.getsize(path)} bytes) — not readable as text"
-        return _cap(raw.decode("utf-8", "replace"))
-    except OSError as e:
-        return f"error: {e}"
 
 
 def _strip_html(s: str) -> str:
@@ -71,16 +51,6 @@ async def _web_fetch(args) -> str:
 def local_read_tools() -> list:
     """The read-only local tools to add to the agent's tool surface."""
     return [
-        Tool(name="read_file", read_only=True, run=_read,
-             description="Read a local text file and return its contents. Use for project "
-                         "files (a corpus digest, a ledger, a context input) — not for URLs "
-                         "(use web_fetch) or scholarly PDFs (use read_paper). Binary files "
-                         "are refused; output is size-capped.",
-             parameters={"type": "object",
-                         "properties": {"path": {"type": "string",
-                                                 "description": "Path to a local text file "
-                                                                "(absolute or relative)."}},
-                         "required": ["path"], "additionalProperties": False}),
         Tool(name="web_fetch", read_only=True, run=_web_fetch,
              description="Fetch an http(s) URL and return its readable text (HTML is "
                          "stripped to text; output is size-capped). Use for arbitrary web "

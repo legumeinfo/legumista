@@ -1,9 +1,10 @@
-# Native research tools (in-package reference)
+# Legumista tools
 
-These are the tools the harness exposes to you. They are implemented in-package against
-keyless public APIs and local utilities — no external MCP server is required. **Every
-tool is read-only** (nothing here writes files, mutates state, or spends money) and
-**every tool returns plain text**, so you can read a result and decide the next call.
+The tools this server exposes, implemented against keyless public APIs, a bundled
+snapshot of the LIS Data Store, and local htslib. **Every tool is read-only by default**
+(nothing writes files, mutates state, or spends money unless the server was started with
+`--allow-write`) and **every tool returns plain text**, so you can read a result and
+decide the next call.
 
 Conventions that apply to all tools below:
 - **Errors are returned as text, not thrown.** A failed call returns a string beginning
@@ -30,7 +31,7 @@ one truncated off the end.
 
 - **Args:** `{query, max_results?, from_year?, to_year?, include_preprints?}`.
 - `include_preprints` adds bioRxiv/medRxiv posted-content. Off by default: preprints are
-  unreviewed, and a corpus built from them reads as settled literature unless asked for.
+  unreviewed, and a reading list built from them reads as settled literature unless asked for.
 - **Always run `europepmc_search` alongside it.** Measured on legume queries, Europe PMC's
   hits and `paper_search`'s barely overlap — Europe PMC is not one of the indexes it fans
   out to, so running only `paper_search` silently leaves out most of the life-sciences
@@ -196,11 +197,3 @@ carries a `publication_doi` **by specification**, so any dataset can be traced t
 paper with `openalex_by_doi`/`read_paper`. And the protein/CDS FASTAs are indexed **by
 gene ID**, so `fasta_fetch` with the sequence name as the region returns one protein
 without downloading the file.
-
----
-
-## Optional MCP tools
-
-If the researcher has configured MCP servers in `.mcp.json`, those servers' tools appear
-alongside the native ones, namespaced `mcp__<server>__<tool>`, and follow the same doctrine.
-None are required — the native tools above cover the entire pipeline on their own.
