@@ -115,6 +115,7 @@ def catalog(tmp_path, monkeypatch):
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(CATALOG), encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(path))
+    monkeypatch.setattr(C, "_CANDIDATES", ())   # the fixture must win
     C.reset()
     yield str(path)
     C.reset()
@@ -123,6 +124,7 @@ def catalog(tmp_path, monkeypatch):
 @pytest.fixture
 def no_catalog(monkeypatch):
     monkeypatch.setattr(C, "CATALOG_PATH", "")
+    monkeypatch.setattr(C, "_CANDIDATES", ())  # and no real catalog on disk either
     C.reset()
     yield
     C.reset()
@@ -153,6 +155,7 @@ def test_a_broken_catalog_does_not_raise(tmp_path, monkeypatch):
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(bad))
+    monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     try:
         assert "no LIS catalog is loaded" in _survey()
@@ -166,6 +169,7 @@ def test_unsupported_schema_is_refused_not_guessed(tmp_path, monkeypatch):
     future = tmp_path / "future.json"
     future.write_text(json.dumps({"schema": 99, "collections": []}), encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(future))
+    monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     try:
         assert "no LIS catalog is loaded" in _survey()

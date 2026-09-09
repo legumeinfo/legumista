@@ -29,20 +29,32 @@ because it also ships an HTTP server we do not use. Nothing here imports them, b
 legumista treats it as an OPTIONAL dependency: when it is absent these tools
 report how to enable them and every other tool is unaffected.
 
-Configuration, both optional:
-    LEGUMISTA_LIS_CATALOG    path to catalog.json  (enables these tools)
-    LEGUMISTA_DSCENSOR_PATH  path to a dscensor source checkout, for running
-                             against a working tree instead of an install
+The catalog is a top-level ``catalog.json`` -- looked for at the install root, then in
+the working directory. It is a build artifact of ``lis-autocontent populate-catalog``,
+not source, and carries the datastore-metadata commit it was built from so a stale copy
+announces itself.
+
+    LEGUMISTA_DSCENSOR_PATH  optional: a dscensor source checkout, for running against
+                             a working tree instead of an installed package
 """
 import asyncio
 import os
 import sys
 import threading
+from pathlib import Path
 
 from .tool import Tool
-from .tools_native import MAX_CHARS, _cap
+from .tools_native import _cap
 
-CATALOG_PATH = os.environ.get("LEGUMISTA_LIS_CATALOG", "")
+# The catalog ships alongside the code as a top-level `catalog.json`. Two locations are
+# tried, in order, and nothing is configurable: the repo/install root (a source checkout
+# or `pip install -e`) and then the working directory (which is what a container mount
+# lands on). Absent from both, the lis_* tools report how to build one.
+_CANDIDATES = (
+    Path(__file__).resolve().parent.parent / "catalog.json",
+    Path.cwd() / "catalog.json",
+)
+CATALOG_PATH = next((str(p) for p in _CANDIDATES if p.is_file()), "")
 DSCENSOR_PATH = os.environ.get("LEGUMISTA_DSCENSOR_PATH", "")
 
 _STATE = {"controller": None, "error": None, "loaded": False}
@@ -50,10 +62,10 @@ _LOCK = threading.Lock()
 
 _UNAVAILABLE = (
     "error: no LIS catalog is loaded. Every lis_* tool reads the catalog, so none "
-    "of them can answer until one is configured.\n"
-    "To enable: build a catalog with `lis-autocontent populate-catalog "
-    "--from_github ./datastore-metadata --catalog_out catalog.json`, then set "
-    "LEGUMISTA_LIS_CATALOG to that file."
+    "of them can answer until one is present.\n"
+    "To enable: build one with `lis-autocontent populate-catalog --from_github "
+    "./datastore-metadata --verify --catalog_out catalog.json` and put it at the "
+    "top level of the legumista checkout (or the working directory)."
 )
 
 
@@ -75,8 +87,13 @@ def controller():
         if _STATE["loaded"]:
             return _STATE["controller"]
         _STATE["loaded"] = True
-        if not CATALOG_PATH:
-            _STATE["error"] = "LEGUMISTA_LIS_CATALOG is not set"
+        path = CATALOG_PATH or next(
+            (str(p) for p in _CANDIDATES if p.is_file()), ""
+        )
+        if not path:
+            _STATE["error"] = "no catalog.json at " + " or ".join(
+                str(p) for p in _CANDIDATES
+            )
             return None
         try:
             catalog_controller = _import_controller()
@@ -87,7 +104,7 @@ def controller():
             )
             return None
         try:
-            _STATE["controller"] = catalog_controller(CATALOG_PATH)
+            _STATE["controller"] = catalog_controller(path)
         except Exception as e:  # noqa: BLE001 - CatalogError, OSError, anything
             _STATE["error"] = f"{type(e).__name__}: {e}"
             return None

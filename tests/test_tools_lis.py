@@ -173,6 +173,7 @@ def catalog(tmp_path, monkeypatch):
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(CATALOG), encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(path))
+    monkeypatch.setattr(C, "_CANDIDATES", ())   # the fixture must win
     C.reset()
 
     fetched = []
@@ -433,6 +434,7 @@ def test_lis_tools_are_registered_on_the_mcp_server():
 
 def test_tools_report_clearly_when_no_catalog_is_configured(monkeypatch):
     monkeypatch.setattr(C, "CATALOG_PATH", "")
+    monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     try:
         for out in (L._find({}), L._files({"collection": ANN}),

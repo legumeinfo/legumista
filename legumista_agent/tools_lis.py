@@ -263,11 +263,20 @@ def _files(args) -> str:
     if provenance:
         head.append(provenance)
 
-    addressable, plain = [], []
+    addressable, plain, unprobed = [], [], []
     for entry in sorted(data, key=lambda f: f["n"]):
         tool, how = _access_for(entry)
-        (addressable if tool else plain).append(
-            (entry["n"], tool, how, entry.get("description", "")))
+        row = (entry["n"], tool, how, entry.get("description", ""))
+        if tool:
+            addressable.append(row)
+        elif entry.get("i_unknown"):
+            # The filename was derived from convention but never probed, and this file
+            # type CAN carry an index. Putting it in "not indexed" would claim knowledge
+            # we do not have — and a markers .gff3.gz resolved this way really does have
+            # a .tbi.
+            unprobed.append(row)
+        else:
+            plain.append(row)
 
     lines = head + ["", f"RANDOMLY ACCESSIBLE ({len(addressable)}) — stream a region "
                         "without downloading the file:"]
@@ -283,6 +292,15 @@ def _files(args) -> str:
                  "downloads only:")
     for name, _tool, _how, desc in plain:
         lines.append(f"  {name}" + (f"   — {desc}" if desc else ""))
+    if unprobed:
+        lines.append("")
+        lines.append(f"INDEX STATUS UNKNOWN ({len(unprobed)}) — these filenames were "
+                     "derived from the datastore's convention but not checked for "
+                     "index siblings, and this file type can carry them. Try the "
+                     "streaming tools before assuming a whole-file download; rebuild "
+                     "the catalog with --verify to settle it.")
+        for name, _tool, _how, desc in unprobed:
+            lines.append(f"  {name}" + (f"   — {desc}" if desc else ""))
     lines.append("")
     lines.append(catalog_stamp(ctl))
     return _cap("\n".join(lines))

@@ -288,8 +288,24 @@ external services:
   network read is `lis_gene` fetching a collection's gene-models BED, whose URL comes
   from the catalog; gene coordinates exist only inside that file.
 
-  Configure with `LEGUMISTA_LIS_CATALOG` (path to `catalog.json`) and, if `dscensor` is
-  not installed, `LEGUMISTA_DSCENSOR_PATH` (a dscensor source checkout). `dscensor` is an
+  A prebuilt catalog ships in the repo as [`catalog.json`](catalog.json) and is found
+  automatically — no configuration. The tools look for a top-level `catalog.json` at the
+  install root, then in the working directory.
+
+  It is a **build artifact**, not source: regenerate it with `lis-autocontent
+  populate-catalog --from_github ./datastore-metadata --verify` whenever
+  datastore-metadata moves. Its `source_commit` records which metadata commit it came
+  from, and every tool reply repeats that so staleness is visible.
+
+
+  If `dscensor` is not installed, set `LEGUMISTA_DSCENSOR_PATH` to a source checkout of
+  it. The catalog reader currently lives on the `legumista-interop` branch of
+  [legumeinfo/microservices](https://github.com/legumeinfo/microservices/tree/legumista-interop/dscensor):
+
+  ```console
+  git clone -b legumista-interop https://github.com/legumeinfo/microservices.git
+  export LEGUMISTA_DSCENSOR_PATH=$PWD/microservices/dscensor
+  ``` `dscensor` is an
   optional dependency: without it these tools explain how to enable themselves and every
   other tool is unaffected.
 
