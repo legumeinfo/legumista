@@ -105,11 +105,41 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
 
 
 def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000,
-          show_banner: bool = False, *, allow_write: bool = False) -> None:
+          show_banner: bool = False, *, allow_write: bool = False, log=None) -> None:
     """Build and run the server (blocking). `transport` is 'stdio' (default; how MCP
     clients spawn a server) or 'http' (a long-running HTTP endpoint on host:port).
-    `allow_write` enables the write-capable genomics tools' write operations."""
+    `allow_write` enables the write-capable genomics tools' write operations.
+
+    Three things happen before the server starts, in this order for a reason:
+
+    1. **The catalog is resolved** (pinned file, cache, or a download). It must come
+       first because `build_server` projects the resident map into the server's
+       `instructions`, and instructions are sent once at initialize.
+    2. **The server is built**, with whatever catalog step 1 produced.
+    3. **Refresh is armed** — the webhook (HTTP only, and only with a secret set) and the
+       background poller, both of which hot-swap the catalog in place afterwards.
+    """
+    from . import catalog_source, tools_catalog, webhook
+
+    log = log or (lambda _msg: None)
+
+    report = tools_catalog.startup()
+    detail = report.get("detail") or ""
+    log(f"[*] catalog: {report.get('status')}" + (f" — {detail}" if detail else ""))
+    if report.get("stamp"):
+        log(f"    {report['stamp']}")
+
     server = build_server(allow_write=allow_write)
+
+    if transport != "stdio":
+        webhook.register(server, refresh_fn=tools_catalog.refresh, log=log)
+
+    if tools_catalog.is_pinned():
+        log("[*] catalog polling: off (a local catalog.json is pinned)")
+    elif catalog_source.start_poller(tools_catalog.refresh, log=log):
+        hours = catalog_source.poll_interval() / 3600
+        log(f"[*] catalog polling: every {hours:g}h (conditional GET)")
+
     if transport == "stdio":
         server.run(transport="stdio", show_banner=show_banner)
     else:

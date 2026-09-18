@@ -24,16 +24,28 @@
 # samtools/bcftools need no system package: pysam's manylinux wheels bundle htslib and
 # both command suites, so the genomics tools install without a C toolchain.
 #
-# The lis_* tools read a CATALOG rather than crawling data.legumeinfo.org, which needs
-# two things this image does NOT bake in:
+# The lis_* tools read a CATALOG rather than crawling data.legumeinfo.org. The catalog is
+# DATA, not code: it is NOT baked into this image. The server downloads it on startup from
+# LEGUMISTA_CATALOG_URL and caches it under LEGUMISTA_CACHE_DIR, so a rebuilt catalog
+# reaches a running container without a new image. The build stays hermetic -- nothing is
+# fetched here.
 #
-#   1. the `dscensor` package, for its CatalogController -- cloned below, since it is not
-#      on PyPI yet.
-#   2. a catalog.json. The repo's copy is baked in at /work/catalog.json for convenience;
-#      mount over it to use a fresher one without rebuilding, which is the point of
-#      keeping the data separate from the code:
+# Persist the cache across restarts (optional, but it means a restart during a GitHub
+# outage still comes up serving the last good catalog):
+#
+#   docker run -v legumista-cache:/var/cache/legumista ... legumista
+#
+# Pin a specific catalog instead, bypassing the download entirely:
 #
 #   docker run --rm -i -v /path/to/catalog.json:/work/catalog.json:ro legumista
+#
+# Refresh a running container the moment a new catalog is published -- set a secret and
+# point a GitHub webhook (or any signed POST) at /catalog/refresh:
+#
+#   docker run -e LEGUMISTA_WEBHOOK_SECRET=... -p 8000:8000 legumista -t http --host 0.0.0.0
+#
+# The `dscensor` package supplies the CatalogController and IS cloned below, since it is
+# not on PyPI yet.
 FROM python:3.12-slim
 
 LABEL io.modelcontextprotocol.server.name="io.github.legumeinfo/legumista"
@@ -125,11 +137,15 @@ RUN pip install --no-cache-dir .
 
 # htslib caches a remote file's index into the process working directory, so give it a
 # writable scratch dir rather than letting it litter /src (or fail on a read-only mount).
-# The catalog lives here too: the tools look for ./catalog.json, so a bind mount over
-# this path swaps in a newer catalog with no rebuild.
+# A catalog.json mounted here pins the server to it; otherwise the download is used.
 WORKDIR /work
-RUN cp /src/catalog.json /work/catalog.json 2>/dev/null \
-    || echo "no catalog.json in the build context; mount one at /work/catalog.json"
+
+# The downloaded catalog lands here. A named volume on this path survives `docker run
+# --rm` and restarts, so a container that starts while the release host is unreachable
+# still has its last good catalog to fall back on.
+ENV LEGUMISTA_CACHE_DIR=/var/cache/legumista
+RUN mkdir -p /var/cache/legumista
+VOLUME /var/cache/legumista
 
 # Fail the build if the served toolset is not actually complete: every tool the MCP
 # server advertises must be present, and the four CLI-backed ones must really be callable.
@@ -156,7 +172,14 @@ print('htslib', pysam.__samtools_version__)"; \
     python -c "\
 import sys, os; sys.path.insert(0, os.environ['LEGUMISTA_DSCENSOR_PATH']); \
 from dscensor.catalog import CatalogController; \
-print('dscensor CatalogController importable')"
+print('dscensor CatalogController importable')"; \
+    python -c "\
+from legumista_agent import catalog_source as s, webhook as w; \
+assert s.catalog_url().startswith('https://'), s.catalog_url(); \
+assert s.cache_dir().is_dir(), s.cache_dir(); \
+assert w.register.__doc__; \
+print('catalog source', s.catalog_url()); \
+print('cache dir', s.cache_dir())"
 
 # Everything is one command: start the MCP server with `legumista mcp` (stdio by default).
 # Extra args (e.g. -t http, --allow-write) pass straight through.

@@ -1,0 +1,78 @@
+# Deployment for the legumista MCP server: builds the image from this checkout and runs
+# it as a long-lived HTTP endpoint.
+#
+#   cp .env.example .env     # then set a webhook secret (optional)
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# The endpoint is http://127.0.0.1:8000/mcp — point an MCP client at it with:
+#   {"mcpServers": {"legumista": {"url": "http://127.0.0.1:8000/mcp"}}}
+#
+# Everything tunable lives in .env; this file is meant to be used unedited. See
+# .env.example for the full list.
+
+name: legumista
+
+services:
+  legumista:
+    build:
+      context: .
+    image: legumista:latest
+    container_name: legumista
+    restart: unless-stopped
+
+    # Appended to the image's ENTRYPOINT (`legumista mcp`). `--host 0.0.0.0` is required:
+    # bound to the default 127.0.0.1 the server would listen only on the container's own
+    # loopback and be unreachable from the host. The published port below is what actually
+    # controls exposure, and it defaults to the host's loopback.
+    command: ["-t", "http", "--host", "0.0.0.0"]
+
+    # Default binding is 127.0.0.1, so the server is reachable from this machine only.
+    # Set LEGUMISTA_BIND=0.0.0.0 in .env to expose it on the network — do that only behind
+    # something that terminates TLS, since MCP traffic and the webhook secret are
+    # otherwise in the clear.
+    ports:
+      - "${LEGUMISTA_BIND:-127.0.0.1}:${LEGUMISTA_PORT:-8000}:8000"
+
+    # Long form with `required: false` so `docker compose up` works before .env exists.
+    # Using env_file rather than an `environment:` block is deliberate: an `environment:`
+    # entry with an unset variable passes an EMPTY value into the container, which is not
+    # the same as absent — an empty LEGUMISTA_CONTACT_EMAIL would be sent to OpenAlex as
+    # the mailto. Only what .env actually sets reaches the process.
+    env_file:
+      - path: .env
+        required: false
+
+    # The downloaded catalog. Persisting it means a restart while the release host is
+    # unreachable still comes up serving the last good catalog instead of with the six
+    # lis_* tools dark.
+    volumes:
+      - catalog-cache:/var/cache/legumista
+      # To pin a specific catalog instead of using the published one, uncomment this.
+      # A catalog.json in the working directory wins over the download: nothing is
+      # fetched, polling is off, and the refresh webhook reports "pinned".
+      # - ./catalog.json:/work/catalog.json:ro
+
+    # The image deliberately ships no HEALTHCHECK, because its default transport is stdio
+    # and a baked-in HTTP probe would mark every stdio container unhealthy. Here the
+    # transport is known to be http, so the probe belongs. A live MCP endpoint answers a
+    # bare GET with 400/406 rather than 200 — all three mean "listening".
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/mcp
+          | grep -qE "^(200|400|406)$$"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  catalog-cache:
+    # Named explicitly so it survives `docker compose down` and is addressable by hand
+    # (`docker volume inspect legumista-cache`). `docker compose down -v` still removes
+    # it, which costs one re-download and nothing else.
+    name: legumista-cache

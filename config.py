@@ -49,7 +49,10 @@ def contact_email() -> str:
     fake so an unset value is visible in a request log rather than silently impersonating
     a real address.
     """
-    return os.environ.get("LEGUMISTA_CONTACT_EMAIL", "you@example.org")
+    # `or` rather than a get() default: an env var set to the empty string (easy to do
+    # from a compose `environment:` block or an `EMAIL=` line) would otherwise be sent to
+    # OpenAlex as the mailto, which is worse than the obviously-fake default.
+    return os.environ.get("LEGUMISTA_CONTACT_EMAIL") or "you@example.org"
 
 
 def tools_spec() -> str:

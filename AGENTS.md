@@ -26,13 +26,20 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   - `mcp_server.py` — the FastMCP bridge. Assembles every family's tools and serves them.
   - `tools_catalog.py` — owns the catalog (`lis_survey`, `lis_lineage`, and the
     `CatalogController` the LIS tools read through).
+  - `catalog_source.py` — where `catalog.json` comes from: the published URL, the
+    on-disk cache, conditional GETs, and the background poller.
+  - `webhook.py` — `POST /catalog/refresh`, authenticated with GitHub's HMAC scheme.
   - `tools_lis.py`, `tools_mine.py`, `tools_native.py`, `tools_local.py`, `tools_pysam.py`.
 - `legumista_assets/prompts/tools_native.md` — the tool-use doctrine served as the MCP
   server's `instructions`. Package data; editing it changes what every client is told.
-- `catalog.json` — the build artifact the `lis_*` tools read. Produced by
-  [LIS-autocontent](https://github.com/legumeinfo/LIS-autocontent)'s `populate-catalog`
-  from `datastore-metadata`; read here through DSCensor's `CatalogController`. It is data,
-  not code — regenerate and replace it rather than patching it by hand.
+- `compose.yaml` / `.env.example` — the deployment path: builds the image from the
+  checkout and runs it as an HTTP server. `.env` is gitignored (it holds the webhook
+  secret); the compose file is meant to be used unedited.
+- **The catalog is not in this repository.** It is a build artifact of
+  [LIS-autocontent](https://github.com/legumeinfo/LIS-autocontent)'s `populate-catalog`,
+  published as a release asset and downloaded at startup (`LEGUMISTA_CATALOG_URL`), then
+  cached. A local `catalog.json` pins the server to it and is gitignored — useful offline,
+  never committed.
 
 ## Working in this repository
 
@@ -54,13 +61,21 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 - **Producers derive, consumers are dumb.** Anything that can be computed once at
   catalog-build time belongs in LIS-autocontent, not here — LIS-autocontent's output feeds
   other projects too, so deriving it here would duplicate the logic in the wrong place.
+- **A refresh must never be able to take the tools down.** `tools_catalog.refresh()`
+  downloads, validates, and builds a new controller *before* rebinding the live one; every
+  failure path leaves the previous catalog serving. If you touch that ordering, the tests
+  that guard it are `test_a_bad_publish_does_not_clobber_a_good_cache` and
+  `test_a_failed_refresh_keeps_serving_the_previous_catalog`.
+- **The refresh webhook fails closed.** No `LEGUMISTA_WEBHOOK_SECRET`, no route. Keep it
+  that way: it is the only endpoint that acts on an unauthenticated request's say-so, and
+  the signature check must stay constant-time.
 - **One command, one package.** Everything is a subcommand of `legumista` (the only
   `[project.scripts]` entry) — there is deliberately no separate server binary. A client
   launches it via `uvx legumista mcp`, described in [`server.json`](server.json) for the
   official MCP Registry (name `io.github.legumeinfo/legumista`, verified by the
   `mcp-name:` marker in the README); the `Dockerfile` covers the container channel and
-  additionally bakes in the NCBI CLIs and DSCensor. `tests/test_distribution.py` keeps
-  these in sync — notably `server.json`'s version must track `pyproject.toml`, so bump
+  additionally bakes in the NCBI CLIs and DSCensor, and `compose.yaml` runs it.
+  `tests/test_distribution.py` keeps these in sync — notably `server.json`'s version must track `pyproject.toml`, so bump
   both on a release.
 
 ## Contributing

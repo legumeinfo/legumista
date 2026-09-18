@@ -437,10 +437,13 @@ def test_tools_report_clearly_when_no_catalog_is_configured(monkeypatch):
     monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     try:
+        from legumista_agent import catalog_source as S
         for out in (L._find({}), L._files({"collection": ANN}),
                     L._gene({"gene": "Glyma.12G040000", "collection": ANN})):
             assert "no LIS catalog is loaded" in out
-            assert "populate-catalog" in out
+            # The catalog is fetched, not built locally, so the actionable detail is
+            # the URL it tried and the cache it looked in.
+            assert S.catalog_url() in out
     finally:
         C.reset()
 

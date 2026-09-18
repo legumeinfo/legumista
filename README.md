@@ -17,25 +17,30 @@ evidence?"* The model does the reasoning; legumista makes sure every answer trac
 a real accession, a real file, or a real DOI.
 
 ```bash
-docker build -t legumista . && docker run --rm -i legumista    # everything included
+cp .env.example .env            # optional — defaults are fine
+docker compose up -d --build    # http://127.0.0.1:8000/mcp
 ```
 
-The container is the path that works out of the box. A `pip install` gives you the
-server and the tools, but two pieces are not on PyPI yet — see
-[Requirements](#requirements).
+The container is the path that works out of the box. A `pip install` gives you the server
+and the tools, but DSCensor is not on PyPI yet — see [Requirements](#requirements). The
+catalog itself is downloaded on startup, so there is nothing to fetch by hand.
 
 ---
 
 ## Why it's built this way
 
-**The catalog is resident, not crawled.** Every `lis_*` tool answers from a bundled
-`catalog.json` — 1,048 collections, 6,316 files, 938 DOIs, 70 taxa — rather than walking
+**The catalog is resident, not crawled.** Every `lis_*` tool answers from a `catalog.json`
+held in memory — ~1,048 collections, 6,316 files, 938 DOIs, 70 taxa — rather than walking
 `data.legumeinfo.org` over HTTP. A question like *"which soybean assemblies exist and which
 of their files are indexed?"* is a dictionary lookup, not a dozen round trips, and it works
 the same when the store is slow or unreachable. The catalog is built by
 [LIS-autocontent](https://github.com/legumeinfo/LIS-autocontent) from `datastore-metadata`
-and read here through DSCensor's `CatalogController`. It is data, and it ships separately
-from the code — mount a newer one and the server picks it up with no rebuild.
+and read here through DSCensor's `CatalogController`.
+
+**The catalog is data, and it ships on its own schedule.** It is not vendored in this
+repository and not baked into the image: the server downloads it at startup and caches it,
+so republishing a catalog reaches running servers without a commit, a release, or a
+redeploy. See [Keeping the catalog current](#keeping-the-catalog-current).
 
 **Random access instead of downloads.** The store publishes `.fai`, `.tbi`, `.csi` and
 `.bai` siblings for a large share of its files, and htslib can range-request against them.
@@ -150,39 +155,138 @@ arguments resolve within the launch directory unless `-C` says otherwise.
 
 ### Container
 
+`compose.yaml` is the deployment path: it builds the image from this checkout, runs the
+server as a long-lived HTTP endpoint on `127.0.0.1:8000`, persists the catalog cache in a
+named volume, and health-checks the endpoint.
+
+```bash
+cp .env.example .env            # optional; set a webhook secret here if you want one
+docker compose up -d --build
+docker compose logs -f
+docker compose down
+```
+
 The image additionally bakes in the external CLIs that four tools shell out to (NCBI
 `datasets` and EDirect) and the DSCensor catalog reader, so the whole advertised toolset
-works out of the box:
+works out of the box. The catalog is **not** baked in — it is downloaded at startup — so
+the image rebuilds only when the code changes.
+
+Everything tunable lives in `.env`, which is gitignored because the webhook secret belongs
+in it; `.env.example` documents every option. An empty `.env` is a working configuration.
+The most useful ones:
+
+| `.env` setting | Effect |
+| --- | --- |
+| `LEGUMISTA_WEBHOOK_SECRET` | Enables `POST /catalog/refresh`. Unset, the route does not exist |
+| `LEGUMISTA_BIND` | Host interface to publish on. Default `127.0.0.1` — this machine only |
+| `LEGUMISTA_PORT` | Host port. Default `8000` |
+| `LEGUMISTA_CATALOG_POLL` | Seconds between freshness checks. Default `86400`; `0` disables |
+
+To pin a catalog rather than downloading one, uncomment the `./catalog.json` mount in
+`compose.yaml`.
+
+Without compose, the equivalent is:
 
 ```bash
 docker build -t legumista .
 docker run --rm -i legumista                                  # stdio; -i keeps stdin open
-docker run --rm -d -p 8000:8000 legumista -t http --host 0.0.0.0
+docker run --rm -d -p 127.0.0.1:8000:8000 legumista -t http --host 0.0.0.0
 ```
 
-`--host 0.0.0.0` is required: bound to the default `127.0.0.1` the server is reachable
-only from inside the container. To swap in a fresher catalog without rebuilding:
+`--host 0.0.0.0` is required there: bound to the default `127.0.0.1` the server listens
+only on the container's own loopback and is unreachable from the host.
+
+---
+
+## Keeping the catalog current
+
+The catalog is a build artifact of `lis-autocontent populate-catalog`, published as a
+release asset and fetched by the server. Three things keep a running server current, in
+increasing order of immediacy.
+
+**On startup** the server fetches the catalog, sending the `ETag` and `Last-Modified` it
+last saw. An unchanged catalog answers `304` and costs nothing; a changed one is
+downloaded, validated, and written to the cache atomically.
+
+**On a timer** — every 24 hours by default (`LEGUMISTA_CATALOG_POLL`) — the same
+conditional check runs in the background. Set it to `0` to switch polling off.
+
+**On demand**, via a webhook, so a newly published catalog lands in seconds instead of
+waiting for the next poll:
+
+```bash
+LEGUMISTA_WEBHOOK_SECRET=$(openssl rand -hex 32) \
+  legumista mcp -t http --host 0.0.0.0
+```
+
+That mounts `POST /catalog/refresh`, authenticated with GitHub's
+`X-Hub-Signature-256` scheme — an HMAC-SHA256 of the request body under the shared secret,
+compared in constant time. **With no secret set the route is not registered at all**, so
+refresh-on-demand is strictly opt-in.
+
+Point a GitHub webhook at it (repository → Settings → Webhooks), with the same value as
+the secret and `application/json` as the content type. A `release` event then refreshes
+every server the moment a catalog is published; GitHub's `ping` is answered without
+fetching, so the hook shows green immediately.
+
+To trigger it by hand, or from CI that is not GitHub:
+
+```bash
+BODY='{"action":"published"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$LEGUMISTA_WEBHOOK_SECRET" | awk '{print $2}')
+curl -fsS -X POST http://127.0.0.1:8000/catalog/refresh \
+  -H "X-Hub-Signature-256: sha256=$SIG" \
+  -H 'Content-Type: application/json' \
+  -d "$BODY"
+```
+
+The response reports what happened — `updated`, `unchanged`, `pinned`, or `error` with a
+reason — and a failed refresh answers `502`, so a broken publish shows as a failed delivery
+rather than disappearing behind a `200`.
+
+### What a refresh cannot break
+
+A refresh **replaces the loaded catalog only after** the download has parsed, passed a
+structural check (a non-empty `collections` array and a `stats` object), and been accepted
+by DSCensor's reader. Anything short of that leaves the server on the catalog it already
+had. The failure this guards against is not a corrupt file but a *plausible* one — a login
+page, an S3 error document, or a truncated transfer — which would otherwise be swapped in
+and leave every `lis_*` tool answering confidently from nothing.
+
+### Pinning a specific catalog
+
+A `catalog.json` in the working directory (or at the root of a source checkout) wins over
+everything above: it is used verbatim, nothing is downloaded, and polling is switched off.
+That is the offline and reproducibility path. The webhook reports `pinned` rather than
+overriding it.
 
 ```bash
 docker run --rm -i -v /path/to/catalog.json:/work/catalog.json:ro legumista
 ```
+
+### One wrinkle worth knowing
+
+The resident map is part of the MCP `instructions`, which the protocol sends once at
+initialize. A hot swap updates the catalog every tool reads, and every tool answer carries
+the new build stamp — but a client connected across the swap keeps the map from the
+catalog it connected under. The map is a species-level census that changes only when LIS
+adds a species, so this is a cosmetic lag rather than a correctness one; reconnecting the
+client refreshes it.
 
 ---
 
 ## Requirements
 
 - **Python ≥3.11.** `pip install legumista` brings in the server and every tool's code.
-- **The catalog** is a 2.4 MB build artifact and is **not** shipped in the wheel. The
-  `lis_*` tools look for `catalog.json` at the top of a source checkout or in the working
-  directory. Working from a clone gives you the committed one; otherwise put a copy in the
-  directory you start the server from. The container bakes one in at `/work/catalog.json`.
+- **Outbound HTTPS to the catalog URL** at startup. The catalog is downloaded, not
+  shipped; a cached copy covers later restarts.
 - **DSCensor** is not on PyPI yet. Point `LEGUMISTA_DSCENSOR_PATH` at the `dscensor/`
   directory of a checkout of the `legumista-interop` branch of `legumeinfo/microservices`.
   The container clones it for you.
 
-  Missing either one degrades cleanly rather than failing: the six `lis_*` tools report
-  the catalog as unavailable and print the command that produces one, and the other 24
-  tools are unaffected.
+  Either one missing degrades cleanly rather than failing: the six `lis_*` tools report
+  the catalog as unavailable and name the URL they tried, and the other 24 tools are
+  unaffected.
 - **NCBI CLIs** (optional, for `ncbi_datasets`/`ncbi_assembly_status`/`edirect`/`sra_runs`):
   NCBI `datasets` and EDirect on `PATH`. An `NCBI_API_KEY` raises the Entrez rate limit
   from 3 to 10 requests/second.
@@ -191,6 +295,10 @@ docker run --rm -i -v /path/to/catalog.json:/work/catalog.json:ro legumista
 
 | Variable | Effect |
 | --- | --- |
+| `LEGUMISTA_CATALOG_URL` | Where to download the catalog. Default: the published LIS-autocontent release asset |
+| `LEGUMISTA_CACHE_DIR` | Where the download is cached. Default: `~/.cache/legumista` (`/var/cache/legumista` in the image) |
+| `LEGUMISTA_CATALOG_POLL` | Seconds between background freshness checks. Default `86400`; `0` disables |
+| `LEGUMISTA_WEBHOOK_SECRET` | Enables `POST /catalog/refresh`. Unset, the route does not exist |
 | `LEGUMISTA_HOME` | Sandbox root for local file arguments. Default: the launch directory (same as `-C`) |
 | `LEGUMISTA_DSCENSOR_PATH` | Where to find the DSCensor package |
 | `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex/Crossref — set yours for better rate limits |
@@ -202,9 +310,10 @@ docker run --rm -i -v /path/to/catalog.json:/work/catalog.json:ro legumista
 ## Caveats worth knowing
 
 - **The catalog is a snapshot.** It carries a build timestamp and the `datastore-metadata`
-  commit it came from, and every tool reports that stamp. A collection published after the
-  snapshot is invisible until the catalog is rebuilt. Newer catalog, no rebuild: mount it
-  over `catalog.json`.
+  commit it came from, and every tool repeats that stamp, so staleness is visible rather
+  than discovered. A collection published after the snapshot is invisible until a newer
+  catalog is published and picked up — see
+  [Keeping the catalog current](#keeping-the-catalog-current).
 - **Predicted file lists.** Roughly 45% of collections publish no CHECKSUM, which is the
   only authoritative enumeration of a collection's files. For those, filenames are
   constructed from the documented naming convention and confirmed against the store at

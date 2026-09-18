@@ -72,7 +72,8 @@ def mcp(
         + (f", http://{host}:{port}/mcp" if transport == "http" else "")
         + (", writes ENABLED" if allow_write else "") + ") …")
     try:
-        serve(transport=transport, host=host, port=port, allow_write=allow_write)
+        serve(transport=transport, host=host, port=port, allow_write=allow_write,
+              log=log)
     except KeyboardInterrupt:
         log("[*] stopped.")
 

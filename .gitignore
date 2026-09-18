@@ -13,6 +13,15 @@ __pycache__/
 .DS_Store
 *.swp
 
+# Docker Compose's environment file. Holds LEGUMISTA_WEBHOOK_SECRET, so it must never
+# be committed. `.env.example` is the checked-in template.
+.env
+
+# The LIS catalog is a downloaded build artifact, not source: the server fetches it
+# from LEGUMISTA_CATALOG_URL and caches it. A local copy here pins the server to it,
+# which is useful for offline work and must never be committed back.
+/catalog.json
+
 # htslib caches remote index files into the process CWD when reading a remote
 # bgzf/tabix file, so a server or test run started here can drop these.
 *.tbi

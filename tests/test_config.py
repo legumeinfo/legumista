@@ -70,3 +70,11 @@ def test_tools_spec_is_found_from_an_unrelated_directory(tmp_path):
     to every client that starts the server from somewhere else."""
     out = _probe({}, cwd=tmp_path)
     assert out["spec_len"] > 1000, "packaged tools_native.md should have been found"
+
+
+def test_empty_contact_email_falls_back_to_the_default(tmp_path):
+    """An env var set to the empty string is not the same as unset, but for a polite-pool
+    mailto it must behave as if it were — an empty mailto is a malformed request, not a
+    quieter one."""
+    out = _probe({"LEGUMISTA_CONTACT_EMAIL": ""}, cwd=tmp_path)
+    assert out["contact_email"] == "you@example.org"

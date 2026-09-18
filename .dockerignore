@@ -1,0 +1,14 @@
+# The catalog is downloaded at runtime, never baked into the image. A developer's local
+# copy (used to pin a checkout for offline work) must not leak into the build context and
+# silently pin every container built from it.
+catalog.json
+
+.git
+.github
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/

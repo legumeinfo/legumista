@@ -29,10 +29,18 @@ because it also ships an HTTP server we do not use. Nothing here imports them, b
 legumista treats it as an OPTIONAL dependency: when it is absent these tools
 report how to enable them and every other tool is unaffected.
 
-The catalog is a top-level ``catalog.json`` -- looked for at the install root, then in
-the working directory. It is a build artifact of ``lis-autocontent populate-catalog``,
-not source, and carries the datastore-metadata commit it was built from so a stale copy
-announces itself.
+The catalog is a build artifact of ``lis-autocontent populate-catalog``, not source. It
+is no longer vendored in the repository: it is fetched from a published URL and cached on
+disk (see ``catalog_source``), so a rebuilt catalog reaches a running server without a
+code release. A local ``catalog.json`` at the install root or in the working directory
+still wins over the cache, which is the pin/offline path.
+
+Every catalog carries the datastore-metadata commit it was built from, and every tool
+answer repeats it, so a stale copy announces itself rather than being discovered.
+
+Reloading is a hot swap: ``refresh()`` validates a download before building a new
+controller, and only then rebinds it under the lock. Readers hold the old controller for
+the length of one call, so an in-flight tool never sees a half-swapped catalog.
 
     LEGUMISTA_DSCENSOR_PATH  optional: a dscensor source checkout, for running against
                              a working tree instead of an installed package
@@ -43,13 +51,14 @@ import sys
 import threading
 from pathlib import Path
 
+from . import catalog_source
 from .tool import Tool
 from .tools_native import _cap
 
-# The catalog ships alongside the code as a top-level `catalog.json`. Two locations are
-# tried, in order, and nothing is configurable: the repo/install root (a source checkout
-# or `pip install -e`) and then the working directory (which is what a container mount
-# lands on). Absent from both, the lis_* tools report how to build one.
+# A local `catalog.json` pins the server to that file: the repo/install root (a source
+# checkout) then the working directory (what a `-v ...:/work/catalog.json` mount lands
+# on). Neither present, the downloaded cache is used. Nothing here is configurable by
+# path — a different catalog is a different URL, or a mounted file.
 _CANDIDATES = (
     Path(__file__).resolve().parent.parent / "catalog.json",
     Path.cwd() / "catalog.json",
@@ -57,16 +66,35 @@ _CANDIDATES = (
 CATALOG_PATH = next((str(p) for p in _CANDIDATES if p.is_file()), "")
 DSCENSOR_PATH = os.environ.get("LEGUMISTA_DSCENSOR_PATH", "")
 
-_STATE = {"controller": None, "error": None, "loaded": False}
+_STATE = {"controller": None, "error": None, "loaded": False, "path": ""}
 _LOCK = threading.Lock()
 
-_UNAVAILABLE = (
-    "error: no LIS catalog is loaded. Every lis_* tool reads the catalog, so none "
-    "of them can answer until one is present.\n"
-    "To enable: build one with `lis-autocontent populate-catalog --from_github "
-    "./datastore-metadata --verify --catalog_out catalog.json` and put it at the "
-    "top level of the legumista checkout (or the working directory)."
-)
+def _unavailable_text() -> str:
+    return (
+        "error: no LIS catalog is loaded. Every lis_* tool reads the catalog, so none "
+        "of them can answer until one is present.\n"
+        f"The catalog is normally downloaded at startup from {catalog_source.catalog_url()} "
+        f"and cached at {catalog_source.cache_path()}; a failed download leaves the tools "
+        "unavailable rather than serving stale data.\n"
+        "To fix: check network access to that URL, or place a `catalog.json` in the "
+        "working directory to pin one explicitly."
+    )
+
+
+def _pinned_path() -> str:
+    """A local catalog.json, if one is present. Takes precedence over the cache."""
+    return next((str(p) for p in _CANDIDATES if p.is_file()), "")
+
+
+def _resolve_path() -> str:
+    """Where to load from: an explicit override, a local file, then the cache."""
+    if CATALOG_PATH:
+        return CATALOG_PATH
+    local = _pinned_path()
+    if local:
+        return local
+    cached = catalog_source.cache_path()
+    return str(cached) if cached.is_file() else ""
 
 
 def _import_controller():
@@ -87,34 +115,112 @@ def controller():
         if _STATE["loaded"]:
             return _STATE["controller"]
         _STATE["loaded"] = True
-        path = CATALOG_PATH or next(
-            (str(p) for p in _CANDIDATES if p.is_file()), ""
-        )
+        path = _resolve_path()
         if not path:
-            _STATE["error"] = "no catalog.json at " + " or ".join(
-                str(p) for p in _CANDIDATES
-            )
-            return None
-        try:
-            catalog_controller = _import_controller()
-        except ImportError as e:
             _STATE["error"] = (
-                f"the 'dscensor' package is not importable ({e}). Install it, or set "
-                "LEGUMISTA_DSCENSOR_PATH to a dscensor source checkout."
+                "no catalog.json at "
+                + " or ".join(str(p) for p in _CANDIDATES)
+                + f", and nothing cached at {catalog_source.cache_path()}"
             )
             return None
-        try:
-            _STATE["controller"] = catalog_controller(path)
-        except Exception as e:  # noqa: BLE001 - CatalogError, OSError, anything
-            _STATE["error"] = f"{type(e).__name__}: {e}"
-            return None
-        return _STATE["controller"]
+        ctl, err = _build(path)
+        _STATE["controller"], _STATE["error"] = ctl, err
+        _STATE["path"] = path if ctl is not None else ""
+        return ctl
+
+
+def _build(path: str):
+    """Construct a controller from `path`. Returns (controller, error_text).
+
+    Split out of `controller()` because a reload needs exactly this and nothing else:
+    build first, and only rebind the live controller if the build succeeded.
+    """
+    try:
+        catalog_controller = _import_controller()
+    except ImportError as e:
+        return None, (
+            f"the 'dscensor' package is not importable ({e}). Install it, or set "
+            "LEGUMISTA_DSCENSOR_PATH to a dscensor source checkout."
+        )
+    try:
+        return catalog_controller(path), None
+    except Exception as e:  # noqa: BLE001 - CatalogError, OSError, anything
+        return None, f"{type(e).__name__}: {e}"
+
+
+def source_path() -> str:
+    """The file the loaded catalog came from, or "" if none is loaded."""
+    return _STATE.get("path") or ""
+
+
+def is_pinned() -> bool:
+    """True when a local catalog.json is in force, so downloads do not apply."""
+    return bool(CATALOG_PATH or _pinned_path())
+
+
+def refresh(*, force: bool = False) -> dict:
+    """Fetch the published catalog and, if it changed, swap it in.
+
+    This is what the webhook and the background poller call. The swap is the last step
+    and happens only after the download has been validated and a controller built from
+    it, so a bad publish leaves the running server on its previous catalog rather than
+    taking the tools down.
+
+    Returns the fetch report with `reloaded` and `stamp` added.
+    """
+    if is_pinned():
+        return {"status": "pinned", "reloaded": False,
+                "detail": f"a local catalog.json ({_resolve_path()}) is in force; "
+                          "remove it to serve the published catalog",
+                "url": catalog_source.catalog_url()}
+
+    report = catalog_source.fetch(force=force)
+    report["reloaded"] = False
+    if report["status"] != "updated":
+        return report
+
+    ctl, err = _build(str(catalog_source.cache_path()))
+    if ctl is None:
+        # The download validated as a catalog document but DSCensor would not read it.
+        # Keep serving whatever is already loaded and say so.
+        report["status"] = "error"
+        report["detail"] = f"downloaded catalog could not be loaded: {err}"
+        return report
+
+    with _LOCK:
+        _STATE.update({"controller": ctl, "error": None, "loaded": True,
+                       "path": str(catalog_source.cache_path())})
+    report["reloaded"] = True
+    report["stamp"] = catalog_stamp(ctl)
+    return report
+
+
+def startup() -> dict:
+    """Ensure a catalog is available when the server starts.
+
+    A pinned local file short-circuits. Otherwise fetch — conditionally, so a warm cache
+    costs one 304 — and fall back to whatever is cached when the network is unavailable.
+    Never fatal: a server with no catalog still serves its other 24 tools.
+    """
+    if is_pinned():
+        return {"status": "pinned", "detail": _resolve_path(), "reloaded": False}
+
+    report = catalog_source.fetch()
+    report["reloaded"] = False
+    if report["status"] == "error" and catalog_source.cache_path().is_file():
+        report["detail"] += " — falling back to the cached catalog"
+    reset()
+    ctl = controller()
+    report["reloaded"] = ctl is not None
+    if ctl is not None:
+        report["stamp"] = catalog_stamp(ctl)
+    return report
 
 
 def reset():
-    """Forget the loaded catalog. For tests, and for a future reload command."""
+    """Forget the loaded catalog, so the next read re-resolves and reloads."""
     with _LOCK:
-        _STATE.update({"controller": None, "error": None, "loaded": False})
+        _STATE.update({"controller": None, "error": None, "loaded": False, "path": ""})
 
 
 def catalog_stamp(ctl) -> str:
@@ -133,7 +239,7 @@ def catalog_stamp(ctl) -> str:
 
 def catalog_unavailable() -> str:
     reason = _STATE.get("error")
-    return _UNAVAILABLE + (f"\n(reason: {reason})" if reason else "")
+    return _unavailable_text() + (f"\n(reason: {reason})" if reason else "")
 
 
 # --- lis_survey ----------------------------------------------------------------------

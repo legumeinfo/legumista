@@ -144,11 +144,15 @@ def test_tools_are_registered_read_only():
 
 
 def test_without_a_catalog_the_tools_explain_rather_than_fail(no_catalog):
-    """A missing catalog is a configuration state, not an error. The message must
-    say how to enable it AND that the live tools are unaffected."""
+    """A missing catalog is a configuration state, not an error. The message must say
+    how to fix it — and since the catalog is now downloaded rather than built locally,
+    the fix is the URL and the cache, not a `populate-catalog` invocation."""
+    from legumista_agent import catalog_source as _S
     out = _survey()
     assert "no LIS catalog is loaded" in out
-    assert "populate-catalog" in out  # tells the agent how to fix it
+    assert _S.catalog_url() in out, "must name the URL it would have fetched"
+    assert str(_S.cache_path()) in out, "must name where it looked"
+    assert "pin" in out, "must mention the local-file escape hatch"
 
 
 def test_a_broken_catalog_does_not_raise(tmp_path, monkeypatch):
@@ -339,3 +343,108 @@ def test_server_instructions_omit_the_map_without_a_catalog(no_catalog):
     from legumista_agent.mcp_server import build_server
 
     assert "LIS Data Store map" not in (build_server().instructions or "")
+
+
+# --- fetched catalog: hot swap ---------------------------------------------------------
+# The catalog is downloaded rather than vendored, so reloading a running server is a real
+# operation with a real failure mode: a bad publish must not take the tools down. These
+# drive the whole path — stub network, real cache file, real CatalogController swap.
+from legumista_agent import catalog_source as S  # noqa: E402
+
+
+class _Resp:
+    def __init__(self, body, headers=None):
+        self._body, self.headers = body, headers or {}
+
+    def read(self, n=-1):
+        return self._body if n is None or n < 0 else self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _publish(monkeypatch, doc=None, raw=None, headers=None):
+    """Make the next fetch return `doc` (or raw bytes), as the published catalog."""
+    body = raw if raw is not None else json.dumps(doc).encode()
+    monkeypatch.setattr(S, "_open",
+                        lambda request, timeout: _Resp(body, headers))
+
+
+@pytest.fixture
+def unpinned(monkeypatch):
+    """No local catalog.json anywhere, so the cache and the network are in play."""
+    monkeypatch.setattr(C, "CATALOG_PATH", "")
+    monkeypatch.setattr(C, "_CANDIDATES", ())
+    C.reset()
+    yield
+    C.reset()
+
+
+def test_refresh_downloads_and_swaps_in_the_new_catalog(unpinned, monkeypatch):
+    _publish(monkeypatch, CATALOG)
+    first = C.refresh()
+    assert first["status"] == "updated" and first["reloaded"] is True
+    assert C.controller().provenance()["source_commit"] == "abc123def4567890"
+
+    newer = {**CATALOG, "source_commit": "f00dfacef00dface"}
+    _publish(monkeypatch, newer)
+    second = C.refresh(force=True)
+    assert second["reloaded"] is True and "f00dface" in second["stamp"]
+    # The live controller, not just the cache file, must reflect the new catalog.
+    assert C.controller().provenance()["source_commit"] == "f00dfacef00dface"
+
+
+def test_a_failed_refresh_keeps_serving_the_previous_catalog(unpinned, monkeypatch):
+    """The central safety property. A 502 from the release host, or an error page served
+    with a 200, must leave the running server exactly as it was — not empty."""
+    _publish(monkeypatch, CATALOG)
+    C.refresh()
+    before = C.controller()
+    assert before is not None
+
+    _publish(monkeypatch, raw=b"<html>502 Bad Gateway</html>")
+    report = C.refresh(force=True)
+    assert report["status"] == "error" and report["reloaded"] is False
+    assert C.controller() is before, "a bad publish replaced a working catalog"
+
+
+def test_refresh_is_a_no_op_while_a_local_catalog_is_pinned(catalog, monkeypatch):
+    """A mounted catalog.json is an operator saying 'use exactly this'. A webhook from a
+    publisher must report that rather than quietly overriding it."""
+    calls = []
+    monkeypatch.setattr(S, "_open",
+                        lambda *a, **k: calls.append(1) or _Resp(b"{}"))
+    report = C.refresh(force=True)
+    assert report["status"] == "pinned" and report["reloaded"] is False
+    assert calls == [], "a pinned server must not fetch"
+
+
+def test_startup_falls_back_to_the_cache_when_the_network_is_down(unpinned, monkeypatch):
+    """A server restarting during a GitHub outage must come up on its cached catalog,
+    not with the lis_* tools dark."""
+    _publish(monkeypatch, CATALOG)
+    C.refresh()                                   # warm the cache
+    C.reset()
+
+    def boom(request, timeout):
+        raise OSError("name resolution failed")
+
+    monkeypatch.setattr(S, "_open", boom)
+    report = C.startup()
+    assert report["status"] == "error" and "falling back" in report["detail"]
+    assert report["reloaded"] is True             # ...but it is serving
+    assert C.controller() is not None
+
+
+def test_startup_with_no_cache_and_no_network_reports_unavailable(unpinned, monkeypatch):
+    monkeypatch.setattr(S, "_open",
+                        lambda request, timeout: (_ for _ in ()).throw(OSError("down")))
+    report = C.startup()
+    assert report["reloaded"] is False
+    assert C.controller() is None
+    text = C.catalog_unavailable()
+    assert "no LIS catalog is loaded" in text
+    assert S.catalog_url() in text, "the message must name the URL it tried"

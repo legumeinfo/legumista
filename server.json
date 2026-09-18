@@ -29,6 +29,30 @@
       ],
       "environmentVariables": [
         {
+          "name": "LEGUMISTA_CATALOG_URL",
+          "description": "Where to download the LIS catalog from on startup. Defaults to the published LIS-autocontent release asset.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_CACHE_DIR",
+          "description": "Where the downloaded catalog is cached. Defaults to ~/.cache/legumista. A warm cache is what the server falls back to when the catalog host is unreachable.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_CATALOG_POLL",
+          "description": "Seconds between background catalog checks (conditional GET, so an unchanged catalog costs a 304). Default 86400; 0 disables.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_WEBHOOK_SECRET",
+          "description": "Shared secret enabling POST /catalog/refresh, authenticated with GitHub's X-Hub-Signature-256 HMAC scheme. Unset, the route is not registered at all. HTTP transport only.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
           "name": "LEGUMISTA_HOME",
           "description": "Directory the genomics tools may read local files from (they are sandboxed to it). Defaults to the working directory; also settable with `legumista mcp -C DIR`.",
           "isRequired": false,
