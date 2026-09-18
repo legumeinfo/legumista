@@ -16,14 +16,48 @@ questions like *"does chickpea have an ortholog of this soybean gene, and what's
 evidence?"* The model does the reasoning; legumista makes sure every answer traces back to
 a real accession, a real file, or a real DOI.
 
+---
+
+## Start here: the hosted server
+
+**The easiest way to use legumista is the public instance — nothing to install, build, or
+keep up to date:**
+
+```
+https://mcp.legumeinfo.org
+```
+
+Add it to any MCP client's `mcpServers` config:
+
+```jsonc
+{
+  "mcpServers": {
+    "legumista": {
+      "url": "https://mcp.legumeinfo.org"
+    }
+  }
+}
+```
+
+Or, for Claude Code, in one command:
+
+```bash
+claude mcp add --transport http legumista https://mcp.legumeinfo.org
+```
+
+### Running your own
+
+Everything below covers self-hosting: a container, a local checkout, or an internal
+deployment with its own catalog.
+
 ```bash
 cp .env.example .env            # optional — defaults are fine
 docker compose up -d --build    # http://127.0.0.1:8000/mcp
 ```
 
-The container is the path that works out of the box. A `pip install` gives you the server
-and the tools, but DSCensor is not on PyPI yet — see [Requirements](#requirements). The
-catalog itself is downloaded on startup, so there is nothing to fetch by hand.
+A `pip install` gives you the server and the tools, but DSCensor is not on PyPI yet — see
+[Requirements](#requirements). The catalog is downloaded on startup, so there is nothing to
+fetch by hand.
 
 ---
 
@@ -121,8 +155,12 @@ write operations. Without it (the default) they run reads only and refuse writes
 
 ## Wiring it into an MCP client
 
-legumista is one command, so the server is just `legumista mcp` — the same everywhere.
-Any client can launch it with **`uvx`** (the [uv](https://docs.astral.sh/uv/) runner, the
+This section is about pointing a client at a server *you* run. For the hosted instance,
+one URL is the whole configuration — see
+[Start here](#start-here-the-hosted-server).
+
+legumista is one command, so a self-hosted server is just `legumista mcp` — the same
+everywhere. Any client can launch it with **`uvx`** (the [uv](https://docs.astral.sh/uv/) runner, the
 Python analogue of `npx`) with no manual install. Drop this into the client's standard
 `mcpServers` config:
 
