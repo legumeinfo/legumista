@@ -27,7 +27,7 @@ with no body, which is what makes a 24-hour poll unremarkable.
 
 Environment:
 
-    LEGUMISTA_CATALOG_URL    where to fetch from (default: the LIS-autocontent release)
+    LEGUMISTA_CATALOG_URL    where to fetch from (default: the datastore-metadata release)
     LEGUMISTA_CACHE_DIR      where to cache it (default: ~/.cache/legumista)
     LEGUMISTA_CATALOG_POLL   seconds between background checks; 0 disables (default 86400)
 """
@@ -43,12 +43,16 @@ from pathlib import Path
 
 from .tools_native import BlockedURLError
 
-# The published catalog. `releases/latest/download/` is a stable alias that always
-# resolves to the newest release's asset, so the URL never changes as catalogs are
-# republished. It 302s to objects.githubusercontent.com, so every redirect hop is
-# re-checked below.
+# The published catalog. It is released from the datastore-metadata repository — the
+# same mirror the catalog is built FROM — rather than from LIS-autocontent, which is the
+# tool that builds it; a catalog is a snapshot of the metadata, so it versions with the
+# metadata rather than with the builder.
+#
+# `releases/latest/download/` is a stable alias that always resolves to the newest
+# release's asset, so the URL never changes as catalogs are republished. It 302s to
+# objects.githubusercontent.com, so every redirect hop is re-checked below.
 DEFAULT_CATALOG_URL = (
-    "https://github.com/matthewwiese/LIS-autocontent/releases/latest/download/catalog.json"
+    "https://github.com/matthewwiese/datastore-metadata/releases/latest/download/catalog.json"
 )
 
 # Downloads larger than this are refused outright. The real artifact is ~2.4 MB; the cap

@@ -239,7 +239,9 @@ only on the container's own loopback and is unreachable from the host.
 ## Keeping the catalog current
 
 The catalog is a build artifact of `lis-autocontent populate-catalog`, published as a
-release asset and fetched by the server. Three things keep a running server current, in
+release asset on
+[datastore-metadata](https://github.com/matthewwiese/datastore-metadata/releases) and
+fetched by the server. Three things keep a running server current, in
 increasing order of immediacy.
 
 **On startup** the server fetches the catalog, sending the `ETag` and `Last-Modified` it
@@ -333,7 +335,7 @@ client refreshes it.
 
 | Variable | Effect |
 | --- | --- |
-| `LEGUMISTA_CATALOG_URL` | Where to download the catalog. Default: the published LIS-autocontent release asset |
+| `LEGUMISTA_CATALOG_URL` | Where to download the catalog. Default: the published datastore-metadata release asset |
 | `LEGUMISTA_CACHE_DIR` | Where the download is cached. Default: `~/.cache/legumista` (`/var/cache/legumista` in the image) |
 | `LEGUMISTA_CATALOG_POLL` | Seconds between background freshness checks. Default `86400`; `0` disables |
 | `LEGUMISTA_WEBHOOK_SECRET` | Enables `POST /catalog/refresh`. Unset, the route does not exist |
