@@ -2,7 +2,9 @@
 """Tool interface for the agent harness.
 
 A tool is a name + description + JSON schema for its arguments, a read-only flag (for the
-permission gate), and an async `run(args) -> str`. `to_openai()` renders the OpenAI
+permission gate), and an async `run(args)` returning text: a `str`, or a
+`results.ToolOutput` when the handler wants to mark a failure explicitly (bare strings
+starting "error:" are treated as failures too; see results.coerce). `to_openai()` renders the OpenAI
 function-tool spec sent in the request's `tools` array (OpenAI spec
 https://github.com/openai/openai-openapi: ChatCompletionTool / FunctionObject).
 
@@ -14,10 +16,13 @@ training distribution — all of which improve name→intent recognition and rel
 selection.
 """
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
-# args (dict) -> result text (awaited)
-ToolRun = Callable[[dict], Awaitable[str]]
+if TYPE_CHECKING:
+    from .results import ToolOutput  # noqa: F401
+
+# args (dict) -> result (awaited): text, or a results.ToolOutput carrying is_error
+ToolRun = Callable[[dict], Awaitable["str | ToolOutput"]]
 # args (dict) -> True if THIS specific call writes (mutates disk/state). Optional: for
 # tools whose read/write nature depends on the arguments — e.g. a `samtools` dispatcher
 # where `view` reads but `sort` writes. The permission gate consults it per call.
