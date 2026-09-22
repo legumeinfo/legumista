@@ -36,9 +36,11 @@ import gzip
 import io
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
+from .results import fail
 from .tool import Tool
-from .tools_catalog import catalog_stamp, catalog_unavailable, controller
+from .tools_catalog import catalog_stamp, catalog_unavailable, controller, resolve_taxon
 from .tools_native import _cap, _get_bytes, _validate_url
 
 MAX_RESULTS = int(os.environ.get("LEGUMISTA_LIS_MAX_RESULTS", "10"))
@@ -139,13 +141,20 @@ def _find(args) -> str:
     query = (args.get("query") or "").strip().lower()
     limit = max(1, min(int(args.get("max_results") or MAX_RESULTS), 25))
 
-    if taxon and not genus:
-        bits = taxon.replace("_", " ").split()
-        if bits:
-            genus = bits[0].capitalize()
-        if len(bits) > 1 and not species:
-            species = bits[1].lower()
+    # Resolve whatever naming the caller used (Latin name in any case, abbreviation,
+    # common name). An unrecognised NAME is reported as such, never as absent data.
+    spec = taxon or " ".join(p for p in (genus, species) if p)
+    note = ""
+    if spec:
+        match = resolve_taxon(spec, ctl)
+        if not match.ok:
+            return f"{match.problem()}\n{catalog_stamp(ctl)}"
+        genus, species, note = match.genus, match.species, match.note()
+    out = _find_resolved(ctl, genus, species, ctype, query, limit)
+    return f"{note}\n{out}" if note else out
 
+
+def _find_resolved(ctl, genus, species, ctype, query, limit) -> str:
     stamp = catalog_stamp(ctl)
 
     if not genus:
@@ -345,16 +354,21 @@ def _fetch_gz_text(url, limit=BED_MAX_BYTES):
 def _synonyms(record):
     """Superseded gene ID -> current ID, from the annotation's synonym file.
 
+    Returns (index, status, filename), status one of "ok", "absent" (the collection
+    publishes no synonym file) or "failed: <reason>" (it does, but it could not be read).
+    The caller must report the last two differently: "absent" is a fact about the
+    collection, "failed" means the route was NOT checked.
+
     A data file, not a metadata endpoint: its URL comes from the catalog, but the
     mapping itself exists only inside the file.
     """
     name = next((f["n"] for f in record.get("files", [])
                  if f["n"].endswith(_SYNONYM_SUFFIXES)), None)
     if not name:
-        return {}
+        return {}, "absent", ""
     text, err = _fetch_gz_text(_file_url(record, name))
     if err:
-        return {}
+        return {}, f"failed: {err}", name
     index = {}
     for line in text.splitlines():
         if line.startswith("#"):
@@ -362,26 +376,76 @@ def _synonyms(record):
         parts = line.split("\t")
         if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
             index.setdefault(parts[1].strip().lower(), parts[0].strip())
-    return index
+    return index, "ok", name
 
 
-def _alias_candidates(gene, record):
-    """Yield (candidate_id, how_it_was_found) for a query that matched nothing exactly."""
+def _symbol_note(gene, entry):
+    note = f"curated symbol {gene!r} ({entry['abbrev']}.traits.yml, carried in the catalog)"
+    if entry.get("doi"):
+        note += f" (publication_doi: {entry['doi']})"
+    if entry.get("synopsis"):
+        note += f"\n  synopsis: {entry['synopsis']}"
+    return note
+
+
+def _home_annotation(gene_id, record):
+    """' — it belongs to <id>; rerun with collection=<path>' when a fully qualified gene
+    ID comes from a different annotation than `record`, else ""."""
+    match = _QUALIFIED_GENE_RE.match(gene_id or "")
+    if not match or record["id"].startswith(match.group("stem") + "."):
+        return ""
+    home, _err = _annotation_for_gene(gene_id, "")
+    if home is None:
+        return f" — it belongs to annotation {match.group('stem')}.*, which is not in the catalog"
+    return f" — it belongs to {home['id']}; rerun with collection='{home['path']}'"
+
+
+def _resolve_in_annotation(gene, record, bed):
+    """Try every route from a name to BED rows, recording what each route found.
+
+    Returns (hits, label, provenance, routes, incomplete). `routes` is a list of
+    (status, what, outcome) with status "checked", "unavailable" or "NOT CHECKED";
+    `incomplete` is True when a route that could have matched was not checked, in which
+    case a miss must not be reported as a definitive absence.
+    """
+    routes = []
+    hits = _bed_hits(bed, gene)
+    if hits:
+        return hits, gene, "", routes, False
+    routes.append(("checked", "exact gene/mRNA ID in the gene models BED", "no match"))
+
     ctl = controller()
-    if ctl is not None:
-        abbrev = record.get("scientific_name_abbrev", "")
-        for entry in ctl.resolve_symbol(gene, abbrev):
-            note = (f"curated symbol {gene!r} "
-                    f"({entry['abbrev']}.traits.yml, carried in the catalog)")
-            if entry.get("doi"):
-                note += f" (publication_doi: {entry['doi']})"
-            if entry.get("synopsis"):
-                note += f"\n  synopsis: {entry['synopsis']}"
-            yield entry["gene"], note
-    current = _synonyms(record).get(gene.lower())
+    entries = ctl.resolve_symbol(gene, record.get("scientific_name_abbrev", "")) if ctl else []
+    if not entries:
+        routes.append(("checked", "curated symbols (catalog)", "no match"))
+    for entry in entries:
+        found = _bed_hits(bed, entry["gene"])
+        if found:
+            return found, entry["gene"], _symbol_note(gene, entry), routes, False
+        routes.append(("checked", "curated symbols (catalog)",
+                       f"{gene!r} is the symbol for {entry['gene']}, which is not in this "
+                       "annotation" + _home_annotation(entry["gene"], record)))
+
+    index, status, name = _synonyms(record)
+    if status == "absent":
+        routes.append(("unavailable", "superseded IDs",
+                       "this collection publishes no synonym file"))
+        return [], gene, "", routes, False
+    if status != "ok":
+        routes.append(("NOT CHECKED", "superseded IDs",
+                       f"the synonym file {name} could not be read ({status[len('failed: '):]})"))
+        return [], gene, "", routes, True
+    current = index.get(gene.lower())
     if current:
-        yield current, (f"superseded ID {gene!r} -> {current} via the collection's "
-                        "synonym file")
+        found = _bed_hits(bed, current)
+        if found:
+            return (found, current, f"superseded ID {gene!r} -> {current} via the "
+                    f"collection's synonym file ({name})", routes, False)
+        routes.append(("checked", f"superseded IDs (synonym file {name})",
+                       f"maps to {current}, which is not in this annotation"))
+    else:
+        routes.append(("checked", f"superseded IDs (synonym file {name})", "no match"))
+    return [], gene, "", routes, False
 
 
 def _bed_hits(bed, gene):
@@ -424,31 +488,34 @@ def _gene(args) -> str:
     if err:
         return f"error: could not read {bed_name}: {err}"
 
-    label, provenance = gene, ""
-    hits = _bed_hits(bed, gene)
+    hits, label, provenance, routes, incomplete = _resolve_in_annotation(gene, record, bed)
     if not hits:
-        for candidate, note in _alias_candidates(gene, record):
-            found = _bed_hits(bed, candidate)
-            if found:
-                hits, label, provenance = found, candidate, note
-                break
-    if not hits:
-        return (f"no match for {gene!r} in {record['id']}. Consulted: exact gene/mRNA "
-                "ID, the catalog's curated symbols, and the collection's synonym file. "
-                "Note a name from a different assembly (e.g. an A17.gnm5 ID against a "
-                "gnm4 annotation) is not a synonym and cannot be resolved here — use "
-                f"lis_find to pick the matching collection. {catalog_stamp(ctl)}")
+        head = (f"no match for {gene!r} in {record['id']}"
+                + (" — INCOMPLETE SEARCH (see NOT CHECKED below)." if incomplete else "."))
+        lines = [head] + [f"  {status:<11} {what}: {outcome}"
+                          for status, what, outcome in routes]
+        if incomplete:
+            lines.append("A match through the unchecked route cannot be ruled out: retry, "
+                         "or report this ID as unverified rather than absent.")
+        lines.append("A name from a different assembly (e.g. an A17.gnm5 ID against a gnm4 "
+                     "annotation) is not a synonym and cannot be resolved here — use "
+                     "lis_find to pick the matching collection.")
+        lines.append(catalog_stamp(ctl))
+        return "\n".join(lines)
 
     contig = hits[0][0]
     start, end = min(h[1] for h in hits), max(h[2] for h in hits)
     strand = hits[0][3]
     seq_names = sorted({h[4] for h in hits})
 
+    assembly = _genome_of(f"{record.get('scientific_name_abbrev', '')}.{record['id']}")
     lines = [f"{label} in {record['id']}"
              + (f"\n  resolved from: {provenance}" if provenance else ""),
              f"  locus:  {contig}:{start:,}-{end:,} ({strand})   "
              f"[mRNA extent from gene_models_main.bed; "
              f"{len(hits)} model(s): {', '.join(seq_names)}]",
+             f"  coordinates: assembly {assembly}; 1-based, inclusive (converted from the "
+             "BED's 0-based start). Coordinates on another assembly differ.",
              f"  region string for tabix_query/samtools: {contig}:{start}-{end}"]
     for label_text, suffix in (("protein", ".protein_primary.faa.gz"),
                                ("CDS", ".cds_primary.fna.gz")):
@@ -480,6 +547,9 @@ _BLOCK_RE = re.compile(
     r"(?:;median_Ks=(?P<ks>[0-9.eE+-]+))?"
 )
 MAX_BLOCKS = int(os.environ.get("LEGUMISTA_LIS_MAX_BLOCKS", "200"))
+# Pair files read per call. The largest partner set in the catalog is 12 (glyma.Wm82.gnm2),
+# so the default reads everything; the cap exists only to bound a future outlier.
+MAX_PARTNERS = int(os.environ.get("LEGUMISTA_LIS_MAX_PARTNERS", "25"))
 
 
 def _genome_of(spec):
@@ -528,35 +598,68 @@ def _no_synteny_message(ctl, genome):
     return "\n".join(lines)
 
 
-def _parse_blocks(text, region_contig, lo, hi, cap):
-    """DAGchainer syntenic_region rows, optionally filtered on the A-side interval."""
-    blocks, total = [], 0
+def _parse_blocks(text, region_contig, lo, hi, cap, swap=False):
+    """DAGchainer syntenic_region rows, optionally filtered on the caller's interval.
+
+    Column 1 of a DAGchainer GFF3 is the file's reference genome (the first genome in the
+    filename); `matches=` carries the other one. When the file is stored under the
+    partner's collection (`direction == "query"`), the caller's genome is the `matches=`
+    side, so `swap=True` makes it side A for both the region filter and the output.
+
+    Returns (blocks, total_matching, unparsed_rows).
+    """
+    blocks, total, unparsed = [], 0, 0
     for line in text.splitlines():
         if line.startswith("#"):
             continue
         fields = line.split("\t")
         if len(fields) < 9 or fields[2] != "syntenic_region":
             continue
-        a_contig, a_start, a_end = fields[0], int(fields[3]), int(fields[4])
+        match = _BLOCK_RE.match(fields[8])
+        if not match:
+            unparsed += 1
+            continue
+        file_a = (fields[0], int(fields[3]), int(fields[4]))
+        file_b = (match.group("b"), int(match.group("start")), int(match.group("end")))
+        a, b = (file_b, file_a) if swap else (file_a, file_b)
         if region_contig:
-            if a_contig != region_contig:
+            if a[0] != region_contig:
                 continue
-            if lo is not None and (a_end < lo or a_start > hi):
+            if lo is not None and (a[2] < lo or a[1] > hi):
                 continue
         total += 1
         if len(blocks) >= cap:
             continue
-        match = _BLOCK_RE.match(fields[8])
-        if not match:
-            continue
         blocks.append({
-            "a": f"{a_contig}:{a_start}-{a_end}",
-            "b": f"{match.group('b')}:{match.group('start')}-{match.group('end')}",
+            "a": f"{a[0]}:{a[1]}-{a[2]}",
+            "b": f"{b[0]}:{b[1]}-{b[2]}",
             "strand": fields[6],
             "score": fields[5],
             "ks": match.group("ks"),
         })
-    return blocks, total
+    return blocks, total, unparsed
+
+
+def _one_file_per_partner(candidates):
+    """Most pairs are published twice, once under each genome's synteny collection. Keep
+    one file per partner, preferring the one stored under the caller's genome (its
+    coordinates are native); keep every self-comparison file (they differ by epoch).
+    Returns (files_to_read_sorted_by_partner, duplicates_dropped)."""
+    chosen, dropped = {}, []
+    for pair in candidates:
+        if pair["b"] == pair["a"]:
+            chosen[("self", pair["file"])] = pair
+            continue
+        current = chosen.get(pair["b"])
+        if current is None:
+            chosen[pair["b"]] = pair
+        elif current["direction"] == "query" and pair["direction"] == "reference":
+            dropped.append(current)
+            chosen[pair["b"]] = pair
+        else:
+            dropped.append(pair)
+    files = sorted(chosen.values(), key=lambda p: (p["b"], p["file"]))
+    return files, dropped
 
 
 def _synteny(args) -> str:
@@ -618,20 +721,42 @@ def _synteny(args) -> str:
         if err:
             return err
 
+    files, dropped = _one_file_per_partner(candidates)
+    limit = max(1, min(int(args.get("max_partners") or MAX_PARTNERS), MAX_PARTNERS))
+    to_read, unread = files[:limit], files[limit:]
+    # Each file is ~23 KB gzipped; read them concurrently so "every partner" stays fast.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        texts = list(pool.map(lambda p: _fetch_gz_text(p["url"]), to_read))
+
+    partners = sorted({p["b"] for p in files})
     out = [f"{genome}" + (f" x {partner}" if partner else "")
-           + (f"  region {region}" if region else "")]
-    for pair in candidates[:6]:
-        text, err = _fetch_gz_text(pair["url"])
+           + (f"  region {region}" if region else ""),
+           f"read {len(to_read)} of {len(files)} synteny file(s) covering "
+           f"{len(partners)} partner(s)"
+           + (f"; skipped {len(dropped)} duplicate(s) of the same pair published under "
+              "the other genome" if dropped else "")]
+    if unread:
+        out.append("NOT READ (max_partners reached): "
+                   + ", ".join(p["b"] for p in unread)
+                   + " — raise max_partners or pass partner=... for these.")
+    failures = 0
+    for pair, (text, err) in zip(to_read, texts):
         if err:
-            out.append(f"\n  {pair['b']}: error reading {pair['file']}: {err}")
+            failures += 1
+            out.append(f"\n  {pair['b']}: COULD NOT READ {pair['file']} ({err}) — "
+                       "blocks for this partner are unknown, not absent")
             continue
-        blocks, total = _parse_blocks(text, contig, lo, hi, cap)
+        swap = pair["direction"] == "query"
+        blocks, total, unparsed = _parse_blocks(text, contig, lo, hi, cap, swap=swap)
         header = f"\n  {genome} x {pair['b']}"
         if pair.get("epoch"):
             header += f" ({pair['epoch']})"
-        if pair["direction"] == "query":
-            header += "  [stored under the partner's collection; A-side normalised]"
+        if swap:
+            header += ("  [file stored under the partner's collection; columns swapped so "
+                       f"the left side is {genome}]")
         out.append(header)
+        if unparsed:
+            out.append(f"    {unparsed} row(s) could not be parsed and were skipped")
         if not blocks:
             out.append("    no blocks overlap that region (the file was read; this is an "
                        "empty result, not an error)")
@@ -644,6 +769,9 @@ def _synteny(args) -> str:
                        f"({block['strand']}) score={block['score']}{ks}")
         out.append(f"    source: {pair['collection']}")
     out.append(f"\n{catalog_stamp(ctl)}")
+    if failures and failures == len(to_read):
+        return fail(f"could not read any synteny file for {genome} "
+                    f"({failures} attempted).\n" + "\n".join(out))
     return _cap("\n".join(out))
 
 
@@ -689,7 +817,9 @@ def lis_tools() -> list:
             {"type": "object",
              "properties": {
                  "taxon": {"type": "string",
-                           "description": "Species name, e.g. 'Glycine max'."},
+                           "description": "Species: Latin name, common name or "
+                                          "abbreviation, e.g. 'Glycine max', 'soybean', "
+                                          "'glyma'."},
                  "genus": {"type": "string",
                            "description": "Genus alone, e.g. 'Glycine'."},
                  "species": {"type": "string",
@@ -722,7 +852,8 @@ def lis_tools() -> list:
             "tabix_query needs coordinates, not names. Accepts an exact ID "
             "('Glyma.12G040000'), a curated gene symbol ('GmNARK', resolved from the "
             "catalog), or a superseded ID ('Glyma01g00210', resolved from the "
-            "collection's synonym file); the reply says which route resolved it. A name "
+            "collection's synonym file where one is published); the reply says which "
+            "route resolved it, and a miss lists every route and whether it ran. A name "
             "from a DIFFERENT assembly is not a synonym and will not resolve — use "
             "lis_find to pick the right collection. Args: {gene, collection?}.",
             {"type": "object",
@@ -737,12 +868,14 @@ def lis_tools() -> list:
             "Syntenic blocks and whole-genome alignments between legume assemblies. With "
             "just {genome} or {gene}, lists every partner that assembly is paired with — "
             "including pairs stored under the OTHER genome's collection, which a "
-            "directory listing would miss. Add {partner} and optionally {region} "
-            "(A-side, samtools-style) for the blocks themselves, with score and "
-            "median_Ks. Synteny is published for one, usually OLD, assembly per species "
-            "(soybean: Wm82.gnm2, not gnm4); if you ask about an assembly without it, "
-            "the reply names the one that has it. Args: {genome?, gene?, partner?, "
-            "region?, max_blocks?}.",
+            "directory listing would miss. Add {partner} and optionally {region} (on "
+            "the requested genome, samtools-style) for the blocks themselves, with score "
+            "and median_Ks. Without {partner} every partner is read and the reply says "
+            "how many; blocks always put the requested genome on the left. Synteny is "
+            "published for one, usually OLD, assembly per species (soybean: Wm82.gnm2, "
+            "not gnm4); if you ask about an assembly without it, the reply names the one "
+            "that has it. Args: {genome?, gene?, partner?, region?, max_blocks?, "
+            "max_partners?}.",
             {"type": "object",
              "properties": {
                  "genome": {"type": "string",
@@ -752,9 +885,13 @@ def lis_tools() -> list:
                  "partner": {"type": "string",
                              "description": "Restrict to one partner assembly."},
                  "region": {"type": "string",
-                            "description": "A-side region, 'contig' or "
+                            "description": "Region on the requested genome, 'contig' or "
                                            "'contig:start-end' (1-based inclusive)."},
                  "max_blocks": {"type": "integer",
-                                "description": "Block cap per pair (default 200)."}},
+                                "description": "Block cap per pair (default 200)."},
+                 "max_partners": {"type": "integer",
+                                  "description": "Partner files to read when no 'partner' "
+                                                 "is given (default and max 25; every "
+                                                 "partner in the current catalog)."}},
              "additionalProperties": False}, _synteny),
     ]

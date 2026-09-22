@@ -46,9 +46,12 @@ the length of one call, so an in-flight tool never sees a half-swapped catalog.
                              a working tree instead of an installed package
 """
 import asyncio
+import difflib
 import os
+import re
 import sys
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import catalog_source
@@ -242,29 +245,186 @@ def catalog_unavailable() -> str:
     return _unavailable_text() + (f"\n(reason: {reason})" if reason else "")
 
 
+# --- taxon resolution -----------------------------------------------------------------
+# Models say "soybean", "glyma", "Glycine Max" and "glycine_max" as often as "Glycine
+# max". Every tool that takes a taxon resolves it here, so an unrecognised NAME is never
+# reported as absent DATA ("no collections for genus 'Soybean'"). Only exact matches on a
+# Latin name, a datastore abbreviation or a common name are applied; near misses are
+# offered as suggestions and never silently substituted.
+@dataclass
+class TaxonMatch:
+    query: str
+    genus: str = ""
+    species: str = ""            # "" when only a genus was named or resolved
+    via: str = ""                # "name" | "abbreviation" | "common name"
+    candidates: list = field(default_factory=list)    # ambiguous: ["Genus species", ...]
+    suggestions: list = field(default_factory=list)   # near misses, never auto-applied
+    unknown_species: str = ""    # genus resolved but this epithet is not in it
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.genus) and not self.unknown_species and not self.candidates
+
+    @property
+    def label(self) -> str:
+        return f"{self.genus} {self.species}".strip()
+
+    def note(self) -> str:
+        """One line to echo when the input was reinterpreted, "" otherwise."""
+        if self.ok and self.via in ("abbreviation", "common name"):
+            return f"(interpreting {self.query!r} as {self.label} — {self.via})"
+        return ""
+
+    def problem(self) -> str:
+        """Why this did not resolve, phrased as a statement about the NAME, not the data."""
+        if self.candidates:
+            return (f"{self.query!r} matches several taxa in the LIS catalog: "
+                    + ", ".join(self.candidates) + ". Pass one of them.")
+        if self.unknown_species:
+            known = ", ".join(self.suggestions) or "(none)"
+            return (f"the LIS catalog has no species {self.unknown_species!r} in genus "
+                    f"{self.genus}. {self.genus} species in the catalog, closest first: "
+                    f"{known}. If you meant a species not listed, LIS holds no data for it.")
+        tail = (" Closest names: " + ", ".join(self.suggestions) + "."
+                if self.suggestions else "")
+        return (f"{self.query!r} does not match any taxon in the LIS catalog (checked Latin "
+                f"names, datastore abbreviations and common names).{tail} If you meant a "
+                "species not listed, LIS holds no data for it.")
+
+
+_TAXON_INDEX: dict = {}
+
+
+def _taxon_index(ctl) -> dict:
+    """Name tables for resolution, built once per loaded controller (a hot swap changes
+    `ctl`, which rebuilds the index)."""
+    cached = _TAXON_INDEX.get("index")
+    if cached is not None and _TAXON_INDEX.get("ctl") is ctl:
+        return cached
+    binomials, genera, species_of = {}, {}, {}
+    for coll in ctl.collections:
+        genus, species = coll["genus"], coll["species"]
+        genera[genus.lower()] = genus
+        binomials[(genus.lower(), species.lower())] = (genus, species)
+        species_of.setdefault(genus, set()).add(species)
+    abbrevs, common = {}, {}
+    for key, meta in (ctl.document.get("taxa") or {}).items():
+        if not isinstance(meta, dict):
+            continue
+        genus, _, species = key.partition("/")
+        # A taxon can be described without owning collections; it is still a real name.
+        genera.setdefault(genus.lower(), genus)
+        if species:
+            binomials.setdefault((genus.lower(), species.lower()), (genus, species))
+            species_of.setdefault(genus, set()).add(species)
+        if meta.get("abbrev") and species:
+            abbrevs[str(meta["abbrev"]).lower()] = (genus, species)
+        for name in _common_names(meta.get("commonName")):
+            common.setdefault(name, set()).add((genus, species))
+    index = {"binomials": binomials, "genera": genera, "abbrevs": abbrevs,
+             "common": common, "species_of": species_of}
+    _TAXON_INDEX.update({"ctl": ctl, "index": index})
+    return index
+
+
+def _common_names(raw) -> list:
+    """'antaque, banner bean, hyacinth bean' -> each name; 'amendoim silvestre (wild
+    peanut)' -> the whole string, the part before the bracket, and the bracketed part."""
+    out = set()
+    for part in str(raw or "").split(","):
+        part = " ".join(part.lower().split())
+        if not part or part in ("etc.", "etc"):
+            continue
+        out.add(part)
+        bracket = re.match(r"^(.*?)\s*\((.+)\)$", part)
+        if bracket:
+            out.update(p.strip() for p in bracket.groups() if p.strip())
+    return sorted(out)
+
+
+def resolve_taxon(text: str, ctl=None) -> TaxonMatch:
+    """Resolve free text to a catalog taxon. See TaxonMatch for the result contract."""
+    ctl = ctl or controller()
+    query = (text or "").strip()
+    match = TaxonMatch(query=query)
+    if ctl is None or not query:
+        return match
+    idx = _taxon_index(ctl)
+    norm = " ".join(query.replace("_", " ").lower().rstrip(".").split())
+    tokens = norm.split()
+
+    if len(tokens) >= 2 and (tokens[0], tokens[1]) in idx["binomials"]:
+        match.genus, match.species = idx["binomials"][(tokens[0], tokens[1])]
+        match.via = "name"
+        return match
+    if len(tokens) == 1 and tokens[0] in idx["genera"]:
+        match.genus, match.via = idx["genera"][tokens[0]], "name"
+        return match
+    if len(tokens) == 1 and tokens[0] in idx["abbrevs"]:
+        match.genus, match.species = idx["abbrevs"][tokens[0]]
+        match.via = "abbreviation"
+        return match
+    targets = idx["common"].get(norm)
+    if targets:
+        species_level = sorted(t for t in targets if t[1])   # prefer species over genus
+        chosen = species_level or sorted(targets)
+        if len(chosen) == 1:
+            match.genus, match.species = chosen[0]
+            match.via = "common name"
+        else:
+            match.candidates = [f"{g} {s}".strip() for g, s in chosen]
+        return match
+    if len(tokens) >= 2 and tokens[0] in idx["genera"]:
+        genus = idx["genera"][tokens[0]]
+        match.genus, match.unknown_species = genus, tokens[1]
+        # Closest epithets first, then the rest; the GENUS pseudo-species (genus-level
+        # collections) is not a species and is not offered.
+        epithets = sorted(s for s in idx["species_of"].get(genus, ()) if s != "GENUS")
+        close = difflib.get_close_matches(tokens[1], epithets, n=3, cutoff=0.6)
+        match.suggestions = close + [s for s in epithets if s not in close]
+        return match
+    names = ([f"{g} {s}" for g, s in idx["binomials"].values()]
+             + list(idx["genera"].values()) + list(idx["common"]) + list(idx["abbrevs"]))
+    lowered = {n.lower(): n for n in names}
+    close = difflib.get_close_matches(norm, list(lowered), n=5, cutoff=0.75)
+    match.suggestions = [lowered[c] for c in close]
+    return match
+
+
 # --- lis_survey ----------------------------------------------------------------------
 def _survey(args) -> str:
     ctl = controller()
     if ctl is None:
         return catalog_unavailable()
     taxon = (args.get("taxon") or "").strip()
-    genus, species = "", ""
+    genus, species, note = "", "", ""
     if taxon:
-        bits = taxon.replace("_", " ").split()
-        genus = bits[0].capitalize() if bits else ""
-        species = bits[1].lower() if len(bits) > 1 else ""
+        match = resolve_taxon(taxon, ctl)
+        if not match.ok:
+            return _cap(f"{catalog_stamp(ctl)}\n\n{match.problem()}")
+        genus, species, note = match.genus, match.species, match.note()
     needs = [t.strip() for t in (args.get("needs") or []) if str(t).strip()]
 
-    lines = [catalog_stamp(ctl)]
+    lines = [catalog_stamp(ctl)] + ([note] if note else [])
 
     if needs:
+        # A misspelled type ("expressions") would otherwise yield a confident zero. A
+        # documented type that no collection happens to have ("gwas" in a small catalog)
+        # is a genuine zero and stays an answer.
+        known_types = {c["type"] for c in ctl.collections} | set(_TYPE_GLOSS)
+        unknown = [t for t in needs if t not in known_types]
+        if unknown:
+            return _cap("\n".join(lines + [
+                f"\nunknown data type(s): {', '.join(map(repr, unknown))}. "
+                f"Valid types: {', '.join(sorted(known_types))}."]))
         # The co-availability question. A crawl cannot answer it: it requires
         # knowing the whole store at once, and absence has no URL to follow.
         matches = ctl.species_with(needs)
         lines.append(
             f"\n{len(matches)} species hold ALL of: {', '.join(needs)}"
         )
-        for row in matches[:40]:
+        # Bounded by the number of species in the store (~60), so never truncated.
+        for row in matches:
             lines.append(f"  {row['genus']} {row['species']}")
         if not matches:
             lines.append("  (none — this is a real answer, not a lookup failure)")
@@ -323,11 +483,16 @@ def _lineage(args) -> str:
         if entry.get("license"):
             lines.append(f"      license: {entry['license']}")
     if result["dois"]:
+        from . import pubstatus  # lazy: keeps the catalog import-light
         lines.append(
             f"\nciting this result means citing {len(result['dois'])} publication(s):"
         )
+        published = ctl.document.get("publications") or {}   # build-time status, if any
         for doi in result["dois"]:
-            lines.append(f"  {doi}   -> openalex_by_doi / read_paper")
+            status = published.get(doi) or pubstatus.check_doi(doi)
+            flag = pubstatus.describe(status)
+            lines.append(f"  {doi}" + (f"   {flag}" if flag else "")
+                         + "   -> openalex_by_doi / read_paper")
     else:
         lines.append("\nno publication DOI is published for anything in this chain.")
     return _cap("\n".join(lines))
@@ -350,12 +515,15 @@ def catalog_tools() -> list:
             "types at once. Use this for questions about coverage and absence "
             "('which species have both diversity and expression data?'), which "
             "lis_find cannot answer because crawling only finds what is present. "
+            "Names are resolved (Latin, common name or abbreviation), and an unknown "
+            "'needs' type is rejected rather than answered with a zero. "
             "Args: {taxon?, needs?}.",
             {"type": "object",
              "properties": {
                  "taxon": {"type": "string",
-                           "description": "Species or genus, e.g. 'Glycine max'. "
-                                          "Omit to list all genera."},
+                           "description": "Species or genus: Latin name, common name "
+                                          "or abbreviation, e.g. 'Glycine max', "
+                                          "'soybean', 'glyma'. Omit to list all genera."},
                  "needs": {"type": "array", "items": {"type": "string"},
                            "description": "Collection types that must ALL be present, "
                                           "e.g. ['diversity','expression']."}},
@@ -364,7 +532,8 @@ def catalog_tools() -> list:
             "Trace a LIS collection back through what it was derived from, and "
             "return every publication the result depends on. An annotation carries "
             "its own DOI and its genome's; this walks the chain and de-duplicates, "
-            "so 'cite everything this rests on' is one call. "
+            "so 'cite everything this rests on' is one call. Each DOI carries its "
+            "retraction status. "
             "Args: {collection} — an id like 'Wm82.gnm4.ann1.T8TQ' or a full path.",
             {"type": "object",
              "properties": {"collection": {"type": "string",

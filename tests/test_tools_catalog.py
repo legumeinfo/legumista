@@ -116,6 +116,12 @@ def catalog(tmp_path, monkeypatch):
     path.write_text(json.dumps(CATALOG), encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(path))
     monkeypatch.setattr(C, "_CANDIDATES", ())   # the fixture must win
+    # lis_lineage checks each DOI's retraction status; answer "no notices" by default so
+    # no test depends on the network guard's STATUS UNKNOWN text. Tests about flags
+    # override this.
+    from legumista_agent import pubstatus
+    monkeypatch.setattr(pubstatus, "check_doi",
+                        lambda doi: {"status": "ok", "notices": [], "checked": "crossref"})
     C.reset()
     yield str(path)
     C.reset()
@@ -236,7 +242,20 @@ def test_survey_reports_a_genuine_zero_as_an_answer(catalog):
 
 
 def test_survey_unknown_taxon_is_not_an_error(catalog):
-    assert "no collections for" in _survey(taxon="Nonexistent species")
+    out = _survey(taxon="Nonexistent species")
+    assert "does not match any taxon in the LIS catalog" in out
+    assert not out.startswith("error:")
+
+
+def test_survey_rejects_a_misspelled_type_instead_of_answering_zero(catalog):
+    out = _survey(needs=["expressions"])
+    assert "unknown data type(s): 'expressions'" in out and "species hold ALL" not in out
+
+
+def test_survey_resolves_common_names_and_abbreviations(catalog):
+    for name in ("soybean", "glyma", "glycine_max", "GLYCINE MAX"):
+        out = _survey(taxon=name)
+        assert "Glycine max:" in out, name
 
 
 # --- lis_lineage ----------------------------------------------------------------------
@@ -448,3 +467,78 @@ def test_startup_with_no_cache_and_no_network_reports_unavailable(unpinned, monk
     text = C.catalog_unavailable()
     assert "no LIS catalog is loaded" in text
     assert S.catalog_url() in text, "the message must name the URL it tried"
+
+
+def test_lineage_flags_a_retracted_publication(catalog, monkeypatch):
+    from legumista_agent import pubstatus
+    monkeypatch.setattr(pubstatus, "check_doi", lambda doi: pubstatus.from_crossref(
+        {"updated-by": [{"DOI": "10.1111/notice", "type": "retraction",
+                         "source": "publisher", "updated": {"date-parts": [[2024, 1, 5]]}}]}))
+    out = C._lineage({"collection": "Wm82.gnm4.ann1.T8TQ"})
+    assert "10.1111/tpj.14500   RETRACTED (retraction 10.1111/notice, 2024-01-05" in out
+
+
+def test_lineage_uses_build_time_status_without_a_request(catalog, monkeypatch):
+    from legumista_agent import pubstatus
+    ctl = C.controller()
+    monkeypatch.setitem(ctl.document, "publications",
+                        {"10.1111/tpj.14500": {"status": "ok", "notices": []}})
+    monkeypatch.setattr(pubstatus, "check_doi",
+                        lambda doi: (_ for _ in ()).throw(AssertionError("no live check")))
+    out = C._lineage({"collection": "Wm82.gnm4.ann1.T8TQ"})
+    assert "10.1111/tpj.14500   -> openalex_by_doi" in out
+
+
+def test_resolve_taxon_reports_what_is_wrong_with_the_name(catalog, monkeypatch):
+    """Each unresolved outcome is a statement about the NAME: an unknown species in a
+    known genus (with that genus's species, closest first), an ambiguous common name
+    (candidates, never a guess), and a near miss (suggestions, never auto-applied)."""
+    ctl = C.controller()
+    monkeypatch.setitem(ctl.document["taxa"], "Vigna/unguiculata",
+                        {"commonName": "cowpea, pea bean", "abbrev": "vigun"})
+    monkeypatch.setitem(ctl.document["taxa"], "Phaseolus/lunatus",
+                        {"commonName": "lima bean, pea bean", "abbrev": "phalu"})
+    monkeypatch.setattr(C, "_TAXON_INDEX", {})
+
+    soybean = C.resolve_taxon("soybean", ctl)
+    assert soybean.ok and soybean.label == "Glycine max"
+    assert soybean.note() == "(interpreting 'soybean' as Glycine max — common name)"
+
+    typo = C.resolve_taxon("Glycine maxx", ctl)
+    assert not typo.ok and typo.unknown_species == "maxx"
+    assert "Glycine species in the catalog, closest first: max" in typo.problem()
+
+    shared = C.resolve_taxon("pea bean", ctl)
+    assert not shared.ok and shared.candidates == ["Phaseolus lunatus", "Vigna unguiculata"]
+
+    near = C.resolve_taxon("Glycin max", ctl)
+    assert not near.ok and near.genus == "" and near.suggestions[0] == "Glycine max"
+    assert "LIS holds no data for it" in near.problem()
+
+
+def test_find_accepts_a_common_name_and_says_how_it_read_it(catalog):
+    """'Soybean' used to be split into genus 'Soybean', and the reply was 'no collections
+    for genus Soybean' — which reads as 'LIS has no soybean data'."""
+    out = L._find({"taxon": "Soybean"})
+    assert out.startswith("(interpreting 'Soybean' as Glycine max — common name)")
+    assert "Glycine max" in out and "annotations" in out
+
+
+def test_survey_lists_every_species_that_matches(tmp_path, monkeypatch):
+    """The co-availability list used to stop at 40 names under a header counting all of
+    them; 46 species in the real catalog have genomes."""
+    colls = [{"path": f"Genus{i:02d}/sp/genomes/G{i}.gnm1.AAAA", "id": f"G{i}.gnm1.AAAA",
+              "type": "genomes", "genus": f"Genus{i:02d}", "species": "sp",
+              "base_url": f"https://data.legumeinfo.org/Genus{i:02d}/sp/genomes/G{i}",
+              "index_status": "known", "files": []} for i in range(45)]
+    path = tmp_path / "many.json"
+    path.write_text(json.dumps(dict(CATALOG, collections=colls)), encoding="utf-8")
+    monkeypatch.setattr(C, "CATALOG_PATH", str(path))
+    monkeypatch.setattr(C, "_CANDIDATES", ())
+    C.reset()
+    try:
+        out = _survey(needs=["genomes"])
+        assert "45 species hold ALL of: genomes" in out
+        assert sum(line.startswith("  Genus") for line in out.splitlines()) == 45
+    finally:
+        C.reset()

@@ -532,3 +532,142 @@ def test_synteny_region_parse_errors_are_reported(catalog):
     out = L._synteny({"genome": "glyma.Wm82.gnm2", "partner": "phavu.G19833.gnm2",
                       "region": "glyma.Wm82.gnm2.Gm06:500-100"})
     assert "start > end" in out
+
+
+# --- lis_gene: a miss reports only the routes that ran (L-03) -------------------------
+def test_unreadable_synonym_file_makes_the_miss_incomplete(catalog, monkeypatch):
+    """A synonym file that exists but cannot be downloaded means the superseded-ID route
+    did NOT run. Reporting "no match ... consulted the synonym file" would turn an outage
+    into a confident absence."""
+    real_fetch = L._fetch_gz_text
+    monkeypatch.setattr(L, "_fetch_gz_text", lambda url, limit=None: (
+        (None, "URLError: <urlopen error timed out>") if "synonyms" in url
+        else real_fetch(url, limit)))
+    out = L._gene({"gene": "Glyma01g00210", "collection": ANN})
+    assert "INCOMPLETE SEARCH" in out
+    assert "NOT CHECKED superseded IDs" in out and "could not be read" in out
+    assert "unverified rather than absent" in out
+
+
+def test_miss_without_a_synonym_file_says_the_route_is_unavailable(catalog, monkeypatch):
+    """Most annotations publish no synonym file. That is a fact about the collection:
+    the miss is complete, and must not claim a synonym check that never happened."""
+    record = next(c for c in CATALOG["collections"] if c["path"] == ANN)
+    bare = dict(record, files=[f for f in record["files"] if "synonym" not in f["n"]])
+    monkeypatch.setattr(C.controller(), "get_collection", lambda path: bare)
+    out = L._gene({"gene": "Glyma01g00210", "collection": ANN})
+    assert "unavailable superseded IDs: this collection publishes no synonym file" in out
+    assert "INCOMPLETE" not in out
+    assert not any("synonym" in url for url in catalog)
+
+
+def test_symbol_curated_on_another_annotation_routes_there(catalog, monkeypatch):
+    """GmNARK is curated against gnm4. Asked on a gnm2 annotation, the reply must name
+    the annotation that has it rather than report a bare miss."""
+    gnm2 = next(c for c in CATALOG["collections"] if c["id"] == "Wm82.gnm2.ann1.RVB6")
+    with_bed = dict(gnm2, files=[{"n": "glyma.Wm82.gnm2.ann1.RVB6.gene_models_main.bed.gz",
+                                  "i": [".tbi"]}])
+    monkeypatch.setattr(C.controller(), "get_collection",
+                        lambda path: with_bed if "RVB6" in path else None)
+    gnm2_bed = ("glyma.Wm82.gnm2.Gm12\t100\t200\tglyma.Wm82.gnm2.ann1.Glyma12g04000.1\t0"
+                "\t+\tglyma.Wm82.gnm2.ann1.Glyma12g04000\n")
+    real_fetch = L._fetch_gz_text
+    monkeypatch.setattr(L, "_fetch_gz_text", lambda url, limit=None: (
+        (gnm2_bed, None) if "RVB6" in url else real_fetch(url, limit)))
+    out = L._gene({"gene": "GmNARK", "collection": gnm2["path"]})
+    assert ("is the symbol for glyma.Wm82.gnm4.ann1.Glyma.12G040000, which is not in "
+            "this annotation") in out
+    assert f"rerun with collection='{ANN}'" in out
+
+
+# --- lis_synteny: orientation and coverage (L-04) -------------------------------------
+# The fixture's medtr pair is stored under glyma's collection, so for a medtr caller the
+# file's column 1 is the PARTNER (glyma) and medtr is the `matches=` side.
+MEDTR_GFF3 = "\n".join([
+    "##gff-version 3",
+    "\t".join(["glyma.Wm82.gnm2.Gm01", "DAGchainer", "syntenic_region", "20000",
+               "480000", "50.0", "-", ".",
+               "Name=medtr.A17_HM341.gnm4.chr9;"
+               "matches=medtr.A17_HM341.gnm4.chr9:10..90;median_Ks=0.9"]),
+])
+
+
+def test_partner_stored_file_is_read_from_the_requested_genomes_side(catalog, monkeypatch):
+    """Regression for the coordinate swap: the region filter and the left-hand column
+    must both be the requested genome, whichever collection the file is stored under."""
+    real_fetch = L._fetch_gz_text
+    monkeypatch.setattr(L, "_fetch_gz_text", lambda url, limit=None: (
+        (MEDTR_GFF3, None) if url.endswith("medtr.gff3.gz") else real_fetch(url, limit)))
+    out = L._synteny({"genome": "medtr.A17_HM341.gnm4", "partner": "glyma.Wm82.gnm2",
+                      "region": "medtr.A17_HM341.gnm4.chr9:1-100"})
+    assert "no blocks overlap" not in out
+    assert ("medtr.A17_HM341.gnm4.chr9:10-90  ->  glyma.Wm82.gnm2.Gm01:20000-480000"
+            in out)
+    assert "columns swapped so the left side is medtr.A17_HM341.gnm4" in out
+
+
+def _pairs_catalog(tmp_path, monkeypatch, extra):
+    doc = dict(CATALOG, pairwise=CATALOG["pairwise"] + extra)
+    path = tmp_path / "pairs.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(C, "CATALOG_PATH", str(path))
+    C.reset()
+
+
+def _pair(a, b):
+    return {"a": a, "b": b, "kind": "synteny", "format": "gff3.gz",
+            "collection": f"{a}/synteny", "file": f"{a}.x.{b}.gff3.gz",
+            "url": f"{DS}/x/{a}.x.{b}.gff3.gz"}
+
+
+SEVEN = ["aradu.V14167.gnm1", "araip.K30076.gnm1", "cajca.ICPL87119.gnm1",
+         "cicar.CDCFrontier.gnm3", "lotja.MG20.gnm3", "vigra.VC1973A.gnm7",
+         "vigun.IT97K-499-35.gnm1"]
+
+
+def test_synteny_reads_every_partner_once_and_names_any_left_unread(catalog, tmp_path,
+                                                                    monkeypatch):
+    """Ten partners (seven added, three in the fixture), three of them also published
+    under the partner's collection. Every partner is read once, duplicates are counted,
+    and a lowered max_partners names what was not read instead of dropping it."""
+    glyma = "glyma.Wm82.gnm2"
+    extra = ([_pair(SEVEN[0], glyma), _pair(SEVEN[1], glyma)]    # duplicate seen first
+             + [_pair(glyma, p) for p in SEVEN]
+             + [_pair(SEVEN[2], glyma)])                          # duplicate seen last
+    _pairs_catalog(tmp_path, monkeypatch, extra)
+    region = "glyma.Wm82.gnm2.Gm06:64390-1882809"
+
+    out = L._synteny({"genome": glyma, "region": region})
+    assert ("read 10 of 10 synteny file(s) covering 10 partner(s); skipped 3 "
+            "duplicate(s)") in out
+    assert "columns swapped" not in out        # the natively oriented copy was kept
+    assert "NOT READ" not in out
+
+    capped = L._synteny({"genome": glyma, "region": region, "max_partners": 4})
+    assert "read 4 of 10 synteny file(s)" in capped
+    assert "NOT READ (max_partners reached): " in capped
+    assert "vigun.IT97K-499-35.gnm1" in capped.split("NOT READ", 1)[1]
+
+
+def test_unreadable_synteny_file_is_unknown_and_all_unreadable_is_an_error(catalog,
+                                                                         monkeypatch):
+    real_fetch = L._fetch_gz_text
+    region = "glyma.Wm82.gnm2.Gm06:64390-1882809"
+    monkeypatch.setattr(L, "_fetch_gz_text", lambda url, limit=None: (
+        (None, "HTTPError: HTTP Error 503") if "medtr" in url else real_fetch(url, limit)))
+    out = L._synteny({"genome": "glyma.Wm82.gnm2", "region": region})
+    assert "medtr.A17_HM341.gnm4: COULD NOT READ" in out
+    assert "unknown, not absent" in out
+    assert not out.startswith("error:")          # the other partners still answered
+
+    monkeypatch.setattr(L, "_fetch_gz_text",
+                        lambda url, limit=None: (None, "HTTPError: HTTP Error 503"))
+    out = L._synteny({"genome": "glyma.Wm82.gnm2", "region": region})
+    assert out.is_error                          # sent with isError: true
+    assert out.text.startswith("error: could not read any synteny file for glyma.Wm82.gnm2")
+
+
+def test_gene_locus_names_its_assembly_and_convention(catalog):
+    """Coordinates without their assembly are the commonest cross-assembly mistake."""
+    out = L._gene({"gene": "Glyma.12G040000", "collection": ANN})
+    assert "coordinates: assembly glyma.Wm82.gnm4; 1-based, inclusive" in out
