@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "legumista"
-version = "0.1.4"
+version = "0.2.0"
 description = "An MCP server for legume genomics: the LIS Data Store catalog, InterMine queries, scholarly literature, NCBI, and samtools/bcftools."
 readme = "README.md"
 requires-python = ">=3.11"          # 3.11+ baseline (tomllib, stdlib typing features)
@@ -31,10 +31,14 @@ dependencies = [
     "typer>=0.12",     # <0.12 breaks with Click >=8.2 help rendering
     "ddgs>=6",         # keyless web search (web_search tool)
     "pypdf>=4",        # OA full-text extraction (read_paper tool)
-    "fastmcp>=2.9",    # the `legumista mcp` server itself
+    "fastmcp>=3.0,<5", # the server; mcp_server.py handles 3.x and 4.x (see _make_bridge_class)
     "pysam>=0.22",     # htslib bindings for the samtools/bcftools/tabix tools
     "certifi>=2023.7", # CA bundle for htslib's vendored libcurl (remote genomics I/O)
 ]
+
+[project.optional-dependencies]
+# The evaluation harness in evals/ (not packaged, not needed to run the server).
+evals = ["anthropic>=0.40", "pyyaml>=6"]
 
 [project.urls]
 Homepage = "https://github.com/legumeinfo/legumista"

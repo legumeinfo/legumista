@@ -8,13 +8,13 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/legumeinfo/legumista",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "legumista",
-      "version": "0.1.4",
+      "version": "0.2.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -28,6 +28,12 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "LEGUMISTA_CONTACT_EMAIL",
+          "description": "Your address, sent as the mailto to OpenAlex, Crossref and Unpaywall so requests use their polite pools. Recommended: paper_search, openalex_by_doi, lis_lineage and verify_ids all query Crossref.",
+          "isRequired": false,
+          "isSecret": false
+        },
         {
           "name": "LEGUMISTA_CATALOG_URL",
           "description": "Where to download the LIS catalog from on startup. Defaults to the published datastore-metadata release asset.",
