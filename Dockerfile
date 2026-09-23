@@ -156,8 +156,10 @@ build_server(); \
 missing = {'lis_find','lis_files','lis_gene','samtools','bcftools','fasta_fetch',\
 'tabix_query','ncbi_datasets','edirect','sra_runs','read_paper',\
 'legumemine_gene_proteins','legumemine_gene_families','legumemine_gene_ontology',\
-'legumemine_gene_expression','legumemine_gene_symbol','legumemine_gene_orthologs',\
-'lis_trait_qtls','lis_trait_gwas','lis_marker_position'} - set(_HANDLERS); \
+'legumemine_gene_expression','legumemine_gene_symbol',\
+'legumemine_gene_family_members','lis_trait_qtls','lis_trait_gwas',\
+'lis_marker_position','verify_ids','lis_survey','lis_lineage','lis_synteny'} \
+- set(_HANDLERS); \
 assert not missing, missing; \
 print(len(_HANDLERS), 'tools served')"; \
     python -c "\
