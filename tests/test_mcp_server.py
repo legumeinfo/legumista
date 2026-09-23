@@ -15,6 +15,12 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
+def _field(obj, snake, camel):
+    """MCP SDK v2 (FastMCP 4) renamed readOnlyHint/inputSchema to snake_case and deprecated
+    the old names; FastMCP 3 has only the old ones. Read whichever this install has."""
+    return getattr(obj, snake, None) if hasattr(obj, snake) else getattr(obj, camel)
+
+
 def _source_tools():
     from legumista_agent.tools_catalog import catalog_tools
     from legumista_agent.tools_lis import lis_tools
@@ -22,9 +28,10 @@ def _source_tools():
     from legumista_agent.tools_mine import mine_tools
     from legumista_agent.tools_native import native_tools
     from legumista_agent.tools_pysam import bio_tools
+    from legumista_agent.tools_verify import verify_tools
     return {t.name: t
             for t in (local_read_tools() + native_tools() + lis_tools()
-                      + mine_tools() + catalog_tools() + bio_tools())}
+                      + mine_tools() + catalog_tools() + bio_tools() + verify_tools())}
 
 
 def test_served_toolset_conforms_to_mcp_spec():
@@ -44,12 +51,14 @@ def test_served_toolset_conforms_to_mcp_spec():
             assert {t.name for t in tools} == expected
             for t in tools:
                 assert NAME_GRAMMAR.match(t.name), f"{t.name!r} violates the tool-name grammar"
-                assert t.annotations.readOnlyHint is source[t.name].read_only
-                schema = t.inputSchema or {}
+                assert _field(t.annotations, "read_only_hint", "readOnlyHint") \
+                    is source[t.name].read_only
+                schema = _field(t, "input_schema", "inputSchema") or {}
                 assert schema.get("type") == "object"
                 assert isinstance(schema.get("properties", {}), dict)
                 json.dumps(schema)                 # advertised schema must serialize
-            assert next(t for t in tools if t.name == "samtools").annotations.readOnlyHint is False
+            samtools = next(t for t in tools if t.name == "samtools")
+            assert _field(samtools.annotations, "read_only_hint", "readOnlyHint") is False
 
     _run(check())
 
@@ -82,9 +91,34 @@ def test_tool_call_returns_single_text_block():
 
     async def check():
         async with Client(build_server()) as c:
-            res = await c.call_tool("paper_search", {"query": ""})
+            res = await c.call_tool("paper_search", {"query": ""}, raise_on_error=False)
             assert len(res.content) == 1
             assert res.content[0].type == "text"
             assert res.content[0].text            # real handler text, not an empty block
 
     _run(check())
+
+
+def test_failures_reach_the_client_flagged_is_error():
+    """A tool that could not answer must reach the client as isError=true with its text
+    intact (the model reads the text; the client and evals read the flag). Offline: the
+    handler fails on input validation before any request is made. Valid-empty results are
+    covered at the unit level in test_results.py."""
+    from fastmcp import Client
+    from legumista_agent.mcp_server import build_server
+
+    async def check():
+        async with Client(build_server()) as c:
+            bad = await c.call_tool("openalex_by_doi", {"doi": ""}, raise_on_error=False)
+            assert bad.is_error is True
+            assert bad.content[0].text == "error: missing 'doi'"
+
+    _run(check())
+
+
+def test_every_tool_property_is_described():
+    """An undescribed parameter leaves the model to guess what it takes (plan item D-02)."""
+    missing = sorted(f"{name}.{prop}" for name, tool in _source_tools().items()
+                     for prop, spec in (tool.parameters.get("properties") or {}).items()
+                     if not (spec.get("description") or "").strip())
+    assert not missing, f"parameters without a description: {missing}"

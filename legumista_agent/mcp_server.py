@@ -38,17 +38,29 @@ def _make_bridge_class():
     """Build the FastMCP Tool subclass lazily (needs fastmcp imported first)."""
     # Import both from the `fastmcp.tools` package root, not `fastmcp.tools.tool`:
     # fastmcp 4.0 removed that submodule, and the package root exports both names on
-    # 3.x and 4.x alike. The dependency is floor-pinned (fastmcp>=2.9), so a fresh
-    # install picks up whatever is current — this import must not care which.
+    # 3.x and 4.x alike. 2.x does not export ToolResult at all, which is why the
+    # dependency is pinned to fastmcp>=3.0,<5; CI runs both majors.
+    from fastmcp.exceptions import ToolError
     from fastmcp.tools import Tool as FastMCPTool, ToolResult
     from mcp.types import TextContent
+
+    from .results import coerce
 
     class _BridgeTool(FastMCPTool):
         """A FastMCP tool that delegates execution to a legumista `Tool.run` handler."""
 
         async def run(self, arguments: dict) -> ToolResult:
-            text = await _HANDLERS[self.name](arguments or {})
-            return ToolResult(content=[TextContent(type="text", text=str(text))])
+            out = coerce(await _HANDLERS[self.name](arguments or {}))
+            content = [TextContent(type="text", text=out.text)]
+            if not out.is_error:
+                return ToolResult(content=content)
+            try:
+                # fastmcp >= 4: flag the result without raising (no traceback in the log).
+                return ToolResult(content=content, is_error=True)
+            except TypeError:
+                # fastmcp 3.x: ToolResult has no is_error; ToolError is the supported way
+                # to return isError=true with our text intact.
+                raise ToolError(out.text) from None
 
     return _BridgeTool
 
@@ -70,6 +82,7 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     from .tools_mine import mine_tools
     from .tools_native import native_tools
     from .tools_pysam import bio_tools
+    from .tools_verify import verify_tools
 
     Bridge = _make_bridge_class()
     # The native-tools usage doctrine (prompts/tools_native.md) doubles as server-level
@@ -93,7 +106,8 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
 
     _HANDLERS.clear()
     for tool in (local_read_tools() + native_tools() + lis_tools() + mine_tools()
-                 + catalog_tools() + bio_tools(allow_write=allow_write)):
+                 + catalog_tools() + bio_tools(allow_write=allow_write)
+                 + verify_tools()):
         _HANDLERS[tool.name] = tool.run
         server.add_tool(Bridge(
             name=tool.name,
