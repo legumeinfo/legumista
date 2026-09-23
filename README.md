@@ -4,15 +4,15 @@
 
 # Legumista — an MCP server for legume genomics
 
-**Legumista** gives a model working access to legume genomics. It serves 30 read-only
-tools over the [Model Context Protocol](https://modelcontextprotocol.io): a resident
+**Legumista** gives a model working access to legume genomics. It serves 31 tools,
+read-only by default, over the [Model Context Protocol](https://modelcontextprotocol.io): a resident
 snapshot of the [LIS Data Store](https://data.legumeinfo.org) catalog, InterMine queries
 against the LIS mines, scholarly literature search and full-text retrieval, NCBI
 datasets/EDirect, and a samtools/bcftools/tabix suite that reads indexed genomics files
 over HTTP without downloading them.
 
 Point any MCP client at it — Claude Desktop, Claude Code, an IDE, another agent — and ask
-questions like *"does chickpea have an ortholog of this soybean gene, and what's the
+questions like *"does chickpea have a counterpart of this soybean gene, and what's the
 evidence?"* The model does the reasoning; legumista makes sure every answer traces back to
 a real accession, a real file, or a real DOI.
 
@@ -94,6 +94,12 @@ by specification, so `lis_lineage` traces a dataset back through what it was der
 and returns every paper the result depends on — which the literature tools then resolve
 and read.
 
+**A failure is never a finding.** A tool that could not answer says so with `isError: true`
+and an `error:` line. A partial answer is labelled `PARTIAL RESULTS`, a route that did not
+run is `NOT CHECKED`, and a capped list says "showing N of M". "No match" appears only
+when every route that could have matched actually ran. Language models repeat what their
+tools tell them, so the server never words an outage as an absence.
+
 ---
 
 ## The toolset
@@ -121,7 +127,7 @@ write operations. Without it (the default) they run reads only and refuse writes
 | `legumemine_gene_families` | Gene-family assignments |
 | `legumemine_gene_ontology` | GO and other ontology annotations |
 | `legumemine_gene_expression` | Expression across samples, highest first |
-| `legumemine_gene_orthologs` | Counterparts in other species — "does my crop have this gene?" |
+| `legumemine_gene_family_members` | A gene's homologs across species via its family, optionally one target species (homology, not an orthology call) |
 | `lis_trait_qtls` | QTLs for a trait: linkage group, LOD, marker R², source study |
 | `lis_trait_gwas` | GWAS associations for a trait, most significant first |
 | `lis_marker_position` | A marker's physical position on each assembly that carries it |
@@ -140,16 +146,22 @@ write operations. Without it (the default) they run reads only and refuse writes
 
 | Tool | What it does |
 | --- | --- |
-| `paper_search` | Broad search across OpenAlex + Crossref, deduplicated by DOI |
-| `openalex_by_doi` | One work by DOI, with reference and citation counts |
-| `europepmc_search` | Europe PMC (PubMed/PMC/preprints), with abstracts |
-| `read_paper` | Fetch an open-access PDF by DOI or URL; optionally grep it |
+| `paper_search` | Broad search across OpenAlex, Crossref and Europe PMC, fused by rank, with retraction/preprint flags and per-source status |
+| `openalex_by_doi` | One work by DOI: full abstract, identifiers, retraction status (OpenAlex + Crossref) |
+| `europepmc_search` | Europe PMC field queries (`ORGANISM:`, `SRC:AGR`); preprints flagged |
+| `read_paper` | Open-access full text by DOI or URL, page-labelled; pattern hits cite their page |
 | `ncbi_datasets` | The NCBI `datasets` CLI — genome, gene and taxonomy data |
 | `ncbi_assembly_status` | Does a reference genome exist for this taxon, and how good is it? |
 | `sra_runs` | Public sequencing data: runs, platform, spots, bases |
 | `edirect` | Raw Entrez — `esearch` piped to `esummary`/`efetch` |
 | `web_search` | Keyless open-web search |
 | `web_fetch` | Fetch a URL as readable text |
+
+### Checking an answer
+
+| Tool | What it does |
+| --- | --- |
+| `verify_ids` | Check a draft's DOIs, LIS gene and collection IDs, and GCA_/GCF_ accessions against their sources before answering |
 
 ---
 
@@ -178,6 +190,9 @@ Python analogue of `npx`) with no manual install. Drop this into the client's st
 Add `"--allow-write"` to `args` to permit genomics writes. Some GUI clients don't see
 `uvx` on `PATH` — give the absolute path (`which uvx`) if so. From a source checkout it's
 `legumista mcp` after `pip install -e .`.
+
+Failures arrive as tool errors (`isError: true`). A programmatic client built on FastMCP's
+`Client.call_tool` raises `ToolError` on them unless it passes `raise_on_error=False`.
 
 ### Transports
 
@@ -325,8 +340,8 @@ client refreshes it.
   The container clones it for you.
 
   Either one missing degrades cleanly rather than failing: the six `lis_*` tools report
-  the catalog as unavailable and name the URL they tried, and the other 24 tools are
-  unaffected.
+  the catalog as unavailable and name the URL they tried, and the other 25 tools are
+  unaffected (`verify_ids` reports collection IDs as UNCHECKED).
 - **NCBI CLIs** (optional, for `ncbi_datasets`/`ncbi_assembly_status`/`edirect`/`sra_runs`):
   NCBI `datasets` and EDirect on `PATH`. An `NCBI_API_KEY` raises the Entrez rate limit
   from 3 to 10 requests/second.
@@ -341,7 +356,7 @@ client refreshes it.
 | `LEGUMISTA_WEBHOOK_SECRET` | Enables `POST /catalog/refresh`. Unset, the route does not exist |
 | `LEGUMISTA_HOME` | Sandbox root for local file arguments. Default: the launch directory (same as `-C`) |
 | `LEGUMISTA_DSCENSOR_PATH` | Where to find the DSCensor package |
-| `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex/Crossref — set yours for better rate limits |
+| `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex, Crossref and Unpaywall. Set it on any shared server: retraction checks and `verify_ids` query Crossref once per DOI |
 | `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional URL-prefix allowlist for the genomics tools |
 | `NCBI_API_KEY` | Raises the Entrez rate limit |
 

@@ -24,3 +24,46 @@ def test_no_orphaned_pipeline_prompts_remain():
     prompts = resources.files("legumista_assets") / "prompts"
     names = {p.name for p in prompts.iterdir() if p.name.endswith(".md")}
     assert names == {"tools_native.md"}, f"unexpected bundled prompts: {names}"
+
+
+# The instructions are sent at initialize and stay in the client model's context for the
+# whole session, with the resident catalog map (~1,400 tokens) appended. Growing them
+# should be a decision made in review, not drift: raise this in the same PR, with a reason.
+# ~4,100 tokens; the file was 15,801 characters when this was set, which leaves room for
+# corrections but not for a new section.
+INSTRUCTIONS_BUDGET_CHARS = 16_500
+
+
+def _instructions() -> str:
+    return _read(resources.files("legumista_assets") / "prompts" / "tools_native.md")
+
+
+def _served_tool_names() -> set:
+    from legumista_agent.tools_catalog import catalog_tools
+    from legumista_agent.tools_lis import lis_tools
+    from legumista_agent.tools_local import local_read_tools
+    from legumista_agent.tools_mine import mine_tools
+    from legumista_agent.tools_native import native_tools
+    from legumista_agent.tools_pysam import bio_tools
+    from legumista_agent.tools_verify import verify_tools
+    return {t.name for t in (local_read_tools() + native_tools() + lis_tools()
+                             + mine_tools() + catalog_tools() + bio_tools()
+                             + verify_tools())}
+
+
+def test_instructions_name_every_served_tool():
+    """A tool the instructions never mention has no doctrine: the model learns its caveats
+    (units, homology vs orthology, "no gene" vs "no rows") only from its description, if at
+    all. Word boundaries matter — `lis_gene` must not be satisfied by `lis_gene_symbol`."""
+    import re
+    text = _instructions()
+    missing = sorted(name for name in _served_tool_names()
+                     if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text))
+    assert not missing, f"served tools the instructions never name: {missing}"
+
+
+def test_instructions_stay_within_budget():
+    size = len(_instructions())
+    assert size <= INSTRUCTIONS_BUDGET_CHARS, (
+        f"tools_native.md is {size} characters (budget {INSTRUCTIONS_BUDGET_CHARS}); cut "
+        "something or raise the budget deliberately")

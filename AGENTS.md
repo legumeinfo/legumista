@@ -2,7 +2,7 @@
 
 # Legumista — repository guide
 
-**Legumista is an MCP server for legume genomics.** It serves a bundled snapshot of the
+**Legumista is an MCP server for legume genomics.** It serves a resident snapshot (downloaded at startup) of the
 [LIS Data Store](https://data.legumeinfo.org) catalog, InterMine queries against the LIS
 mines, scholarly literature search and full-text read, NCBI datasets/EDirect, and a
 samtools/bcftools/tabix suite — to any MCP-speaking client. `legumista mcp` is the only
@@ -21,9 +21,14 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   `tools_spec()` (the served MCP `instructions`). All environment-driven; no config file.
 - `legumista_agent/` — the tools, one module per family:
   - `tool.py` — the `Tool` dataclass every tool is built from (name, description,
-    JSON-schema parameters, `read_only`, async `run(args) -> str`, optional per-call
-    `writes(args)` classifier).
-  - `mcp_server.py` — the FastMCP bridge. Assembles every family's tools and serves them.
+    JSON-schema parameters, `read_only`, async `run(args)` returning `str` or
+    `results.ToolOutput`, optional per-call `writes(args)` classifier).
+  - `mcp_server.py` — the FastMCP bridge. Assembles every family's tools and serves them,
+    sending failures with `isError: true`.
+  - `results.py` — result conventions every tool uses: `fail`, `count_phrase`,
+    `SourceSummary`.
+  - `pubstatus.py` — DOI retraction and existence status (Crossref, then doi.org).
+  - `tools_verify.py` — `verify_ids`.
   - `tools_catalog.py` — owns the catalog (`lis_survey`, `lis_lineage`, and the
     `CatalogController` the LIS tools read through).
   - `catalog_source.py` — where `catalog.json` comes from: the published URL, the
@@ -58,6 +63,16 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   `catalog.json`, not by crawling the store. The two remaining reads there are *data*
   (a gene-models BED, a synonym file), not metadata. Keep it that way: a metadata question
   the catalog cannot answer is a catalog bug, to be fixed in LIS-autocontent.
+- **A failure is not a finding.** Return `results.fail(...)` when a tool could not
+  answer. Never catch an exception and fall through to an empty or "none found" answer.
+  `grep -rn -A1 --include='*.py' -E '^\s*except\b.*:' legumista_agent/ | grep -E
+  '^[^:]+-[0-9]+-\s*pass\s*$'` lists every swallowed exception; the only one left is the
+  CA-bundle fallback in `tools_pysam.py`, a configuration default rather than an answer.
+- **Never present a cap as a total.** Any list that can be truncated is described with
+  `results.count_phrase`.
+- **Names go through `resolve_taxon`.** No tool splits a taxon string by hand.
+- **The instructions name every tool.** `tests/test_assets.py` enforces coverage and a
+  size budget, so a new tool needs a line in `tools_native.md`.
 - **Producers derive, consumers are dumb.** Anything that can be computed once at
   catalog-build time belongs in LIS-autocontent, not here — LIS-autocontent's output feeds
   other projects too, so deriving it here would duplicate the logic in the wrong place.
@@ -84,8 +99,12 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 - **DSCensor** is not on PyPI yet. Point `LEGUMISTA_DSCENSOR_PATH` at a checkout of the
   `legumista-interop` branch of `legumeinfo/microservices` (the `dscensor/` subdirectory);
   without it the `lis_*` tools report the catalog as unavailable rather than failing.
-- **Tests:** `python -m pytest -q` (suite in `tests/`). Every test is offline — network
-  and PDF entry points are stubbed. Keep it that way.
-- **CI:** `.github/workflows/ci.yml` runs the tests on Python 3.11 and 3.12 for every push
-  and pull request. Keep them green.
+- **Tests:** `python -m pytest -q` (suite in `tests/`). Every test is offline, and
+  `tests/conftest.py` enforces it: a test that opens a TCP connection or resolves a
+  hostname fails.
+- **CI:** `.github/workflows/ci.yml` runs the tests on Python 3.11 and 3.12, against
+  FastMCP 3.x and 4.x, with a DSCensor checkout, for every push and pull request. Keep
+  them green.
+- **Evaluations:** `evals/` measures answer quality with a real model (see
+  `evals/README.md`). It is not part of the test suite.
 - Licensed MIT (see [`LICENSE`](LICENSE)).
