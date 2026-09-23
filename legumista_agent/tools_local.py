@@ -14,7 +14,7 @@ from .tools_native import BlockedURLError, _open_guarded
 
 MAX_CHARS = int(os.environ.get("LEGUMISTA_TOOL_MAX_CHARS", "20000"))
 FETCH_TIMEOUT = int(os.environ.get("LEGUMISTA_TOOL_FETCH_TIMEOUT", "30"))
-_UA = {"User-Agent": "legumista-agent/1.0 (research; +https://openrouter.ai)"}
+_UA = {"User-Agent": "legumista/0.2 (+https://github.com/legumeinfo/legumista)"}
 
 
 def _cap(text: str) -> str:

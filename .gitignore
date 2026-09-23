@@ -28,3 +28,6 @@ __pycache__/
 *.csi
 *.fai
 *.gzi
+
+# Evaluation transcripts written by `python -m evals.run --out runs/...`.
+/runs/
