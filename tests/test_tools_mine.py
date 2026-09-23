@@ -50,7 +50,7 @@ def catalog(tmp_path, clean):
         "stats": {"collections": 1},
         "taxa": {
             "Glycine/max": {
-                "abbrev": "glyma",
+                "abbrev": "glyma", "commonName": "soybean",
                 "resources": [{"name": "GlycineMine",
                                "URL": "https://mines.legumeinfo.org/glycinemine/begin.do"}],
             },
@@ -194,8 +194,10 @@ def test_service_outage_is_distinguished_from_a_bad_query(mine):
 def test_valid_but_empty_is_its_own_message(mine):
     mine["body"] = {"wasSuccessful": True, "columnHeaders": [], "results": []}
     out = M._gene_ontology({"gene": "NoSuchGene"})
-    assert "no matches" in out and "query was valid" in out
-    assert "rejected" not in out
+    # Every query (including the presence LOOKUP) returns zero rows here, so the gene
+    # itself is unknown to the mine — which is what the reply must now say.
+    assert "no gene matching 'NoSuchGene' in legumemine" in out
+    assert "rejected" not in out and not out.startswith("error:")
 
 
 def test_non_dict_response_is_an_error_not_a_crash(mine):
@@ -284,7 +286,7 @@ def test_tools_are_read_only_and_well_formed():
     assert {t.name for t in tools} == {
         "legumemine_gene_proteins", "legumemine_gene_families",
         "legumemine_gene_ontology", "legumemine_gene_expression",
-        "legumemine_gene_symbol", "legumemine_gene_orthologs",
+        "legumemine_gene_symbol", "legumemine_gene_family_members",
         "lis_trait_qtls", "lis_trait_gwas", "lis_marker_position"}
     for t in tools:
         assert t.read_only is True
@@ -296,8 +298,12 @@ def test_tools_are_read_only_and_well_formed():
     assert by_name["legumemine_gene_symbol"].parameters["required"] == ["symbol"]
     assert by_name["lis_trait_qtls"].parameters["required"] == ["trait"]
     assert by_name["lis_marker_position"].parameters["required"] == ["marker"]
-    # orthologs takes gene OR family, so neither can be schema-required
-    assert by_name["legumemine_gene_orthologs"].parameters["required"] == []
+    # family members takes gene OR family, so neither can be schema-required
+    fam = by_name["legumemine_gene_family_members"].parameters
+    assert fam["required"] == []
+    # 'taxon' used to route the query to a genus mine, which silently lost other genera's
+    # genes; the target species is now a filter, never a routing choice.
+    assert "taxon" not in fam["properties"] and "target_taxon" in fam["properties"]
 
 
 def test_tools_are_registered_on_the_mcp_server():
@@ -363,56 +369,56 @@ def test_gene_symbol_requires_a_symbol(mine):
 
 
 # --- orthologs ------------------------------------------------------------------------
-def test_orthologs_resolves_gene_to_family_first(mine):
-    """The caller asks 'orthologs of this gene' — needing the family id up front would be
+def test_family_members_resolves_gene_to_family_first(mine, monkeypatch):
+    """The caller asks for a gene's homologs — needing the family id up front would be
     asking them for the answer."""
     calls = {"n": 0}
 
     def body(url):
         calls["n"] += 1
         if calls["n"] == 1:      # gene -> family
-            return {"wasSuccessful": True, "columnHeaders": ["Gene Family > Identifier"],
-                    "results": [["Legume.fam3.10524"]]}
+            return {"wasSuccessful": True,
+                    "columnHeaders": ["Gene > Primary Identifier", "Gene Family > Identifier"],
+                    "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000", "Legume.fam3.10524"]]}
         return {"wasSuccessful": True,             # family -> members
                 "columnHeaders": ["Identifier", "Name", "Genus"],
                 "results": [["Legume.fam3.10524", "Ae04g33770", "Aeschynomene"]]}
 
-    original = M._get
-    M_get_urls = mine["urls"]
-
     def fake(url, accept="application/json"):
-        M_get_urls.append(url)
+        mine["urls"].append(url)
         if "format=count" in url:
             return mine["count"]
         return body(url)
 
-    M._get = fake
-    try:
-        out = M._gene_orthologs({"gene": "Glyma.12G040000"})
-    finally:
-        M._get = original
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._gene_family_members({"gene": "Glyma.12G040000"})
     assert "is in gene family Legume.fam3.10524" in out
     assert "Ae04g33770" in out
-    xml2, _ = _parse([u for u in M_get_urls if "format=json" in u][1])
+    xml2, _ = _parse([u for u in mine["urls"] if "format=json" in u][1])
     assert 'value="Legume.fam3.10524"' in xml2
 
 
-def test_orthologs_accepts_a_family_directly(mine):
+def test_family_members_accepts_a_family_directly(mine):
     mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Identifier", "Name"],
                     "results": [["Legume.fam3.10524", "Ae04g33770"]]}
-    out = M._gene_orthologs({"family": "Legume.fam3.10524"})
+    out = M._gene_family_members({"family": "Legume.fam3.10524"})
     assert "is in gene family" not in out       # no lookup step was needed
     assert "Ae04g33770" in out
 
 
-def test_orthologs_without_gene_or_family_is_rejected(mine):
-    assert "provide 'gene'" in M._gene_orthologs({})
+def test_family_members_without_gene_or_family_is_rejected(mine):
+    assert "provide 'gene'" in M._gene_family_members({})
 
 
-def test_orthologs_reports_a_gene_with_no_family(mine):
+def test_family_members_reports_an_unknown_gene_as_unknown(mine):
     mine["body"] = {"wasSuccessful": True, "columnHeaders": ["X"], "results": []}
-    out = M._gene_orthologs({"gene": "Glyma.999G999999"})
-    assert "no gene family assignment" in out
+    out = M._gene_family_members({"gene": "Glyma.999G999999"})
+    # The fake mine answers every query with zero rows, so the presence check finds no
+    # gene either: the reply must say the gene is unknown, not that it lacks a family.
+    assert "no gene matching 'Glyma.999G999999'" in out
+    # Even this early reply keeps the labelled title and the homology caveat.
+    assert out.startswith("Gene family members (homologs; not an orthology call):")
+    assert out.endswith(M._FAMILY_CAVEAT)
 
 
 # --- column disambiguation ------------------------------------------------------------
@@ -494,7 +500,7 @@ def test_known_mines_reads_urls_not_names(catalog):
     assert M.MINE.lower() in known
 
 
-def test_mines_absent_from_the_catalog_are_still_reachable(catalog):
+def test_mines_absent_from_the_catalog_are_still_reachable(mine, catalog):
     """cajanusmine and lensmine answer /service/version but appear nowhere in the
     catalog's resources. Trusting the catalog alone would refuse pigeonpea and lentil —
     two real mines with breeding data."""
@@ -546,19 +552,20 @@ def test_the_cache_key_separates_mine_query_and_size(mine):
     assert len({u for u in mine["urls"]}) == 4
 
 
-def test_a_repeated_ortholog_call_reuses_both_of_its_round_trips(mine):
-    """legumemine_gene_orthologs is the two-request tool (gene->family, then family->
-    members), so an agent circling back to it is where duplicate traffic accumulates.
+def test_a_repeated_family_members_call_reuses_both_of_its_round_trips(mine):
+    """legumemine_gene_family_members is the two-request tool (gene->family, then
+    family->members), so an agent circling back to it is where duplicate traffic
+    accumulates.
 
     NOTE: it still cannot reuse legumemine_gene_families' response — that tool selects
     five views and this step selects one, so the PathQueries differ and the cache key
     (mine, xml, size) rightly separates them."""
     mine["body"] = {"wasSuccessful": True,
-                    "columnHeaders": ["Gene Family > Identifier"],
-                    "results": [["Legume.fam3.10524"]]}
-    M._gene_orthologs({"gene": "Glyma.12G040000"})
+                    "columnHeaders": ["Gene > Primary Identifier", "Gene Family > Identifier"],
+                    "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000", "Legume.fam3.10524"]]}
+    M._gene_family_members({"gene": "Glyma.12G040000"})
     before = len(mine["urls"])
-    M._gene_orthologs({"gene": "Glyma.12G040000"})
+    M._gene_family_members({"gene": "Glyma.12G040000"})
     assert len(mine["urls"]) == before
 
 
@@ -682,3 +689,116 @@ def test_the_bridge_is_absent_when_there_are_no_rows(mine, catalog):
     mine["body"] = {"wasSuccessful": True, "columnHeaders": ["x"], "results": []}
     out = M._trait_gwas({"trait": "nothing", "taxon": "Glycine max"})
     assert "lis_files" not in out and "no matches" in out
+
+
+# --- hardening prototype: empty results, caps, target taxon ---------------------------
+def test_empty_result_separates_unknown_gene_from_no_annotations(mine, monkeypatch):
+    """An InterMine view is an inner join: a real gene with no GO terms and a typo both
+    return zero rows. The presence LOOKUP must tell them apart."""
+    def fake(url, accept="application/json"):
+        mine["urls"].append(url)
+        if "ontologyAnnotations" in urllib.parse.unquote(url):
+            return {"wasSuccessful": True, "columnHeaders": [], "results": []}
+        return {"wasSuccessful": True, "columnHeaders": ["Gene > Primary Identifier"],
+                "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000"]]}
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._gene_ontology({"gene": "Glyma.12G040000"})
+    assert "exists in legumemine" in out and "has no ontology annotations" in out
+    assert "check the identifier" not in out
+
+
+def test_a_capped_result_with_a_failed_count_is_not_presented_as_complete(mine):
+    rows = [[f"G{i}", "gnm4", f"GO:{i}", "t", "GO"] for i in range(5)]
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["a", "b", "c", "d", "e"],
+                    "results": rows}
+    mine["count"] = "not-a-number"            # the count pre-flight fails
+    out = M._gene_ontology({"gene": "G", "max_results": 5})
+    assert "showing the first 5 row(s)" in out and "total is unavailable" in out
+
+
+def test_target_taxon_filters_members_and_explains_a_real_zero(mine, catalog, monkeypatch):
+    calls = {"n": 0}
+
+    def fake(url, accept="application/json"):
+        mine["urls"].append(url)
+        if "format=count" in url:
+            return "347"
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"wasSuccessful": True, "columnHeaders": ["id", "fam"],
+                    "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000", "Legume.fam3.10524"]]}
+        return {"wasSuccessful": True, "columnHeaders": [], "results": []}
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._gene_family_members({"gene": "Glyma.12G040000", "target_taxon": "phavu"})
+    members_xml, _ = _parse(mine["urls"][1])
+    assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in members_xml
+    assert 'value="vulgaris"' in members_xml
+    assert "exists in legumemine with 347 members, none of them from Phaseolus vulgaris" in out
+    assert "not orthology" in out
+
+
+def test_a_common_name_routes_to_the_genus_mine(mine, catalog):
+    """'soybean' used to become 'soybeanmine' (first word + 'mine'), which does not
+    exist, so every breeding query for soybean by its common name failed."""
+    assert M._resolve_mine({"taxon": "soybean"}) == ("glycinemine", None)
+    assert M._resolve_mine({"taxon": "glyma"}) == ("glycinemine", None)
+
+
+def test_family_members_does_not_call_a_failed_count_a_real_zero(mine, catalog,
+                                                                 monkeypatch):
+    calls = {"n": 0}
+
+    def fake(url, accept="application/json"):
+        mine["urls"].append(url)
+        if "format=count" in url:
+            raise TimeoutError("timed out")
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"wasSuccessful": True, "columnHeaders": ["id", "fam"],
+                    "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000", "Legume.fam3.10524"]]}
+        return {"wasSuccessful": True, "columnHeaders": [], "results": []}
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._gene_family_members({"gene": "Glyma.12G040000", "target_taxon": "phavu"})
+    assert "overall size could not be checked" in out
+    assert "real zero for this family" not in out and "has no members" not in out
+
+
+def test_expression_names_each_studys_unit_and_warns_when_they_mix(mine):
+    mine["body"] = {"wasSuccessful": True,
+                    "columnHeaders": ["feature", "sample", "desc", "source", "unit", "value"],
+                    "results": [
+                        ["glyma.Wm82.gnm2.ann1.Glyma.12G040000", "S1", "root", "studyA", "TPM", "88.1"],
+                        ["glyma.Wm82.gnm2.ann1.Glyma.12G040000", "S2", "leaf", "studyA", "TPM", "12.0"],
+                        ["glyma.Wm82.gnm2.ann1.Glyma.12G040000", "S3", "nodule", "studyB", "FPKM", "40.2"]]}
+    out = M._gene_expression({"gene": "Glyma.12G040000"})
+    assert "NOTE: these rows mix 2 studies in different units (FPKM, TPM)" in out
+    assert "studyA [TPM]: 2 row(s)" in out and "studyB [FPKM]: 1 row(s)" in out
+    assert "glyma.Wm82.gnm2.ann1.Glyma.12G040000" in out     # the assembly travels
+
+
+def test_expression_source_filter_constrains_the_query(mine):
+    M._gene_expression({"gene": "Glyma.12G040000", "source": "studyA"})
+    xml, _ = _parse(mine["urls"][0])
+    assert ('path="ExpressionValue.sample.source.primaryIdentifier" op="=" '
+            'value="studyA"') in xml
+
+
+def test_an_unresolvable_taxon_is_a_name_problem_not_a_missing_mine(mine, catalog):
+    """With a catalog loaded, a typo must not become 'soybeen has no InterMine' — that
+    reads as a fact about the data. The reply is about the name, and nothing is queried."""
+    out = M._trait_qtls({"trait": "seed protein", "taxon": "soybeen"})
+    assert "does not match any taxon in the LIS catalog" in out
+    assert "has no InterMine" not in out
+    assert all("/query/results" not in u for u in mine["urls"])   # probed, never queried
+
+
+def test_an_ambiguous_name_within_one_genus_routes_to_that_genus(mine, catalog, monkeypatch):
+    """'wild peanut' names two Arachis species: the species is ambiguous, the mine is not."""
+    ctl = C.controller()
+    monkeypatch.setitem(ctl.document["taxa"], "Arachis/cardenasii",
+                        {"commonName": "wild peanut", "abbrev": "aracd"})
+    monkeypatch.setitem(ctl.document["taxa"], "Arachis/stenosperma",
+                        {"commonName": "wild peanut", "abbrev": "araste"})
+    monkeypatch.setattr(C, "_TAXON_INDEX", {})
+    mine["live"].add("arachismine")
+    assert M._resolve_mine({"taxon": "wild peanut"}) == ("arachismine", None)

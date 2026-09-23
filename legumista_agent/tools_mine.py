@@ -28,8 +28,8 @@ model. Each tool below owns a single tested PathQuery, so the traps are handled 
    the catalog's published mines are checked BEFORE any request (see `_known_mines`).
 
 Successful responses are memoized for the life of the process (`_cached`): an agent working
-one gene re-issues the same PathQuery — `legumemine_gene_orthologs` re-derives the family
-`legumemine_gene_families` just fetched. Errors are never cached, so a retry retries.
+one gene re-issues the same PathQuery — `legumemine_gene_family_members` re-derives the
+family `legumemine_gene_families` just fetched. Errors are never cached, so a retry retries.
 
 Mine selection: `MINE` (env `LEGUMISTA_LIS_MINE`) with a per-call `mine` override. The
 default is `legumemine`, the pan-legume mine — it spans 55 organisms, so its gene families
@@ -46,6 +46,7 @@ import urllib.parse
 from xml.sax.saxutils import quoteattr
 
 from . import tools_catalog
+from .results import count_phrase
 from .tool import Tool
 from .tools_native import _cap, _get, _validate_url
 
@@ -85,8 +86,8 @@ def _url(mine: str, xml: str, fmt: str, size: int = None) -> str:
 # --- response cache --------------------------------------------------------------------
 # A mine answer is deterministic for the life of a request: the same PathQuery at the same
 # size returns the same rows. An agent working one gene re-issues them anyway — asking for
-# a gene's orthologs re-derives the gene->family mapping `legumemine_gene_families` just
-# fetched — so identical queries are collapsed to one round trip.
+# a gene's family members re-derives the gene->family mapping `legumemine_gene_families`
+# just fetched — so identical queries are collapsed to one round trip.
 #
 # ONLY successes are cached. Caching an error would turn a transient outage into a
 # permanent one for this process, and the "retry later" advice we hand back would be a lie.
@@ -192,15 +193,15 @@ def _gene_constraints(args, root="Gene"):
     return cons
 
 
-def _render(title, mine, gene, rows, cols, total, size, note=""):
+def _render(title, mine, gene, rows, cols, total, size, note="", capped=False):
     if not rows:
         return (f"{title}: no matches for {gene!r} in {mine}. The query was valid and "
                 "returned zero rows — check the identifier, or widen 'assembly'/"
                 "'annotation'.")
     head = f"{title} — {gene} [mine: {mine}]"
-    shown = f"{len(rows)} row(s)"
-    if total and total > len(rows):
-        shown += f" of {total} (capped at {size}; raise 'max_results' to see more)"
+    shown = count_phrase(len(rows), total, "row(s)", capped=capped)
+    if len(rows) < (total or 0) or (capped and total is None):
+        shown += f" — capped at {size}; raise 'max_results' (up to 500) to see more"
     lines = [head, shown + (f"  {note}" if note else ""), "  " + " | ".join(cols)]
     for r in rows:
         lines.append("  " + " | ".join("" if v is None else str(v) for v in r))
@@ -269,7 +270,20 @@ def _known_mines():
 
 
 def _mine_for_taxon(taxon: str) -> str:
-    return (taxon or "").replace("_", " ").split()[0].lower() + "mine"
+    """'<genus>mine' for a taxon.
+
+    The genus comes from the catalog's resolver, so a common name ('soybean') or
+    abbreviation ('glyma') routes to glycinemine rather than to a nonexistent
+    'soybeanmine'. An ambiguous name whose candidates share a genus ('wild peanut': two
+    Arachis species) routes to that genus. Otherwise the first word is used: the catalog
+    is incomplete, and _resolve_mine probes a guessed mine before refusing it."""
+    match = tools_catalog.resolve_taxon(taxon)
+    genus = match.genus
+    if not genus and match.candidates:
+        genera = {c.split()[0] for c in match.candidates}
+        genus = genera.pop() if len(genera) == 1 else ""
+    genus = genus or ((taxon or "").replace("_", " ").split() or [""])[0]
+    return genus.lower() + "mine"
 
 
 def _mine_exists(mine: str) -> bool:
@@ -315,9 +329,16 @@ def _resolve_mine(args, require_taxon=False):
         return explicit, None
     taxon = (args.get("taxon") or args.get("genus") or "").strip()
     if taxon:
+        match = tools_catalog.resolve_taxon(taxon)
+        if len({c.split()[0] for c in match.candidates}) > 1:
+            return None, match.problem()          # ambiguous across genera: ask, don't guess
         mine = _mine_for_taxon(taxon)
         known = _known_mines()
         if known is not None and mine not in known and not _mine_exists(mine):
+            if not (match.genus or match.candidates):
+                # The name did not resolve, and no mine answers to its first word: the
+                # problem is the NAME, so say that rather than "X has no InterMine".
+                return None, match.problem()
             return None, _no_mine(taxon, mine)
         return mine, None
     if require_taxon:
@@ -327,9 +348,51 @@ def _resolve_mine(args, require_taxon=False):
     return MINE, None
 
 
+def _gene_presence(mine, args):
+    """Does the gene exist in this mine at all, ignoring what the tool joins it to?
+
+    An InterMine view is an inner join, so "gene has no GO terms" and "no such gene"
+    both come back as zero rows. This separate LOOKUP tells them apart.
+    Returns (primary_identifiers, error_text)."""
+    xml = _pathquery(["Gene.primaryIdentifier"], _gene_constraints(args))
+    rows, _cols, err = _run(mine, xml, 20)
+    if err:
+        return None, err
+    return sorted({str(r[0]) for r in rows or [] if r and r[0]}), None
+
+
+def _render_empty(title, mine, args, subject, what):
+    """Zero rows for a gene-rooted query, explained."""
+    narrowing = ", ".join(f"{k}={args[k]!r}" for k in ("assembly", "annotation")
+                          if (args.get(k) or "").strip())
+    scope = f" (with {narrowing})" if narrowing else ""
+    ids, err = _gene_presence(mine, args)
+    if err:
+        return (f"{title}: zero rows for {subject!r} in {mine}{scope}, and checking whether "
+                f"the gene exists failed ({err}). Treat the answer as unknown, not as absence.")
+    if not ids:
+        return (f"{title}: no gene matching {subject!r} in {mine}{scope} (InterMine LOOKUP "
+                "over identifier fields). The ID may be misspelled, from an assembly this "
+                "mine does not load, or from a species it does not cover.")
+    shown = ", ".join(ids[:5]) + (f" (+{len(ids) - 5} more)" if len(ids) > 5 else "")
+    return (f"{title}: {subject!r} exists in {mine}{scope} ({shown}) but has no {what} "
+            "there. This is an empty result for this gene, not a failed lookup.")
+
+
+def _explain_empty(args, what):
+    """on_empty hook for gene-rooted tools: tell 'no such gene' from 'no rows of this kind'."""
+    return lambda mine, subject: _render_empty(_TITLES.get(what, what), mine, args, subject,
+                                               what)
+
+
+_TITLES = {"protein records": "Proteins", "gene family assignments": "Gene families",
+           "ontology annotations": "Ontology annotations",
+           "expression values": "Expression values"}
+
+
 def _execute(args, title, view, constraints, sort=None, assembly_col=1,
              subject_key="gene", subject_hint="a gene identifier such as 'Glyma.12G040000'",
-             require_taxon=False, footer=None):
+             require_taxon=False, footer=None, on_empty=None):
     mine, mine_err = _resolve_mine(args, require_taxon)
     if mine_err:
         return mine_err
@@ -341,9 +404,13 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
     rows, cols, err = _run(mine, xml, size)
     if err:
         return err
+    if not rows and on_empty is not None:
+        # The caller explains its own zero (see _render_empty) instead of the generic text.
+        return on_empty(mine, subject)
+    capped = len(rows) >= size
     total = _count(mine, xml) if len(rows) >= min(size, COUNT_THRESHOLD) else len(rows)
     note = _assembly_note(rows, assembly_col) if assembly_col is not None else ""
-    out = _render(title, mine, subject, rows, cols, total, size, note)
+    out = _render(title, mine, subject, rows, cols, total, size, note, capped=capped)
     # A footer names the next tool the rows unlock. It goes in the OUTPUT rather than a
     # docstring because the hand-off is only discoverable once you are holding the values.
     if footer and rows:
@@ -360,7 +427,7 @@ def _gene_proteins(args) -> str:
         ["Gene.name", "Gene.assemblyVersion", "Gene.annotationVersion",
          "Gene.proteins.primaryIdentifier", "Gene.proteins.length",
          "Gene.proteins.molecularWeight"],
-        _gene_constraints(args))
+        _gene_constraints(args), on_empty=_explain_empty(args, "protein records"))
 
 
 def _gene_families(args) -> str:
@@ -370,7 +437,7 @@ def _gene_families(args) -> str:
          "Gene.geneFamilyAssignments.geneFamily.primaryIdentifier",
          "Gene.geneFamilyAssignments.geneFamily.size",
          "Gene.geneFamilyAssignments.geneFamily.description"],
-        _gene_constraints(args))
+        _gene_constraints(args), on_empty=_explain_empty(args, "gene family assignments"))
 
 
 def _gene_ontology(args) -> str:
@@ -380,31 +447,62 @@ def _gene_ontology(args) -> str:
          "Gene.ontologyAnnotations.ontologyTerm.identifier",
          "Gene.ontologyAnnotations.ontologyTerm.name",
          "Gene.ontologyAnnotations.ontologyTerm.ontology.name"],
-        _gene_constraints(args))
+        _gene_constraints(args), on_empty=_explain_empty(args, "ontology annotations"))
+
+
+# Column positions in the expression view below; fixed by that view.
+_EXPR_SOURCE, _EXPR_UNIT = 3, 4
+
+
+def _expression_footer(rows) -> str:
+    """Name the studies (and their units) the rows came from. Values are only comparable
+    within one study: studies differ in unit (TPM, FPKM, ...) and normalisation."""
+    studies = {}
+    for r in rows:
+        if len(r) > _EXPR_UNIT:
+            key = (str(r[_EXPR_SOURCE]), str(r[_EXPR_UNIT] or "unit not stated"))
+            studies[key] = studies.get(key, 0) + 1
+    if len(studies) <= 1:
+        return ""
+    units = sorted({u for _s, u in studies})
+    lines = [f"NOTE: these rows mix {len(studies)} studies"
+             + (f" in different units ({', '.join(units)})" if len(units) > 1 else "")
+             + ". Rank and compare values within one study only; pass 'source' to see "
+               "one study's samples."]
+    lines += [f"  {s} [{u}]: {n} row(s)" for (s, u), n in sorted(studies.items())]
+    return "\n".join(lines)
 
 
 def _gene_expression(args) -> str:
     """Rooted at ExpressionValue: Gene has no expression collection, so the gene is
     reached through ExpressionValue.feature. Sorted high-to-low because one gene can carry
-    hundreds of values and the top-expressing samples are the informative ones."""
+    hundreds of values and the top-expressing samples are the informative ones. The
+    feature's primaryIdentifier (which names the assembly and annotation) and the study's
+    unit are both in the view, because a bare gene name can match several assemblies and
+    studies report in different units."""
+    constraints = [("ExpressionValue.feature", "LOOKUP", (args.get("gene") or "").strip())]
+    if (args.get("source") or "").strip():
+        constraints.append(("ExpressionValue.sample.source.primaryIdentifier", "=",
+                            args["source"].strip()))
     return _execute(
         args, "Expression values",
-        ["ExpressionValue.feature.name", "ExpressionValue.sample.primaryIdentifier",
+        ["ExpressionValue.feature.primaryIdentifier",
+         "ExpressionValue.sample.primaryIdentifier",
          "ExpressionValue.sample.description",
-         "ExpressionValue.sample.source.primaryIdentifier", "ExpressionValue.value"],
-        [("ExpressionValue.feature", "LOOKUP", (args.get("gene") or "").strip())],
-        sort="ExpressionValue.value desc",
-        assembly_col=None)
+         "ExpressionValue.sample.source.primaryIdentifier",
+         "ExpressionValue.sample.source.unit", "ExpressionValue.value"],
+        constraints, sort="ExpressionValue.value desc", assembly_col=None,
+        footer=_expression_footer, on_empty=_explain_empty(args, "expression values"))
 
 
 def _abbrev_for_taxon(ctl, taxon: str) -> str:
     """Datastore abbreviation ('glyma') for a taxon, or "" — used only to scope a symbol
-    lookup, so a miss is harmless (the search just stays cross-species)."""
-    bits = (taxon or "").replace("_", " ").split()
-    if len(bits) < 2:
+    lookup, so a miss is harmless (the search just stays cross-species). Common names
+    and abbreviations resolve through the catalog like everywhere else."""
+    match = tools_catalog.resolve_taxon(taxon, ctl)
+    if not (match.ok and match.species):
         return ""
-    meta = (ctl.document.get("taxa") or {}).get(
-        f"{bits[0].capitalize()}/{bits[1].lower()}") or {}
+    meta = (ctl.document.get("taxa") or {}).get(f"{match.genus}/{match.species}") or {}
     return str(meta.get("abbrev") or "")
 
 
@@ -460,45 +558,103 @@ def _gene_symbol(args) -> str:
         subject_hint="a gene symbol such as 'GmNARK' or 'PvSYMRK'")
 
 
-def _gene_orthologs(args) -> str:
-    """Family members across species — 'does my crop have this gene?'.
+_FAMILY_CAVEAT = (
+    "Family co-membership shows homology (shared ancestry), not orthology: a family holds "
+    "paralogs too, so several members per species are expected — especially in "
+    "polyploid lineages such as Glycine. To support an orthology claim, use the family's "
+    "phylogeny or synteny (lis_synteny), and say which evidence you used.")
+
+
+def _target_constraints(target: str):
+    """(constraints, label, error) restricting family members to one taxon."""
+    target = (target or "").strip()
+    if not target:
+        return [], "", None
+    if tools_catalog.controller() is None:
+        # Without the catalog, names cannot be resolved: accept only a Latin genus or
+        # binomial, so "chickpea" is not silently queried as a genus called "Chickpea".
+        bits = target.replace("_", " ").split()
+        if not bits[0][:1].isupper() or len(bits) > 2:
+            return None, "", ("error: target_taxon: no LIS catalog is loaded, so only a "
+                              "Latin genus or binomial is accepted (e.g. 'Cicer arietinum').")
+        genus, species = bits[0], (bits[1].lower() if len(bits) > 1 else "")
+    else:
+        match = tools_catalog.resolve_taxon(target)
+        if not match.ok:
+            return None, "", f"error: target_taxon: {match.problem()}"
+        genus, species = match.genus, match.species
+    cons = [("Gene.organism.genus", "=", genus)]
+    if species and species != "GENUS":
+        cons.append(("Gene.organism.species", "=", species))
+    return cons, f"{genus} {species}".strip(), None
+
+
+def _gene_family_members(args) -> str:
+    """Members of a gene's family, optionally restricted to one target species.
 
     Accepts a gene (whose family is resolved first) or a family identifier directly.
-    Defaults to legumemine: families are cross-species there (Legume.fam3.10524 has 347
-    members) but genus-scoped in a per-species mine (195 in glycinemine)."""
-    mine, mine_err = _resolve_mine(args)
-    if mine_err:
-        return mine_err
+    Always queries the pan-legume mine unless 'mine' is given: families are cross-species
+    there (Legume.fam3.10524 has 347 members) but genus-scoped in a per-genus mine (195
+    in glycinemine), where another genus's gene is simply absent."""
+    mine = (args.get("mine") or "").strip() or MINE
     family = (args.get("family") or "").strip()
     gene = (args.get("gene") or "").strip()
+    target_cons, target_label, terr = _target_constraints(args.get("target_taxon"))
+    if terr:
+        return terr
+    title = ("Gene family members (homologs; not an orthology call)"
+             + (f" in {target_label}" if target_label else ""))
     if not family:
         if not gene:
             return ("error: provide 'gene' (e.g. 'Glyma.12G040000') or 'family' "
                     "(e.g. 'Legume.fam3.10524').")
-        # Step 1: gene -> family. Without this the caller would have to already know the
-        # family id, which is exactly the thing they are asking us for.
-        xml = _pathquery(["Gene.geneFamilyAssignments.geneFamily.primaryIdentifier"],
+        # Step 1: gene -> family, per assembly (a bare name can match several).
+        xml = _pathquery(["Gene.primaryIdentifier",
+                          "Gene.geneFamilyAssignments.geneFamily.primaryIdentifier"],
                          _gene_constraints(args))
-        rows, _cols, err = _run(mine, xml, 5)
+        rows, _cols, err = _run(mine, xml, 20)
         if err:
             return err
-        fams = [r[0] for r in (rows or []) if r and r[0]]
-        if not fams:
-            return (f"no gene family assignment for {gene!r} in {mine} — the query was "
-                    "valid and returned zero rows, so orthologs cannot be derived.")
-        family = fams[0]
-        prefix = (f"{gene} is in gene family {family}"
-                  + (f" (also: {', '.join(fams[1:])})" if len(fams) > 1 else "") + "\n")
+        by_family = {}
+        for gene_id, fam in (r for r in rows or [] if len(r) > 1 and r[1]):
+            by_family.setdefault(fam, []).append(gene_id)
+        if not by_family:
+            return (_render_empty(title, mine, args, gene, "gene family assignment")
+                    + "\n\n" + _FAMILY_CAVEAT)
+        family = sorted(by_family, key=lambda f: (-len(by_family[f]), f))[0]
+        others = [f for f in sorted(by_family) if f != family]
+        prefix = (f"{gene} ({', '.join(sorted(by_family[family]))}) is in gene family "
+                  f"{family}"
+                  + (f"; other matches of this name are in: "
+                     + ", ".join(f"{f} ({', '.join(by_family[f])})" for f in others)
+                     if others else "") + "\n")
     else:
         prefix = ""
+    constraints = ([("Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "=", family)]
+                   + target_cons)
+    def explain(mine_name, fam):
+        overall = _count(mine_name, _pathquery(
+            ["Gene.primaryIdentifier"],
+            [("Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "=", fam)]))
+        if overall == 0 or (overall is None and not target_label):
+            return (f"{title}: family {fam!r} has no members in {mine_name} — check the "
+                    "family identifier.")
+        if overall is None:
+            return (f"{title}: no members of {fam} from {target_label} in {mine_name}; "
+                    "the family's overall size could not be checked, so confirm the "
+                    "family identifier before treating this as a real zero.")
+        return (f"{title}: family {fam} exists in {mine_name} with {overall:,} members, "
+                f"none of them from {target_label}. That is a real zero for this family "
+                "in this mine, not a failed lookup.")
     out = _execute(
-        {**args, "family": family}, "Family members", 
-        ["Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "Gene.name",
+        {**args, "family": family, "mine": mine}, title,
+        ["Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "Gene.primaryIdentifier",
          "Gene.organism.genus", "Gene.organism.species", "Gene.assemblyVersion"],
-        [("Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "=", family)],
-        sort="Gene.organism.genus asc", assembly_col=None, subject_key="family",
-        subject_hint="a gene family identifier such as 'Legume.fam3.10524'")
-    return prefix + out
+        constraints, sort="Gene.organism.genus asc", assembly_col=None,
+        subject_key="family",
+        subject_hint="a gene family identifier such as 'Legume.fam3.10524'",
+        on_empty=explain)
+    return prefix + out + "\n\n" + _FAMILY_CAVEAT
 
 
 def _trait_qtls(args) -> str:
@@ -540,7 +696,8 @@ def _gwas_bridge(rows) -> str:
         return ""
     known = _catalog_gwas_ids()
     if known is None:
-        return ("The study identifier(s) above (" + ", ".join(studies[:5]) + ") are "
+        return ("The study identifier(s) above (" + ", ".join(studies[:5])
+                + (f", +{len(studies) - 5} more" if len(studies) > 5 else "") + ") are "
                 "formatted like LIS Data Store gwas/ collection names, so "
                 f"lis_files(collection={studies[0]!r}) may reach the underlying data. "
                 "Not verified — no catalog is loaded.")
@@ -556,6 +713,7 @@ def _gwas_bridge(rows) -> str:
     if missing:
         lines.append("No gwas/ collection in the catalog is named "
                      + ", ".join(repr(x) for x in missing[:5])
+                     + (f" (+{len(missing) - 5} more)" if len(missing) > 5 else "")
                      + " — the mine holds the result, the Data Store does not hold the "
                        "study files.")
     return "\n".join(lines)
@@ -613,10 +771,11 @@ _ASSEMBLY_ARGS = {
 
 _TAXON_ARG = {
     "taxon": {"type": "string",
-              "description": "Species whose mine to query, e.g. 'Glycine max' or "
-                             "'Phaseolus vulgaris'. Routes to <genus>mine; a species "
-                             "whose genus has no mine is reported as such without a "
-                             "request."},
+              "description": "Species whose mine to query, e.g. 'Glycine max', "
+                             "'soybean' or 'phavu' (common names and abbreviations are "
+                             "resolved through the catalog). Routes to <genus>mine; a "
+                             "species whose genus has no mine is reported as such "
+                             "without a request."},
     "mine": {"type": "string", "description": "Explicit mine name; overrides 'taxon'."},
     "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
 }
@@ -641,9 +800,11 @@ def mine_tools() -> list:
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_proteins),
         _mk("legumemine_gene_families",
             "Gene family assignments for a gene (e.g. 'Legume.fam3.10524'), with family "
-            "size and description. This is the cross-species ortholog bridge: the Data "
-            "Store ships family assignments as an UNINDEXED .gfa.tsv.gz that no tool can "
-            "read, so the mine is the only way to get them.",
+            "size and description. Families group homologs across species, paralogs "
+            "included, so membership is not an orthology call; list a family's members "
+            "with legumemine_gene_family_members. The Data Store ships family "
+            "assignments as an UNINDEXED .gfa.tsv.gz that no tool can read, so the mine "
+            "is the only way to get them.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_families),
         _mk("legumemine_gene_ontology",
             "Ontology annotations for a gene — GO terms and other ontologies — as "
@@ -651,11 +812,16 @@ def mine_tools() -> list:
             "when you want curated terms rather than a free-text description.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_ontology),
         _mk("legumemine_gene_expression",
-            "Expression values for a gene across samples, highest first, with the sample "
-            "identifier, its description (tissue/treatment) and the source study. One "
-            "gene can have hundreds of values, so results are capped and the total is "
-            "reported.",
-            {**_GENE_ARG}, _gene_expression),
+            "Expression values for a gene across samples, highest first, with the sample, "
+            "its description (tissue/treatment), the source study and that study's unit "
+            "(TPM, FPKM, ...). Values are comparable only within one study; pass 'source' "
+            "to restrict to one. One gene can have hundreds of values, so results are "
+            "capped and the total is reported.",
+            {**_GENE_ARG,
+             "source": {"type": "string",
+                        "description": "Restrict to one expression study (the source "
+                                       "identifier shown in a previous result)."}},
+            _gene_expression),
         _mk("legumemine_gene_symbol",
             "Resolve a gene SYMBOL (e.g. 'GmNARK', 'PvSYMRK') to its gene identifier, "
             "full name, functional synopsis and the DOIs behind the claim. Answered from "
@@ -667,16 +833,26 @@ def mine_tools() -> list:
             {"symbol": {"type": "string",
                         "description": "Gene symbol, e.g. 'GmNARK'. Case-insensitive, exact."},
              **_TAXON_ARG}, _gene_symbol, required=("symbol",)),
-        _mk("legumemine_gene_orthologs",
-            "Find a gene's counterparts in other legume species via its gene family — "
-            "'does my crop have this gene?'. Give 'gene' (its family is looked up first) "
-            "or 'family' directly. Defaults to the pan-legume mine, where families span "
-            "genera; a per-species 'mine' narrows them to one genus.",
+        _mk("legumemine_gene_family_members",
+            "Members of a gene's family across legume species — the homologs of a gene, "
+            "for 'does my crop have a counterpart of this gene?'. Give 'gene' (its family "
+            "is looked up first) or 'family'; add 'target_taxon' (e.g. 'Cicer arietinum' "
+            "or 'chickpea') to list only that species' members. Family membership is "
+            "evidence of homology, NOT orthology: families include paralogs. Queries the "
+            "pan-legume mine, where families span genera.",
             {"gene": {"type": "string", "description": "Gene identifier, e.g. 'Glyma.12G040000'."},
              "family": {"type": "string",
                         "description": "Gene family identifier, e.g. 'Legume.fam3.10524'. "
                                        "Skips the gene->family step."},
-             **_ASSEMBLY_ARGS, **_TAXON_ARG}, _gene_orthologs, required=()),
+             "target_taxon": {"type": "string",
+                              "description": "Only list members from this species or genus "
+                                             "(Latin name, abbreviation or common name)."},
+             "mine": {"type": "string",
+                      "description": f"Mine to query (default {MINE!r}). A per-genus mine "
+                                     "only holds its own genus's genes."},
+             "max_results": {"type": "integer",
+                             "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
+             **_ASSEMBLY_ARGS}, _gene_family_members, required=()),
         _mk("lis_trait_qtls",
             "QTLs mapped for a trait: QTL name, linkage group, LOD, marker R2 and the "
             "study it came from. The breeder's entry point for 'what's known about the "
