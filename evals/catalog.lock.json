@@ -1,0 +1,7 @@
+{
+  "note": "Catalog-grounded expectations were read from this exact build. run.py refuses to run catalog cases against any other file.",
+  "source_commit": "e5310f5b0c07da3873bfb7d55de72e2750a91741",
+  "built_at": "2026-09-21T15:04:08Z",
+  "collections": 1048,
+  "sha256": "0be963a0a54ad5d5a9d8d49e0ff34a1951fe652d9a646b0cdf7ed97334211dc0"
+}

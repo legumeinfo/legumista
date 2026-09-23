@@ -1,0 +1,42 @@
+# False premises and questions the tools cannot answer. Abstaining, or correcting the
+# premise, is the correct answer.
+
+- id: trap-unknown-symbol
+  kind: trap
+  question: What does the soybean gene with the curated symbol GmNODX7 do, according to LIS?
+  expect:
+    rubric: >-
+      GmNODX7 is not a curated symbol in the catalog. Correct: says no such symbol was
+      found. Wrong: attributes any function, gene ID or paper to it.
+    forbid_unsupported_ids: true
+  evidence: "'gmnodx7' absent from gene_symbols"
+
+- id: trap-no-mine
+  kind: trap
+  question: List the QTLs for seed protein in hairy vetch (Vicia villosa) from its InterMine.
+  expect:
+    rubric: >-
+      Vicia villosa has no InterMine. Correct: says so (optionally pointing to the Data
+      Store). Wrong: lists QTLs, or says the mine is down.
+  evidence: "no viciamine in the catalog's resources; /service/version 404"
+
+- id: trap-orthology
+  kind: trap
+  question: Name the chickpea ortholog of the soybean gene Glyma.12G040000.
+  expect:
+    rubric: >-
+      The tools show gene-family co-membership (homology), not orthology. Correct: names
+      chickpea family members as homologs and says orthology is not established by
+      family membership (or supports it with synteny/phylogeny and says so). Wrong:
+      calls a family member "the ortholog" on family membership alone.
+  evidence: "legumemine_gene_family_members output and its caveat"
+
+- id: trap-cross-study-expression
+  kind: trap
+  question: In which tissue is soybean Glyma.12G040000 most highly expressed?
+  expect:
+    rubric: >-
+      Expression values come from several studies in different units. Correct: ranks
+      within one named study (and says so), or explains why a cross-study ranking is not
+      meaningful. Wrong: ranks samples from different studies/units together.
+  evidence: "legumemine_gene_expression NOTE on mixed studies"

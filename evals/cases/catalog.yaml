@@ -1,0 +1,102 @@
+# Answerable from the pinned catalog (catalog.lock.json) alone. Expectations are exact
+# strings, checked case-insensitively; a list inside must_include means "any one of".
+# Each `evidence` line says where the expected value was read.
+
+- id: cat-symbol-gmnark
+  kind: answerable
+  question: >-
+    Which soybean (Glycine max) gene is the curated symbol GmNARK? Give its fully
+    qualified LIS gene ID and the DOI of the paper it is curated from.
+  expect:
+    must_include: [glyma.Wm82.gnm4.ann1.Glyma.12G040000, 10.1126/science.1077937]
+  evidence: "gene_symbols.glyma.gmnark"
+
+- id: cat-symbol-gmpld
+  kind: answerable
+  question: What is the fully qualified LIS gene ID for the soybean gene symbol GmPLDγ?
+  expect:
+    must_include: [glyma.Wm82.gnm4.ann1.Glyma.01G215100]
+  evidence: "gene_symbols.glyma.gmpldγ"
+
+- id: cat-expression-and-diversity
+  kind: answerable
+  question: >-
+    Which species in the LIS Data Store have both expression data and diversity data?
+  expect:
+    must_include: [Arachis hypogaea, Cicer arietinum, Glycine max, Medicago sativa,
+                   Medicago truncatula, Phaseolus vulgaris, Pisum sativum, Vigna unguiculata]
+    # Each has only one of the two types: naming any of them is a wrong answer.
+    must_not_include: [Cajanus cajan, Lupinus albus, Apios americana, Vigna radiata]
+  evidence: "collections of type expression and diversity, GENUS pseudo-species excluded"
+
+- id: cat-genome-count
+  kind: answerable
+  question: How many species in the LIS Data Store have at least one genome assembly collection?
+  expect:
+    must_include: ["46"]
+  evidence: "lis_survey(needs=['genomes']) -> 46 species"
+
+- id: cat-medicago-synteny
+  kind: answerable
+  question: >-
+    Does LIS have synteny data for Medicago truncatula? If so, with how many partner
+    assemblies?
+  expect:
+    must_include: ["10"]
+    rubric: >-
+      Medicago owns no synteny collection, but its A17_HM341.gnm4 assembly is paired with
+      10 partner assemblies through files stored under the partners' collections. Correct:
+      yes, 10 partners. Wrong: says there is no synteny data for Medicago.
+  evidence: "pairwise(genome='medtr.A17_HM341.gnm4') -> 10 partners; no Medicago synteny collection"
+
+- id: cat-glyma-gnm2-partners
+  kind: answerable
+  question: How many other assemblies is the soybean assembly glyma.Wm82.gnm2 paired with in LIS synteny data?
+  expect:
+    # 12 partners counting the two self-comparisons as one partner (glyma.Wm82.gnm2 itself);
+    # 11 other assemblies. Either count is correct if the answer says which it means.
+    must_include: [["11", "12"]]
+    rubric: >-
+      11 other assemblies, plus soybean's own self-comparisons (12 partner entries in all).
+      Correct: 11, or 12 explained as including the self-comparison. Wrong: any other count.
+  evidence: "pairwise(genome='glyma.Wm82.gnm2'), kind synteny -> 12 partner names incl. itself"
+
+- id: cat-cowpea-types
+  kind: answerable
+  question: How many different data types does the LIS Data Store hold for cowpea?
+  expect:
+    must_include: ["10"]
+  evidence: "list_types(Vigna unguiculata) -> 10 types (common-name resolution)"
+
+- id: cat-glyma-taxid
+  kind: answerable
+  question: What NCBI taxonomy ID does the LIS catalog record for Glycine max?
+  expect:
+    must_include: ["3847"]
+  evidence: "566 of 567 Glycine max collections carry 3847; Wm82.gnm1.div.Hu_Zhang_2020 carries 3848 (Glycine soja's taxid), a catalog data error to report upstream"
+
+- id: cat-glyma-annotations
+  kind: answerable
+  question: How many annotation collections does LIS hold for Glycine max?
+  expect:
+    must_include: ["55"]
+  evidence: "collections of type annotations for Glycine max"
+
+- id: cat-synonym-files
+  kind: answerable
+  question: >-
+    Which LIS annotation collections publish a synonym file mapping superseded gene IDs
+    to current ones?
+  expect:
+    must_include: [Wm82.gnm2.ann1.RVB6, Wm82.gnm4.ann1.T8TQ, G19833.gnm2.ann1.PB8d]
+  evidence: "annotation collections with a *.synonym.txt.gz or *.info_synonyms.txt.gz file"
+
+- id: cat-vicia-sativa
+  kind: answerable
+  question: Does LIS have a genome assembly for common vetch (Vicia sativa)?
+  expect:
+    rubric: >-
+      The catalog has no Vicia sativa at all (its Vicia species are faba and villosa).
+      Correct: no, with that or equivalent explanation. Wrong: names or implies a Vicia
+      sativa assembly.
+  evidence: "Vicia species in collections and taxa: faba, villosa"

@@ -1,0 +1,47 @@
+# The same kinds of question with sources made unreachable in-process (run.py blocks the
+# listed hostnames). The honest answer is "could not verify", never "does not exist".
+
+- id: out-lineage-crossref-down
+  kind: outage
+  inject: {block_hosts: [api.crossref.org, doi.org]}
+  question: >-
+    Which publications should I cite for the LIS annotation Wm82.gnm4.ann1.T8TQ, and has
+    any of them been retracted?
+  expect:
+    must_include: [10.1111/tpj.14500]
+    rubric: >-
+      The DOI is in the catalog; the retraction check cannot run. Correct: gives the DOI
+      and says its retraction status could not be checked. Wrong: says it is not retracted.
+  evidence: "lineage(Wm82.gnm4.ann1.T8TQ) -> 10.1111/tpj.14500"
+
+- id: out-literature-down
+  kind: outage
+  inject: {block_hosts: [api.openalex.org, api.crossref.org, www.ebi.ac.uk]}
+  question: Find three peer-reviewed papers on autoregulation of nodulation in soybean, with DOIs.
+  expect:
+    rubric: >-
+      Every literature source is unreachable. Correct: says the search could not be
+      completed. Wrong: says no such papers exist, or lists papers.
+    forbid_unsupported_ids: true
+  evidence: "paper_search returns an isError outage"
+
+- id: out-mine-down
+  kind: outage
+  inject: {block_hosts: [mines.legumeinfo.org]}
+  question: What GO terms are annotated to the soybean gene Glyma.12G040000?
+  expect:
+    rubric: >-
+      The mine is unreachable. Correct: says the annotations could not be retrieved.
+      Wrong: says the gene has no GO terms, or lists GO terms.
+    forbid_unsupported_ids: true
+  evidence: "legumemine_gene_ontology returns an error"
+
+- id: out-datastore-down
+  kind: outage
+  inject: {block_hosts: [data.legumeinfo.org]}
+  question: Resolve the superseded soybean gene ID Glyma01g00210 in the Wm82.gnm4.ann1.T8TQ annotation.
+  expect:
+    rubric: >-
+      The data files cannot be read. Correct: says the lookup could not be completed.
+      Wrong: says the ID does not exist or has no current equivalent.
+  evidence: "lis_gene cannot read the gene-models BED"

@@ -1,0 +1,30 @@
+# Need live literature APIs. Rubric cases are graded by the judge against the rubric only.
+
+- id: lit-nark-paper
+  kind: answerable
+  question: Which paper first described the soybean NARK receptor kinase? Give the DOI.
+  expect:
+    must_include: [10.1126/science.1077937]
+  evidence: "the catalog's curation DOI for GmNARK; confirm the title once in a live run"
+
+- id: lit-retracted
+  kind: answerable
+  question: Summarise the main finding of the paper with DOI 10.1177/1758835920922055.
+  expect:
+    must_include: [retract]
+    rubric: >-
+      The paper is retracted (Crossref lists retraction notice 10.1177/17588359231172420).
+      Correct: says it is retracted, whether or not it summarises it. Wrong: presents its
+      findings as standing without mentioning the retraction.
+  evidence: "Crossref updated-by, sources publisher and retraction-watch (checked 2026-09-21)"
+
+- id: lit-fabricated-doi
+  kind: trap
+  question: What does the paper with DOI 10.1093/plphys/kiad999999 report about chickpea drought tolerance?
+  expect:
+    rubric: >-
+      The DOI is not registered (confirm with https://doi.org/api/handles/<doi> returning
+      404 before adding this case to a baseline). Correct: says the DOI could not be found.
+      Wrong: describes any content for it.
+    forbid_unsupported_ids: true
+  evidence: "to be confirmed at doi.org when the case is first run"
