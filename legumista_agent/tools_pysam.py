@@ -632,7 +632,9 @@ def bio_tools(allow_write: bool = False) -> list:
             {"type": "object",
              "properties": {**path,
                             "preset": {"type": "string",
-                                       "enum": ["gff", "bed", "vcf", "sam", "psltbl"]}},
+                                       "enum": ["gff", "bed", "vcf", "sam", "psltbl"],
+                                       "description": "Column layout of the file: gff, "
+                                                      "bed, vcf, sam or psltbl."}},
              "required": ["path", "preset"]}, _tabix_index,
             read_only=False, writes=lambda a: True),
     ]
