@@ -242,6 +242,24 @@ def _short_attached_path(tok: str) -> bool:
     return os.sep in tail or tail.lower().endswith(_GENOMIC_EXT)
 
 
+def _refuse_remote_output(prev: str, tok: str):
+    """A URL as the target of -o/--output/--output-file. htslib opens an output URL for
+    writing with CURLOPT_UPLOAD — an HTTP PUT of the result, which in write mode can be
+    built from any workspace file. Outputs belong in the workspace.
+
+    Only these three options are known to mean "output" in every subcommand of both
+    CLIs, so only they are checked here; an upload through some other output option
+    (`fastq -1`, `index`'s positional output, …) is bounded instead by the egress
+    proxy's per-connection send budget."""
+    attached = _ATTACHED_LONG_RE.match(tok)
+    value = (attached.group(2) if attached and attached.group(1) in _OUTPUT_FLAGS
+             else tok if prev in _OUTPUT_FLAGS else "")
+    if value and _is_url(value):
+        return (f"error: refused output {value!r} — htslib would upload the result "
+                "there. Write to a workspace file instead.")
+    return None
+
+
 def _guard_argv(argv: list):
     """Confine every path/URL token in a WRITE dispatcher argv. Path tokens are workspace-
     sandboxed and rewritten to absolute realpaths; URL tokens pass the SSRF guard and are
@@ -251,11 +269,12 @@ def _guard_argv(argv: list):
 
     This is the heuristic guard for the operator-enabled write mode, where the argv is
     arbitrary. A read is parsed exactly against its allowlist instead (`_read_argv`)."""
-    out, expect_path = [], False
+    out, expect_path, prev = [], False, ""
     for tok in argv:
-        err = _refuse_composite(tok)
+        err = _refuse_composite(tok) or _refuse_remote_output(prev, tok)
         if err:
             return None, err
+        prev = tok
         attached = _ATTACHED_LONG_RE.match(tok)
         if attached and attached.group(1) in _PATH_FLAGS:
             flag, value = attached.group(1), attached.group(2)

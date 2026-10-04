@@ -508,3 +508,21 @@ def test_a_cached_index_expires(monkeypatch):
     os.utime(stale, (0, 0))
     P._worker_cwd({"path": LIS})
     assert not os.path.exists(stale) and os.path.exists(fresh)
+
+
+# --- outputs never go to a URL ---------------------------------------------------------
+@pytest.mark.parametrize("args", [
+    ["sort", "-o", "https://93.184.216.34/x.bam", "reads.sorted.bam"],
+    ["sort", "--output=https://93.184.216.34/x.bam", "reads.sorted.bam"],
+    ["view", "-o", "http://93.184.216.34/x.sam", "reads.sorted.bam"],
+])
+def test_an_output_url_is_refused_in_write_mode(fixtures, args):
+    """htslib opens an output URL with CURLOPT_UPLOAD: a PUT of data built from
+    workspace files, to a host the caller chose."""
+    out = _sam(args, allow_write=True)
+    assert "refused output" in out and "upload" in out
+
+
+def test_a_url_input_beside_a_workspace_output_still_works(fixtures):
+    guarded, err = P._guard_argv(["-o", "sub.vcf", "https://93.184.216.34/v.vcf.gz"])
+    assert err is None and guarded[-1] == "https://93.184.216.34/v.vcf.gz"

@@ -161,6 +161,26 @@ def test_relay_drops_an_idle_connection(dns, upstream, monkeypatch):
     assert not thread.is_alive(), "an idle tunnel must be closed"
 
 
+def test_an_upload_is_cut_off_at_the_send_budget(dns, upstream, monkeypatch):
+    """Over https the method is hidden by TLS, so an upload through an output option the
+    argv guard does not know is bounded by bytes instead: the chunk that would cross
+    the budget is dropped and the tunnel closed."""
+    monkeypatch.setattr(E, "MAX_SEND_BYTES", 100)
+    dns["data.example"] = [PUBLIC]
+    _, ends = upstream
+    client, _, thread = _serve_in_thread()
+    client.sendall(b"CONNECT data.example:443 HTTP/1.1\r\n\r\n")
+    client.settimeout(5)
+    assert client.recv(1024).startswith(b"HTTP/1.1 200")
+    client.sendall(b"a" * 60)
+    ends[0].settimeout(5)
+    assert ends[0].recv(1024) == b"a" * 60
+    client.sendall(b"b" * 60)                  # 120 > 100: dropped, tunnel closed
+    thread.join(5)
+    assert not thread.is_alive()
+    assert ends[0].recv(1024) == b"", "nothing past the budget may reach the far end"
+
+
 # --- the workers' environment ---------------------------------------------------------
 def test_child_env_routes_htslib_through_the_guard_and_leaves_the_server_alone(monkeypatch):
     monkeypatch.setattr(E, "_STATE", {"url": ""})

@@ -24,6 +24,8 @@ Policy, for every connection:
   - the destination port is in LEGUMISTA_EGRESS_PORTS (default 80,443)
   - every address the host resolves to is public (`tools_native._ip_is_blocked`)
   - plain http carries GET or HEAD only: htslib reads; it never needs to send
+  - the client may send at most LEGUMISTA_EGRESS_MAX_SEND_BYTES (default 64 KiB) on one
+    connection: enough for any read's requests, and a hard bound on an upload
   - the connection is closed after LEGUMISTA_EGRESS_IDLE_SECONDS without traffic
     (default 60) and after LEGUMISTA_EGRESS_MAX_SECONDS in all (default 900)
 
@@ -42,6 +44,11 @@ import urllib.parse
 PORTS = {int(p) for p in os.environ.get("LEGUMISTA_EGRESS_PORTS", "80,443").split(",")
          if p.strip()}
 IDLE_SECONDS = int(os.environ.get("LEGUMISTA_EGRESS_IDLE_SECONDS", "60"))
+# Reads send almost nothing: one request per connection, under 1.2 KB measured for
+# region queries and whole-file streams alike. Uploads send the data. Over https the
+# method is hidden inside TLS, so this byte budget is what bounds an upload through an
+# output option the argv guard does not know about.
+MAX_SEND_BYTES = int(os.environ.get("LEGUMISTA_EGRESS_MAX_SEND_BYTES", str(64 * 1024)))
 MAX_SECONDS = int(os.environ.get("LEGUMISTA_EGRESS_MAX_SECONDS", "900"))
 _MAX_HEAD = 64 * 1024
 
@@ -112,8 +119,10 @@ def _reply(client, status: int, reason: str, detail: str) -> None:
         return
 
 
-def _relay(client, upstream) -> None:
-    """Copy bytes both ways until either side closes, goes idle, or time runs out."""
+def _relay(client, upstream, sent: int = 0) -> None:
+    """Copy bytes both ways until either side closes, goes idle, or time runs out, or
+    the client tries to send more than MAX_SEND_BYTES (`sent` counts what it already
+    has). The chunk that would cross the budget is dropped, not forwarded."""
     deadline = time.monotonic() + MAX_SECONDS
     peers = {client: upstream, upstream: client}
     while True:
@@ -127,6 +136,10 @@ def _relay(client, upstream) -> None:
             data = sock.recv(65536)
             if not data:
                 return
+            if sock is client:
+                sent += len(data)
+                if sent > MAX_SEND_BYTES:
+                    return
             peers[sock].sendall(data)
 
 
@@ -163,6 +176,8 @@ def _serve(client) -> None:
             upstream = _connect(*resolve(*_split_authority(target)))
             client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
             relaying = True
+            if len(tail) > MAX_SEND_BYTES:
+                return
             if tail:
                 upstream.sendall(tail)
         elif method in ("GET", "HEAD"):
@@ -180,7 +195,7 @@ def _serve(client) -> None:
             return _reply(client, 405, "Method Not Allowed",
                           f"{method} is not allowed: the genomics tools only read")
         relaying = True
-        _relay(client, upstream)
+        _relay(client, upstream, sent=len(tail))
     except Refused as e:
         _reply(client, 403, "Forbidden", str(e))
     except OSError as e:

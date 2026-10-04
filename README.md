@@ -114,7 +114,8 @@ size limit, and reaches the network only through a built-in egress proxy. The pr
 refuses any destination that is not a public address — checked on every connection,
 so a redirect from a public URL to a private one (a cloud metadata endpoint, say) is
 refused too — and connects to the exact address it checked. Any public host stays
-readable.
+readable. Nothing is ever written to a remote host: an output URL is refused, and the
+proxy caps what a connection may send far below any useful upload.
 
 ### LIS Data Store — the resident catalog
 
@@ -378,6 +379,7 @@ client refreshes it.
 | `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional allowlist of `scheme://host[/path]` prefixes the genomics tools may open, matched by host. Unset, any public host is allowed |
 | `LEGUMISTA_INDEX_TTL` | Seconds a downloaded remote index (`.tbi`/`.bai`/`.csi`) is reused before it is fetched again. Indexes are cached per URL. Default `3600` |
 | `LEGUMISTA_EGRESS_PORTS` | Ports the genomics tools may connect to. Default `80,443` |
+| `LEGUMISTA_EGRESS_MAX_SEND_BYTES` | Most a genomics connection may send. Reads send about 1 KB; this bounds an upload. Default `65536` |
 | `LEGUMISTA_EGRESS_IDLE_SECONDS` / `LEGUMISTA_EGRESS_MAX_SECONDS` | When a genomics connection is dropped: idle, and in total. Defaults `60` / `900` |
 | `LEGUMISTA_PYSAM_TIMEOUT` | Seconds before a `samtools`/`bcftools` call is killed. Default `300` |
 | `LEGUMISTA_PYSAM_WORKERS` | How many `samtools`/`bcftools` calls may run at once. Default `4` |
