@@ -160,10 +160,12 @@ surface; nearly all of samtools/bcftools is available.
 **Reads vs writes.** Read subcommands (samtools `view`/`flagstat`/`idxstats`/`stats`/
 `depth`/`coverage`, bcftools `view`/`query`/`stats`, and the two helpers) work by default.
 Operations that write a file — samtools `sort`/`index`/`markdup`, bcftools `call`/`norm`/
-`index`, `tabix_index`, or any read subcommand given an output flag like `-o` — are refused
-unless the run was started with write access (`--allow-write`). If you get a "writes are
-disabled" message, don't retry; report that the step needs write access. Path arguments are
-confined to the project workspace.
+`index`, `tabix_index`, or a read subcommand given an output option (`-o`, `view -U`,
+`fastq -1`, …) or any option outside its read-only list — are refused unless the run was
+started with write access (`--allow-write`). If you get a "writes are disabled" message,
+don't retry with another flag; report that the step needs write access. Path arguments are
+confined to the project workspace; pass a data file alone (no `##idx##`) — its index is
+found beside it.
 
 ---
 

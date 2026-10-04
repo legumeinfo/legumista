@@ -35,6 +35,8 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
     on-disk cache, conditional GETs, and the background poller.
   - `webhook.py` — `POST /catalog/refresh`, authenticated with GitHub's HMAC scheme.
   - `tools_lis.py`, `tools_mine.py`, `tools_native.py`, `tools_local.py`, `tools_pysam.py`.
+  - `_pysam_worker.py` — runs one `samtools`/`bcftools` call in a child process for
+    `tools_pysam` (standalone: stdlib + pysam only).
 - `legumista_assets/prompts/tools_native.md` — the tool-use doctrine served as the MCP
   server's `instructions`. Package data; editing it changes what every client is told.
 - `compose.yaml` / `.env.example` — the deployment path: builds the image from the
@@ -43,8 +45,9 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 - **The catalog is not in this repository.** It is a build artifact of
   [LIS-autocontent](https://github.com/legumeinfo/LIS-autocontent)'s `populate-catalog`,
   published as a release asset and downloaded at startup (`LEGUMISTA_CATALOG_URL`), then
-  cached. A local `catalog.json` pins the server to it and is gitignored — useful offline,
-  never committed.
+  cached. `LEGUMISTA_CATALOG_PATH` pins the server to a local file — useful offline. The
+  pin is never discovered from the cwd or checkout root: by default those are the
+  workspace the write tools can write into.
 
 ## Working in this repository
 
@@ -54,11 +57,20 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 - **Read vs write.** Read-only is the default everywhere. Write-capable tools declare a
   per-call `writes(args)` classifier, because a dispatcher like `samtools` reads on `view`
   and writes on `sort`. The MCP server has no permission gate, so `--allow-write` is the
-  only control: without it, write subcommands fail closed.
+  only control: without it, write subcommands fail closed. For the dispatchers a read is
+  an **allowlist** (`_SAM_SPEC`/`_BCF_SPEC` in `tools_pysam.py`: each read subcommand's
+  side-effect-free options, from the bundled CLI source); anything not listed is a write.
+  Never turn it back into a denylist of output flags — `view -U`, `fastq -1` and getopt
+  abbreviations like `--out` all slipped past one.
 - **Local paths are sandboxed.** Every local file argument passes `_sandbox_path`
-  (`tools_native.py`), which confines it to `config.WORKSPACE`, refuses dotfiles and
-  secret-like names, and rewrites to absolute so the process cwd is irrelevant. Its
+  (`tools_native.py`), which confines it to `config.WORKSPACE`, refuses dotfiles,
+  secret-like names and the server's own catalog/cache, and rewrites to absolute. Its
   consumer is `tools_pysam`. Do not bypass it when adding a tool that takes a path.
+  htslib's `##idx##` syntax hides a second path inside one token, so it is refused.
+  `samtools`/`bcftools` calls run in `_pysam_worker.py` child processes, with a timeout,
+  a file-size rlimit, and htslib's scratch directory as cwd, so a bare name the guard
+  could not recognise as a path never resolves against the workspace or the launch
+  directory.
 - **No metadata HTTP to data.legumeinfo.org.** The `lis_*` tools answer from
   `catalog.json`, not by crawling the store. The two remaining reads there are *data*
   (a gene-models BED, a synonym file), not metadata. Keep it that way: a metadata question

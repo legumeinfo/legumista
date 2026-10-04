@@ -330,3 +330,143 @@ def test_binary_output_refused_even_without_o(fixtures):
 def test_samtools_binary_output_points_at_sort(fixtures):
     out = _sam(["view", "-b", "-o", "out.bam", "reads.sorted.bam"], allow_write=True)
     assert "cannot emit BAM" in out and "samtools sort" in out
+
+
+# --- htslib's ##idx## composite syntax smuggles a second, unchecked path --------------
+def test_composite_index_url_is_refused_not_split():
+    """`data##idx##index`: the guard used to see one public URL while htslib fetched the
+    index from the second one — here, the cloud metadata endpoint."""
+    tok = "https://example.org/x.bam##idx##http://169.254.169.254/latest/meta-data/"
+    _, err = P._guard_argv(["view", "-c", tok])
+    assert err and "##idx##" in err
+    assert P._validate_remote(tok)[1]
+
+
+def test_composite_index_local_path_is_refused(fixtures):
+    """The local form realpath-checks as one workspace path, but htslib opens the part
+    after ##idx## as an index from anywhere on disk."""
+    out = _sam(["view", "-c", "reads.sorted.bam##idx##../outside.bai", "chr1"])
+    assert "##idx##" in out and out.startswith("error")
+    assert "##idx##" in _sam(["sort", "-o", "s.bam", "reads.sorted.bam##idx##/x.bai"],
+                             allow_write=True)
+    assert "##idx##" in P._fasta_fetch({"path": "genome.fa##idx##/etc/x.fai",
+                                        "region": "chr1:1-5"})
+
+
+# --- reads are an allowlist: anything else is a write ---------------------------------
+@pytest.mark.parametrize("args, flag", [
+    (["view", "-q", "30", "-U", "rejects.sam", "reads.sorted.bam"], "-U"),
+    (["view", "--unoutput", "rejects.sam", "reads.sorted.bam"], "--unoutput"),
+    (["view", "--unout", "rejects.sam", "reads.sorted.bam"], "--unout"),   # getopt abbrev
+    (["view", "--out=rejects.sam", "reads.sorted.bam"], "--out"),
+    (["view", "--save-counts", "rejects.txt", "reads.sorted.bam"], "--save-counts"),
+    (["view", "--write-index", "-c", "reads.sorted.bam"], "--write-index"),
+    (["view", "-hU", "rejects.sam", "reads.sorted.bam"], "-U"),             # in a cluster
+    (["fastq", "-0", "rejects.fq", "reads.sorted.bam"], "-0"),
+    (["fastq", "-s", "rejects", "reads.sorted.bam"], "-s"),
+    (["fasta", "--i1", "rejects.fa", "reads.sorted.bam"], "--i1"),
+    (["stats", "-S", "RG", "-P", "rejects", "reads.sorted.bam"], "-S"),
+    (["depth", "-f", "files.txt"], "-f"),                     # a file of filenames
+    (["view", "--input-fmt-option", "reference=/etc/hosts", "reads.sorted.bam"],
+     "--input-fmt-option"),
+])
+def test_output_options_of_read_subcommands_are_writes(fixtures, args, flag):
+    """Each of these is a read subcommand writing a file through an option a denylist of
+    -o/--output never knew about — with writes off, each used to create its file."""
+    out = _sam(args)
+    assert "writes are disabled" in out and f"'{flag}'" in out
+    assert P._mk_writes(P._SAM_READ)({"args": args}) is True
+    assert not any(p.name.startswith("rejects") for p in fixtures.iterdir())
+
+
+def test_bcftools_output_options_are_writes(fixtures):
+    for args in (["view", "-W", "-o", "x.vcf.gz", "variants.vcf.gz"],
+                 ["query", "-v", "list.txt", "-f", "%POS\n"],
+                 ["csq", "--dump-gff", "x.gff", "variants.vcf.gz"],
+                 ["roh", "-e", "GT,samples.txt", "variants.vcf.gz"]):
+        assert "writes are disabled" in _bcf(args), args
+
+
+def test_read_argv_parses_getopt_forms(fixtures):
+    """Clusters, attached values and --long=value all still work as reads."""
+    assert _sam(["view", "-c", "-q30", "reads.sorted.bam"]).strip() == "5"
+    assert _sam(["view", "-cq", "30", "reads.sorted.bam"]).strip() == "5"
+    assert _sam(["view", "--count", "--min-MQ=30", "reads.sorted.bam"]).strip() == "5"
+    assert "rs1" in _bcf(["view", "-H", "-r", "chr1:1-20", "variants.vcf.gz"])
+    assert "rs1" in _bcf(["query", "-f", "%ID\n", "--regions=chr1:1-20",
+                          "variants.vcf.gz"])
+
+
+def test_read_input_file_options_are_sandboxed_even_as_bare_names(fixtures):
+    """An input-file option is known to take a file, so its value is sandboxed whatever
+    it looks like — attached, bare, or as --long=value."""
+    assert "outside the project workspace" in _sam(["view", "-c", "-T/etc/hosts",
+                                                    "reads.sorted.bam"])
+    assert "outside the project workspace" in _sam(["view", "-c", "--reference=/etc/hosts",
+                                                    "reads.sorted.bam"])
+    guarded, _, err = P._read_argv(P._SAM_READ, "view", ["-c", "-L", "targets",
+                                                         "reads.sorted.bam"])
+    assert err is None and guarded[2] == str(fixtures / "targets")
+    assert "dotfile" in _sam(["view", "-c", "-L", ".env", "reads.sorted.bam"])
+
+
+def test_read_format_options_cannot_name_a_file(fixtures):
+    assert "{" in _sam(["flagstat", "-O", "json", "reads.sorted.bam"])
+    assert "refused format" in _sam(["flagstat", "-O", "json,reference=/etc/hosts",
+                                     "reads.sorted.bam"])
+
+
+# --- the worker process ---------------------------------------------------------------
+def test_bare_output_name_lands_in_scratch_not_cwd_or_workspace(fixtures, tmp_path,
+                                                                monkeypatch):
+    """A bare name the guard cannot recognise as a path used to resolve against the
+    server's cwd — outside the workspace, dotfiles included. The worker's cwd is htslib's
+    scratch directory, so such a name can only ever land there."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    out = _sam(["view", "-q", "30", "-U", "bare", "reads.sorted.bam"], allow_write=True)
+    assert "read3" in out
+    assert not (elsewhere / "bare").exists() and not (fixtures / "bare").exists()
+    assert os.path.exists(os.path.join(P._scratch_dir(), "bare"))
+
+
+def test_fastq_output_is_captured_not_leaked(fixtures, capfd):
+    """samtools fastq writes to fd 1 directly. In-process that went to the server's own
+    stdout — the stdio transport's JSON-RPC stream — and the tool returned nothing."""
+    out = _sam(["fastq", "reads.sorted.bam"])
+    assert out.startswith("@read0") and "ACGTACGTAC" in out
+    assert "ACGTACGTAC" not in capfd.readouterr().out
+
+
+def test_a_stuck_dispatch_is_killed_and_does_not_block_others(fixtures, monkeypatch):
+    """A FIFO nobody writes stands in for a remote host that never answers."""
+    import threading
+    monkeypatch.setattr(P, "TIMEOUT", 2)
+    os.mkfifo(fixtures / "stuck.sam")
+    result = {}
+    stuck = threading.Thread(target=lambda: result.setdefault(
+        "out", _sam(["view", "-c", "stuck.sam"])))
+    stuck.start()
+    assert _sam(["view", "-c", "reads.sorted.bam"]).strip() == "5"   # not serialized
+    stuck.join(10)
+    assert "ran past the 2s limit" in result["out"]
+
+
+def test_file_size_limit_stops_a_runaway_write(fixtures, monkeypatch):
+    monkeypatch.setattr(P, "READ_FILE_BYTES", 200)
+    out = _sam(["view", "-h", "reads.sorted.bam"])
+    assert "200-byte limit" in out and "a read only needs" in out
+    monkeypatch.setattr(P, "MAX_FILE_BYTES", 200)
+    out = _bcf(["view", "-o", "big.vcf", "variants.vcf.gz"], allow_write=True)
+    assert "200-byte limit" in out
+
+
+def test_allowed_urls_match_by_host_not_string_prefix():
+    allow = ["https://data.legumeinfo.org"]
+    assert P._url_allowed("https://data.legumeinfo.org/Glycine/x.bam", allow)
+    assert not P._url_allowed("https://data.legumeinfo.org.evil.example/x.bam", allow)
+    assert not P._url_allowed("https://data.legumeinfo.org@evil.example/x.bam", allow)
+    assert not P._url_allowed("http://data.legumeinfo.org/x.bam", allow)
+    assert P._url_allowed("https://h.example/a/b.bam", ["https://h.example/a/"])
+    assert not P._url_allowed("https://h.example/c/b.bam", ["https://h.example/a/"])

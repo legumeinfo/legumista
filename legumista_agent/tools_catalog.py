@@ -32,8 +32,8 @@ report how to enable them and every other tool is unaffected.
 The catalog is a build artifact of ``lis-autocontent populate-catalog``, not source. It
 is no longer vendored in the repository: it is fetched from a published URL and cached on
 disk (see ``catalog_source``), so a rebuilt catalog reaches a running server without a
-code release. A local ``catalog.json`` at the install root or in the working directory
-still wins over the cache, which is the pin/offline path.
+code release. ``LEGUMISTA_CATALOG_PATH`` names a local file that wins over the cache,
+which is the pin/offline path.
 
 Every catalog carries the datastore-metadata commit it was built from, and every tool
 answer repeats it, so a stale copy announces itself rather than being discovered.
@@ -42,6 +42,8 @@ Reloading is a hot swap: ``refresh()`` validates a download before building a ne
 controller, and only then rebinds it under the lock. Readers hold the old controller for
 the length of one call, so an in-flight tool never sees a half-swapped catalog.
 
+    LEGUMISTA_CATALOG_PATH   optional: pin the server to this catalog.json (nothing is
+                             downloaded, polling is off, the webhook reports "pinned")
     LEGUMISTA_DSCENSOR_PATH  optional: a dscensor source checkout, for running against
                              a working tree instead of an installed package
 """
@@ -52,21 +54,20 @@ import re
 import sys
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from . import catalog_source
 from .tool import Tool
 from .tools_native import _cap
 
-# A local `catalog.json` pins the server to that file: the repo/install root (a source
-# checkout) then the working directory (what a `-v ...:/work/catalog.json` mount lands
-# on). Neither present, the downloaded cache is used. Nothing here is configurable by
-# path — a different catalog is a different URL, or a mounted file.
-_CANDIDATES = (
-    Path(__file__).resolve().parent.parent / "catalog.json",
-    Path.cwd() / "catalog.json",
-)
-CATALOG_PATH = next((str(p) for p in _CANDIDATES if p.is_file()), "")
+# A pinned catalog is operator configuration, so it comes from the environment and is
+# fixed when the server starts. It used to be discovered — a `catalog.json` in the working
+# directory or the checkout root — but both of those are, by default, the WORKSPACE that
+# the genomics tools may write into: one file written there silently repointed every
+# lis_* tool at content a tool call chose, switched off the refresh that would have
+# replaced it, and survived a restart. Nothing a tool can write may change the server's
+# mode, so nothing is looked for; `_sandbox_path` also refuses to address this file.
+CATALOG_PATH = (os.path.abspath(os.environ["LEGUMISTA_CATALOG_PATH"])
+                if os.environ.get("LEGUMISTA_CATALOG_PATH") else "")
 DSCENSOR_PATH = os.environ.get("LEGUMISTA_DSCENSOR_PATH", "")
 
 _STATE = {"controller": None, "error": None, "loaded": False, "path": ""}
@@ -79,23 +80,15 @@ def _unavailable_text() -> str:
         f"The catalog is normally downloaded at startup from {catalog_source.catalog_url()} "
         f"and cached at {catalog_source.cache_path()}; a failed download leaves the tools "
         "unavailable rather than serving stale data.\n"
-        "To fix: check network access to that URL, or place a `catalog.json` in the "
-        "working directory to pin one explicitly."
+        "To fix: check network access to that URL, or set LEGUMISTA_CATALOG_PATH to a "
+        "catalog.json to pin one explicitly."
     )
 
 
-def _pinned_path() -> str:
-    """A local catalog.json, if one is present. Takes precedence over the cache."""
-    return next((str(p) for p in _CANDIDATES if p.is_file()), "")
-
-
 def _resolve_path() -> str:
-    """Where to load from: an explicit override, a local file, then the cache."""
+    """Where to load from: the pinned file, then the cache."""
     if CATALOG_PATH:
         return CATALOG_PATH
-    local = _pinned_path()
-    if local:
-        return local
     cached = catalog_source.cache_path()
     return str(cached) if cached.is_file() else ""
 
@@ -121,9 +114,8 @@ def controller():
         path = _resolve_path()
         if not path:
             _STATE["error"] = (
-                "no catalog.json at "
-                + " or ".join(str(p) for p in _CANDIDATES)
-                + f", and nothing cached at {catalog_source.cache_path()}"
+                "LEGUMISTA_CATALOG_PATH is unset and nothing is cached at "
+                f"{catalog_source.cache_path()}"
             )
             return None
         ctl, err = _build(path)
@@ -157,8 +149,8 @@ def source_path() -> str:
 
 
 def is_pinned() -> bool:
-    """True when a local catalog.json is in force, so downloads do not apply."""
-    return bool(CATALOG_PATH or _pinned_path())
+    """True when LEGUMISTA_CATALOG_PATH pins a local catalog, so downloads do not apply."""
+    return bool(CATALOG_PATH)
 
 
 def refresh(*, force: bool = False) -> dict:
@@ -173,8 +165,8 @@ def refresh(*, force: bool = False) -> dict:
     """
     if is_pinned():
         return {"status": "pinned", "reloaded": False,
-                "detail": f"a local catalog.json ({_resolve_path()}) is in force; "
-                          "remove it to serve the published catalog",
+                "detail": f"LEGUMISTA_CATALOG_PATH pins {_resolve_path()}; unset it "
+                          "to serve the published catalog",
                 "url": catalog_source.catalog_url()}
 
     report = catalog_source.fetch(force=force)

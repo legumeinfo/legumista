@@ -9,7 +9,10 @@ A tiny catalog document stands in for the real one, so the tests pin our wiring
 rather than the contents of the datastore.
 """
 import json
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -115,7 +118,6 @@ def catalog(tmp_path, monkeypatch):
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(CATALOG), encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(path))
-    monkeypatch.setattr(C, "_CANDIDATES", ())   # the fixture must win
     # lis_lineage checks each DOI's retraction status; answer "no notices" by default so
     # no test depends on the network guard's STATUS UNKNOWN text. Tests about flags
     # override this.
@@ -130,7 +132,6 @@ def catalog(tmp_path, monkeypatch):
 @pytest.fixture
 def no_catalog(monkeypatch):
     monkeypatch.setattr(C, "CATALOG_PATH", "")
-    monkeypatch.setattr(C, "_CANDIDATES", ())  # and no real catalog on disk either
     C.reset()
     yield
     C.reset()
@@ -165,7 +166,6 @@ def test_a_broken_catalog_does_not_raise(tmp_path, monkeypatch):
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(bad))
-    monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     try:
         assert "no LIS catalog is loaded" in _survey()
@@ -179,7 +179,6 @@ def test_unsupported_schema_is_refused_not_guessed(tmp_path, monkeypatch):
     future = tmp_path / "future.json"
     future.write_text(json.dumps({"schema": 99, "collections": []}), encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(future))
-    monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     try:
         assert "no LIS catalog is loaded" in _survey()
@@ -396,7 +395,6 @@ def _publish(monkeypatch, doc=None, raw=None, headers=None):
 def unpinned(monkeypatch):
     """No local catalog.json anywhere, so the cache and the network are in play."""
     monkeypatch.setattr(C, "CATALOG_PATH", "")
-    monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     yield
     C.reset()
@@ -439,6 +437,36 @@ def test_refresh_is_a_no_op_while_a_local_catalog_is_pinned(catalog, monkeypatch
     report = C.refresh(force=True)
     assert report["status"] == "pinned" and report["reloaded"] is False
     assert calls == [], "a pinned server must not fetch"
+
+
+def test_a_catalog_json_in_the_working_directory_does_not_pin(unpinned, tmp_path,
+                                                              monkeypatch):
+    """Regression: the pin used to be discovered in the working directory, which by
+    default is also the genomics tools' writable workspace. One tool call that wrote a
+    catalog.json there took over every lis_* answer and switched refresh off."""
+    monkeypatch.chdir(tmp_path)
+    forged = {**CATALOG, "source_commit": "f0f0f0f0f0f0f0f0"}
+    (tmp_path / "catalog.json").write_text(json.dumps(forged), encoding="utf-8")
+    assert C.is_pinned() is False
+    _publish(monkeypatch, CATALOG)
+    assert C.refresh()["status"] == "updated"
+    assert C.controller().provenance()["source_commit"] == "abc123def4567890"
+
+
+def test_the_pin_is_read_from_the_environment_once_at_import(tmp_path):
+    root = Path(__file__).resolve().parent.parent
+    (tmp_path / "catalog.json").write_text("{}", encoding="utf-8")
+    code = "from legumista_agent import tools_catalog as C; print(C.CATALOG_PATH)"
+
+    def pinned(**env):
+        base = {k: v for k, v in os.environ.items() if k != "LEGUMISTA_CATALOG_PATH"}
+        proc = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, text=True,
+                              env={**base, "PYTHONPATH": str(root), **env},
+                              capture_output=True, check=True)
+        return proc.stdout.strip()
+
+    assert pinned() == "", "a catalog.json in the cwd must not pin the server"
+    assert pinned(LEGUMISTA_CATALOG_PATH="pin.json") == str(tmp_path / "pin.json")
 
 
 def test_startup_falls_back_to_the_cache_when_the_network_is_down(unpinned, monkeypatch):
@@ -534,7 +562,6 @@ def test_survey_lists_every_species_that_matches(tmp_path, monkeypatch):
     path = tmp_path / "many.json"
     path.write_text(json.dumps(dict(CATALOG, collections=colls)), encoding="utf-8")
     monkeypatch.setattr(C, "CATALOG_PATH", str(path))
-    monkeypatch.setattr(C, "_CANDIDATES", ())
     C.reset()
     try:
         out = _survey(needs=["genomes"])

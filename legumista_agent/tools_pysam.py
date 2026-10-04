@@ -13,16 +13,26 @@ index (a write).
 
 Read vs write, and the permission model:
 - The read-only helpers are always available.
-- The dispatchers classify each call: a subcommand in the per-tool read-only allowlist
-  with no output-file flag is a read (allowed by default); anything else is a **write**
-  and runs only when the server was started with `legumista mcp --allow-write`. The MCP
-  server has no permission gate, so that flag is the sole control and the classifier is
-  enforced by the tool's own guard — writes fail closed without it.
+- The dispatchers classify each call against an ALLOWLIST: a read is a subcommand in
+  `_SAM_READ`/`_BCF_READ` using only the options listed for it there, each of which was
+  checked against the bundled CLI source to have no filesystem side effect. Anything else
+  — another subcommand, an output option (`-o`, `view -U`, `fastq -1`, `--write-index`),
+  an option this table does not know, a getopt abbreviation of one it does — is a
+  **write**, and runs only when the server was started with `legumista mcp
+  --allow-write`. The MCP server has no permission gate, so that flag is the sole control
+  and the classifier is enforced by the tool's own guard — writes fail closed without it.
+  A denylist of output flags cannot be made complete over two CLIs this size; an
+  allowlist fails closed when either CLI grows a new option.
 
-Safety, matching tools_native.py: pysam/htslib I/O is offloaded with `asyncio.to_thread`;
-local path arguments are confined to the workspace by the shared `_sandbox_path` guard
-and rewritten to absolute so the process cwd is irrelevant; http(s) URL
-arguments pass the native SSRF guard (other schemes refused). pysam is a dependency of
+Safety, matching tools_native.py: local path arguments are confined to the workspace by
+the shared `_sandbox_path` guard and rewritten to absolute; http(s) URL arguments pass
+the native SSRF guard (other schemes refused); htslib's `##idx##` composite syntax, which
+smuggles a second, unchecked path or URL inside one token, is refused outright. Each
+dispatch runs in a child process (`_pysam_worker.py`) with a wall-clock timeout and a
+per-file size limit, in htslib's own scratch directory rather than the workspace or the
+server's cwd — so a bare filename can never reach a file the sandbox did not vet, and a
+stuck call is killed rather than stalling every other one. The helpers use pysam's
+Python API in-process (offloaded with `asyncio.to_thread`). pysam is a dependency of
 legumista, imported lazily (only when a genomics tool actually runs) so the heavy htslib
 extension isn't loaded by sessions that never touch a genomics tool.
 
@@ -31,22 +41,40 @@ Coordinates: `region` in the helpers is samtools-style — `seqid`, `seqid:start
 """
 import asyncio
 import importlib
+import json
 import os
 import re
+import subprocess
+import sys
+import tempfile
 import threading
-
-import config
+import urllib.parse
 
 from .tool import Tool
-from .tools_native import BlockedURLError, _cap, _sandbox_path, _validate_url
+from .tools_native import MAX_CHARS, BlockedURLError, _cap, _sandbox_path, _validate_url
 
 MAX_RECORDS = int(os.environ.get("LEGUMISTA_PYSAM_MAX_RECORDS", "200"))
 MAX_SEQ = int(os.environ.get("LEGUMISTA_PYSAM_MAX_SEQ", "100000"))
 
-# pysam's CLI dispatchers redirect the process's stdout to capture output, which is not
-# reentrant — serialize dispatcher calls (they run in `to_thread` workers, possibly
-# concurrently under the MCP server).
-_DISPATCH_LOCK = threading.Lock()
+# --- dispatch workers ----------------------------------------------------------------
+# Every samtools/bcftools call runs in a killable child process (see _pysam_worker.py).
+#   TIMEOUT          wall-clock seconds before a dispatch is killed
+#   WORKERS          dispatches that may run at once; further calls queue (up to TIMEOUT)
+#   MAX_FILE_BYTES   the largest file one WRITE dispatch may produce (0: no limit)
+# A read dispatch writes nothing but its captured stdout and htslib's cached copy of a
+# remote index, so it gets a far smaller ceiling: only MAX_CHARS of that stdout is ever
+# shown, and the ceiling is what stops `view` of a whole remote BAM filling the disk.
+TIMEOUT = int(os.environ.get("LEGUMISTA_PYSAM_TIMEOUT", "300"))
+WORKERS = max(1, int(os.environ.get("LEGUMISTA_PYSAM_WORKERS", "4")))
+MAX_FILE_BYTES = int(os.environ.get("LEGUMISTA_PYSAM_MAX_FILE_BYTES", str(4 << 30)))
+READ_FILE_BYTES = min(64 << 20, MAX_FILE_BYTES or 64 << 20)
+_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_pysam_worker.py")
+_WORKER_SLOTS = threading.BoundedSemaphore(WORKERS)
+_SCRATCH = {"dir": ""}
+
+# tabix_index runs in-process (pysam's Python API, not the CLI dispatcher) and bgzips
+# its input in place, so two concurrent calls on one file must not interleave.
+_INDEX_LOCK = threading.Lock()
 
 
 # pysam's manylinux wheels vendor their own libcurl + OpenSSL (see pysam.libs/), built in
@@ -101,16 +129,54 @@ def _is_url(tok: str) -> bool:
     return bool(re.match(r"(?i)^[a-z][a-z0-9+.-]*://", tok or ""))
 
 
+# htslib reads `data.bam##idx##index.bai` as "this data file, with THAT index". The
+# second half is opened by htslib itself, after every check here has looked at the token
+# as one string: a public URL can name a metadata-endpoint index, and a workspace path a
+# local index anywhere on disk. htslib finds a sibling index without help, so the syntax
+# is refused rather than split and checked.
+_IDX_DELIM = "##idx##"
+
+
+def _refuse_composite(tok: str):
+    if _IDX_DELIM in (tok or ""):
+        return (f"error: refused {tok!r} — htslib's '{_IDX_DELIM}' syntax names a second "
+                "file the sandbox cannot check. Pass the data file alone; its index "
+                "(.bai/.csi/.crai/.tbi) is found beside it automatically.")
+    return None
+
+
+def _url_allowed(url: str, prefixes: list) -> bool:
+    """Match `url` against LEGUMISTA_PYSAM_ALLOWED_URLS entries by parsed scheme, host and
+    port, then path prefix. A plain string prefix is not enough: the entry
+    `https://data.legumeinfo.org` would also admit `https://data.legumeinfo.org.evil.com/`.
+    """
+    u = urllib.parse.urlparse(url)
+    for prefix in prefixes:
+        p = urllib.parse.urlparse(prefix)
+        try:
+            same_origin = (u.scheme.lower() == p.scheme.lower()
+                           and (u.hostname or "") == (p.hostname or "")
+                           and u.port == p.port)
+        except ValueError:                      # a malformed port in either URL
+            continue
+        if same_origin and u.path.startswith(p.path):
+            return True
+    return False
+
+
 def _validate_remote(url: str):
     """Vet an http(s) URL argument (SSRF guard + optional allowlist). Returns (url, None)
     or (None, error). Non-http(s) schemes are refused — htslib does its own I/O, so we
     only permit transports we can check up front."""
+    err = _refuse_composite(url)
+    if err:
+        return None, err
     if not re.match(r"(?i)^https?://", url):
         return None, (f"error: refused URL scheme {url.split('://', 1)[0]!r} — only "
                       "http(s) URLs and local workspace files are allowed")
     allow = [p.strip() for p in os.environ.get("LEGUMISTA_PYSAM_ALLOWED_URLS", "").split(",")
              if p.strip()]
-    if allow and not any(url.startswith(p) for p in allow):
+    if allow and not _url_allowed(url, allow):
         return None, "error: refused — URL is not in LEGUMISTA_PYSAM_ALLOWED_URLS allowlist"
     try:
         _validate_url(url)
@@ -125,6 +191,9 @@ def _resolve_source(src: str):
     src = (src or "").strip()
     if not src:
         return None, "error: missing file 'path' (a workspace file or an http(s) URL)"
+    err = _refuse_composite(src)
+    if err:
+        return None, err
     if _is_url(src):
         return _validate_remote(src)
     return _sandbox_path(src)
@@ -167,12 +236,19 @@ def _short_attached_path(tok: str) -> bool:
 
 
 def _guard_argv(argv: list):
-    """Confine every path/URL token in a dispatcher argv. Path tokens are workspace-
-    sandboxed and rewritten to absolute realpaths (so cwd is irrelevant); URL tokens pass
-    the SSRF guard and are kept verbatim; everything else passes through. Returns
-    (new_argv, None) or (None, error_text)."""
+    """Confine every path/URL token in a WRITE dispatcher argv. Path tokens are workspace-
+    sandboxed and rewritten to absolute realpaths; URL tokens pass the SSRF guard and are
+    kept verbatim; everything else passes through, and resolves (if the CLI opens it at
+    all) inside the worker's scratch directory. Returns (new_argv, None) or
+    (None, error_text).
+
+    This is the heuristic guard for the operator-enabled write mode, where the argv is
+    arbitrary. A read is parsed exactly against its allowlist instead (`_read_argv`)."""
     out, expect_path = [], False
     for tok in argv:
+        err = _refuse_composite(tok)
+        if err:
+            return None, err
         attached = _ATTACHED_LONG_RE.match(tok)
         if attached and attached.group(1) in _PATH_FLAGS:
             flag, value = attached.group(1), attached.group(2)
@@ -245,14 +321,129 @@ def _open_err(e: Exception, target: str) -> str:
 
 
 # --- general dispatchers: samtools / bcftools ---------------------------------------
-# Read-only subcommands (write only to stdout, no filesystem side effects). Anything not
-# listed — or any call carrying an output-file flag — is treated as a write and needs
-# --allow-write. Conservative on purpose: unknown/omitted => write (fail closed).
-_SAM_READ = {"view", "flagstat", "idxstats", "stats", "depth", "coverage", "bedcov",
-             "quickcheck", "head", "dict", "consensus", "fasta", "fastq", "samples",
-             "ampliconstats", "cram_size", "checksum"}
-_BCF_READ = {"view", "query", "stats", "head", "roh", "csq"}
-_OUTPUT_FLAGS = ("-o", "--output", "--output-file")
+# The read allowlist: per subcommand, every option a read may use, taken from the
+# getopt tables of the samtools/bcftools sources pysam bundles. Each entry is a short
+# letter or `--long-name`, suffixed with what follows it:
+#     (nothing)  no argument               =  a value, passed through
+#     <          an INPUT file: workspace-sandboxed or SSRF-checked
+#     %          an output format name (no `,opt=val`: those can name a reference file)
+#     ?          an optional argument, attached only (getopt `::`)
+# Deliberately absent, so they classify as writes: every output-file option (-o,
+# --output, view -U/--unoutput/--save-counts, fasta/fastq -0/-1/-2/-s/--i1/--i2,
+# stats -S/-P, csq --dump-gff, --write-index/-W); options whose argument embeds a path
+# (`--tag-file STR:FILE`, `--input-fmt-option reference=FILE`, roh `-e TAG,FILE`); and
+# files-of-filenames (depth -f, coverage -b, samples -F, query -v), whose contents name
+# further files the sandbox never sees.
+_SAM_FLAGS = "--verbosity= --threads= @="
+_FASTX = ("n i N O t U f= F= G= c= T= v= d= --no-sc --no-sc-bkp --UMI --require-flags= "
+          "--excl-flags= --exclude-flags= --rf= --incl-flags= --include-flags= --if= --IF= "
+          "--index-format= --barcode-tag= --quality-tag= --tag= --sc-aux= --UMI-tag= "
+          f"--reference< {_SAM_FLAGS}")
+_BCF_REGIONS = ("r= t= R< T< --regions= --targets= --regions-overlap= --targets-overlap= "
+                "--regions-file< --targets-file< --verbosity=")
+_SAM_SPEC = {
+    "view": "S b B c C h 1 H u M X p P n q= f= F= G= l= r= s= m= x= e= z= d= t< T< R< "
+            "N< L< O% --bam --count --cram --customised-index --customized-index "
+            "--excl-no-read-group --excl-no-readgroup --exclude-no-read-group "
+            "--exclude-no-readgroup --fast --fetch-pairs --header-only --help --no-header "
+            "--no-PG --remove-B --uncompressed --unmap --use-index --with-header "
+            "--add-flags= --excl-flags= --exclude-flags= --expr= --expression= "
+            "--incl-flags= --include-flags= --rf= --keep-tag= --library= --min-mapq= "
+            "--min-MQ= --min-mq= --min-qlen= --read-group= --readgroup= --remove-flags= "
+            "--remove-tag= --require-flags= --subsample= --subsample-seed= --tag= "
+            "--sanitize= --fai-reference< --QNAME-file< --qname-file< --read-group-file< "
+            "--readgroup-file< --region-file< --regions-file< --target-file< "
+            f"--targets-file< --reference< --output-fmt% {_SAM_FLAGS}",
+    "head": f"h= n= T< --headers= --records= --reference< {_SAM_FLAGS}",
+    "flagstat": f"O% --output-fmt% {_SAM_FLAGS}",
+    "idxstats": f"X {_SAM_FLAGS}",
+    "stats": "? h d s X x p c= l= i= m= q= f= F= g= I= r< t< --help --remove-dups --sam "
+             "--sparse --remove-overlaps --ref-stats --coverage= --read-length= "
+             "--insert-size= --most-inserts= --trim-quality= --required-flag= "
+             "--filtering-flag= --id= --GC-depth= --cov-threshold= --ref-stats-chunk= "
+             f"--ref-seq< --target-regions< --reference< {_SAM_FLAGS}",
+    "depth": "J H a X s q= Q= d= m= l= g= G= r= b< --min-MQ= --min-mq= --min-BQ= "
+             "--min-bq= --excl-flags= --incl-flags= --require-flags= --reference< "
+             f"{_SAM_FLAGS}",
+    "coverage": "A h H m D l= q= Q= w= r= d= --rf= --ff= --incl-flags= --excl-flags= "
+                "--min-read-len= --min-MQ= --min-mq= --min-BQ= --min-bq= --n-bins= "
+                "--region= --depth= --min-depth= --histogram --ascii --plot-depth "
+                "--no-header --help --reference< --verbosity=",
+    "bedcov": "X j H c Q= g= G= d= --min-MQ= --min-mq= --max-depth= --reference< "
+              "--verbosity=",
+    "quickcheck": "v q u",
+    "dict": "? A h H a= s= u= l< --help --no-header --alias --alternative-name "
+            "--assembly= --species= --uri= --alt<",
+    "consensus": "q 5 a A p d= c= H= r= f= C= l= m= X= Z= t< T< --use-qual --no-use-qual "
+                 "--adj-qual --no-adj-qual --use-MQ --no-use-MQ --adj-MQ --no-adj-MQ "
+                 "--ambig --het-only --mark-ins --homopoly-fix --NM-halo= --SC-cost= "
+                 "--scale-MQ= --low-MQ= --high-MQ= --min-depth= --call-fract= "
+                 "--het-fract= --region= --format= --cutoff= --line-len= --default-qual= "
+                 "--show-del= --show-ins= --incl-flags= --rf= --excl-flags= --ff= "
+                 "--min-MQ= --min-BQ= --P-het= --P-indel= --het-scale= --mode= "
+                 "--homopoly-score= --homopoly-redux= --config= --ref-qual= --block-size= "
+                 f"--qual-calibration< --reference< --output-fmt% {_SAM_FLAGS}",
+    "fasta": _FASTX,
+    "fastq": _FASTX,
+    "samples": "? h i X T= f<",
+    "ampliconstats": "? h s S f= F= m= d= a= l= t= c= b= D= --help --use-sample-name "
+                     "--single-ref --flag-require= --flag-filter= --min-depth= "
+                     "--pos-margin= --max-amplicons= --max-amplicon-length= "
+                     "--tlen-adjust= --tcoord-min-count= --tcoord-bin= --depth-bin= "
+                     f"--reference< {_SAM_FLAGS}",
+    "cram_size": "v e --verbose --encodings --verbosity=",
+    "checksum": "c P C M O a v q T m B f= F= t= b= z= N= --no-rev-comp --in-order "
+                "--check-pos --check-cigar --check-mate --show-qc --verbose --all --tabs "
+                "--merge --bamseqchksum --exclude-flags= --require-flags= --flag-mask= "
+                f"--tags= --count= --sanitize= {_SAM_FLAGS}",
+}
+_BCF_SPEC = {
+    "view": "G k n a A u U h H I x X p P l= O= s= f= v= V= m= M= c= C= i= e= q= Q= g= "
+            "S< --header-only --no-header --with-header --trim-alt-alleles "
+            "--trim-unseen-allele --no-update --drop-genotypes --private --exclude-private "
+            "--uncalled --exclude-uncalled --known --novel --force-samples --phased "
+            "--exclude-phased --no-version --genotype= --compression-level= --threads= "
+            "--exclude= --include= --apply-filters= --min-alleles= --max-alleles= "
+            "--samples= --output-type= --types= --exclude-types= --min-ac= --max-ac= "
+            f"--min-af= --max-af= --samples-file< {_BCF_REGIONS}",
+    "query": "h l H u N F= f= a= s= c= i= e= S< --help --list-samples --force-samples "
+             "--print-header --allow-undef-tags --disable-automatic-newline= --include= "
+             "--exclude= --print-filtered= --format= --annots= --samples= --collapse= "
+             f"--samples-file< {_BCF_REGIONS}",
+    "stats": "h 1 I v? c= e= s= d= i= f= u= S< F< E< --1st-allele-only --help "
+             "--split-by-ID --verbose? --af-tag= --include= --exclude= --collapse= "
+             "--depth= --apply-filters= --samples= --user-tstv= --threads= "
+             f"--samples-file< --fasta-ref< --exons< {_BCF_REGIONS.replace(' --verbosity=', '')} "
+             "--verbosity?",
+    "head": "h= n= s= v= --headers= --records= --samples= --verbosity=",
+    "roh": "h ? I i H= a= s= M= G= V= b= O= v= S< m< --include-noalt --ignore-homref "
+           "--skip-indels --AF-tag= --AF-dflt= --include= --exclude= --buffer-size= "
+           "--output-type= --GTs-only= --samples= --hw-to-az= --az-to-hw= "
+           "--viterbi-training= --rec-rate= --threads= --AF-file< --samples-file< "
+           f"--genetic-map< {_BCF_REGIONS}",
+    "csq": "? h q l b i= e= O= s= p= c= C= n= B= v= f< g< S< --force --help "
+           "--brief-predictions --local-csq --quiet --no-version --genetic-code= "
+           "--threads= --ncsq= --trim-protein-seq= --custom-tag= --include= --exclude= "
+           "--output-type= --phase= --verbose= --samples= --gff-annot< --fasta-ref< "
+           f"--samples-file< {_BCF_REGIONS}",
+}
+
+
+def _parse_spec(text: str):
+    """'q= T< --count' -> ({'q': '=', 'T': '<'}, {'count': ''})."""
+    shorts, longs = {}, {}
+    for entry in text.split():
+        if entry.startswith("--"):
+            name = entry[2:]
+            kind = name[-1] if name[-1] in "=<%?" else ""
+            longs[name[:-1] if kind else name] = kind
+        else:
+            shorts[entry[0]] = entry[1:]
+    return shorts, longs
+
+
+_SAM_READ = {sub: _parse_spec(text) for sub, text in _SAM_SPEC.items()}
+_BCF_READ = {sub: _parse_spec(text) for sub, text in _BCF_SPEC.items()}
 
 
 def _subcommand(args) -> str:
@@ -260,21 +451,111 @@ def _subcommand(args) -> str:
     return str(argv[0]).strip().lower().replace("-", "_") if argv else ""
 
 
-def _mk_writes(readset):
-    """A per-call write classifier for a dispatcher over `readset`."""
+def _guard_positional(tok: str):
+    """A read's positional argument: an input file, a URL, or a region."""
+    if _is_url(tok):
+        return _validate_remote(tok)
+    if _looks_like_path(tok):
+        return _sandbox_path(tok)
+    return tok, None        # a region, or a bare name the worker's scratch cwd defuses
+
+
+def _guard_value(kind: str, value: str):
+    if kind == "<":
+        # An input-file option is sandboxed even as a bare name: we know it is a file.
+        return _validate_remote(value) if _is_url(value) else _sandbox_path(value)
+    if kind == "%" and ("," in value or "=" in value):
+        return None, (f"error: refused format {value!r} — format options (`,opt=val`) "
+                      "can name a reference file; pass the bare format name.")
+    return value, None
+
+
+def _read_argv(readspecs: dict, sub: str, argv: list, guard: bool = True):
+    """Parse a dispatcher argv as a READ of `sub`, getopt-style (short clusters, attached
+    values, `--long=value`, `--`).
+
+    Returns (argv, not_read, error):
+      (guarded, None, None)  a read; input files sandboxed (when `guard`)
+      (None, why, None)      not a read — `why` names the subcommand or option
+      (None, None, err)      a read, but an argument failed the sandbox/SSRF guard
+
+    Long options must be spelled in full: getopt would also accept an abbreviation
+    (`--out` for `--output`), so anything that is not an exact allowlisted name is
+    treated as unknown, and therefore as a write."""
+    if sub not in readspecs:
+        return None, "", None
+    shorts, longs = readspecs[sub]
+    check = _guard_value if guard else (lambda _kind, v: (v, None))
+    out, i, positional_only = [], 0, False
+    while i < len(argv):
+        tok = argv[i]
+        i += 1
+        if positional_only or tok == "-" or not tok.startswith("-"):
+            g, err = _guard_positional(tok) if guard else (tok, None)
+            if err:
+                return None, None, err
+            out.append(g)
+            continue
+        if tok == "--":
+            positional_only = True
+            out.append(tok)
+            continue
+        if tok.startswith("--"):
+            name, eq, attached = tok[2:].partition("=")
+            kind = longs.get(name)
+            if kind is None or (kind == "" and eq):
+                return None, f"--{name}", None
+            if kind in ("", "?"):            # no value, or an optional attached one
+                out.append(tok)
+                continue
+            if not eq and i >= len(argv):
+                out.append(tok)              # missing value: the CLI reports it
+                continue
+            value = attached if eq else argv[i]
+            i += 0 if eq else 1
+            g, err = check(kind, value)
+            if err:
+                return None, None, err
+            out.extend([f"--{name}={g}"] if eq else [tok, g])
+            continue
+        # A cluster of short options: `-bh`, `-q30`, `-Hc`, `-T` `ref.fa`.
+        for j in range(1, len(tok)):
+            kind = shorts.get(tok[j])
+            if kind is None:
+                return None, f"-{tok[j]}", None
+            if kind == "":
+                continue
+            prefix, rest = tok[:j + 1], tok[j + 1:]
+            if kind == "?" or (not rest and i >= len(argv)):
+                out.append(tok)
+            elif rest:
+                g, err = check(kind, rest)
+                if err:
+                    return None, None, err
+                out.append(prefix + g)
+            else:
+                g, err = check(kind, argv[i])
+                i += 1
+                if err:
+                    return None, None, err
+                out.extend([prefix, g])
+            break
+        else:
+            out.append(tok)                  # every letter was a plain flag
+    return out, None, None
+
+
+def _mk_writes(readspecs):
+    """A per-call write classifier for a dispatcher whose reads are `readspecs`."""
     def writes(args) -> bool:
-        argv = args.get("args") or []
+        argv = [str(a) for a in (args.get("args") or [])]
         if not argv:
             return False
-        if _subcommand(args) not in readset:
-            return True
-        for tok in argv[1:]:
-            t = str(tok)
-            attached = _ATTACHED_LONG_RE.match(t)
-            if t in _OUTPUT_FLAGS or (attached and attached.group(1) in _OUTPUT_FLAGS):
-                return True
-        return False
+        return _read_argv(readspecs, _subcommand(args), argv[1:], guard=False)[1] is not None
     return writes
+
+
+_OUTPUT_FLAGS = ("-o", "--output", "--output-file")
 
 
 # `bcftools query -l` prints sample names straight to the process's stdout, bypassing the
@@ -395,19 +676,82 @@ def _extract_output_path(argv: list):
     return out, path, None
 
 
-def _write_output(out, path: str, module_name: str, sub: str) -> str:
-    """Persist a dispatcher's captured stdout to the file the agent asked for."""
-    data = b"" if out is None else (out if isinstance(out, bytes) else str(out).encode())
+def _scratch_dir() -> str:
+    """The worker's cwd: htslib's own scratch space, never the workspace.
+
+    htslib caches a remote file's index in its cwd, and resolves any bare filename the
+    sandbox could not recognise as a path against it. Pointing that at the workspace
+    would let a read leave files there; at the server's cwd, let a bare name reach
+    whatever directory the server was launched from. A directory beside the catalog
+    cache (which the sandbox refuses to address) gives both a harmless home and keeps
+    downloaded indexes across calls."""
+    if _SCRATCH["dir"]:
+        return _SCRATCH["dir"]
+    from .catalog_source import cache_dir
+    path = cache_dir() / "htslib"
     try:
-        with open(path, "wb") as fh:
-            fh.write(data)
-    except OSError as e:
-        return f"error: could not write {os.path.basename(path)}: {e}"
-    name = os.path.basename(path)
-    if not data:
-        return f"({module_name} {sub}: produced no output; wrote empty {name})"
-    lines = data.count(b"\n")
-    return f"wrote {len(data):,} bytes ({lines:,} lines) to {name}"
+        path.mkdir(parents=True, exist_ok=True)
+        _SCRATCH["dir"] = str(path)
+    except OSError:
+        _SCRATCH["dir"] = tempfile.mkdtemp(prefix="legumista-htslib-")
+    return _SCRATCH["dir"]
+
+
+def _run_worker(module_name: str, sub: str, argv: list, out_path, max_file_bytes: int):
+    """Run one dispatch in a child process; return the worker's result dict, or one with
+    `error` set to busy/timeout/crash. Blocks the calling (to_thread) worker thread."""
+    if not _WORKER_SLOTS.acquire(timeout=TIMEOUT):
+        return {"error": "busy"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="legumista-pysam-") as tmp:
+            req_path = os.path.join(tmp, "req.json")
+            with open(req_path, "w", encoding="utf-8") as fh:
+                json.dump({"module": module_name, "sub": sub, "argv": argv,
+                           "out_path": out_path, "head_bytes": MAX_CHARS * 4,
+                           "max_file_bytes": max_file_bytes}, fh)
+            try:
+                # -P: the script's directory and the cwd stay off sys.path, so nothing a
+                # write left in the scratch directory can shadow an import.
+                proc = subprocess.run(
+                    [sys.executable, "-P", _WORKER, req_path],
+                    cwd=_scratch_dir(), stdin=subprocess.DEVNULL,
+                    capture_output=True, timeout=TIMEOUT, check=False)
+            except subprocess.TimeoutExpired:
+                return {"error": "timeout"}
+        try:
+            return json.loads(proc.stdout.decode("utf-8", "replace"))
+        except ValueError:
+            tail = proc.stderr.decode("utf-8", "replace").strip()[-500:]
+            return {"error": "crash", "message": f"exit status {proc.returncode}"
+                                                 + (f": {tail}" if tail else "")}
+    finally:
+        _WORKER_SLOTS.release()
+
+
+def _worker_error(res: dict, module_name: str, argv: list, out_path, limit: int,
+                  is_write: bool) -> str:
+    kind, msg = res["error"], (res.get("message") or "").strip()
+    if kind == "busy":
+        return (f"error: all {WORKERS} genomics workers stayed busy for {TIMEOUT}s; "
+                "try again shortly.")
+    if kind == "timeout":
+        return (f"error: `{module_name} {argv[0]}` ran past the {TIMEOUT}s limit and was "
+                "stopped. Narrow the region or use a smaller input.")
+    if kind == "limit":
+        return (f"error: `{module_name} {argv[0]}` stopped at this server's {limit:,}-byte "
+                "limit on a file one call may write"
+                + ("" if is_write else " (a read only needs what fits in the result)")
+                + ". Narrow the region or filter more tightly.")
+    if kind == "tool":
+        return _cap(f"[{module_name} error] {msg or 'non-zero exit'}")
+    if kind == "open":
+        exc = (OSError if res.get("class") == "os" else ValueError)(msg)
+        return _open_err(exc, " ".join(argv))
+    if kind == "write":
+        return f"error: could not write {os.path.basename(out_path or '')}: {msg}"
+    if kind == "other":
+        return f"error: {module_name} raised {res.get('class')}: {msg}"
+    return f"error: the {module_name} worker failed ({msg})"
 
 
 def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
@@ -432,13 +776,24 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
                   else "view, call, query, norm, stats, index")
         return (f"error: unknown {module_name} subcommand {argv[0]!r}. "
                 f"Standard ones include: {common}.")
-    if _mk_writes(readset)(args) and not allow_write:
-        return (f"error: '{module_name} {argv[0]}' is a write operation and writes are "
-                "disabled. The server must be restarted with `legumista mcp "
-                "--allow-write` to permit it.")
-    guarded, err = _guard_argv(argv[1:])
+    for tok in argv[1:]:
+        err = _refuse_composite(tok)
+        if err:
+            return err
+    guarded, not_read, err = _read_argv(readset, sub, argv[1:])
     if err:
         return err
+    is_write = not_read is not None
+    if is_write and not allow_write:
+        what = (f"'{module_name} {argv[0]}' is a write operation" if not not_read else
+                f"'{not_read}' is not a read-only option of `{module_name} {argv[0]}`, "
+                "so this call counts as a write")
+        return (f"error: {what} and writes are disabled. The server must be restarted "
+                "with `legumista mcp --allow-write` to permit it.")
+    if is_write:
+        guarded, err = _guard_argv(argv[1:])
+        if err:
+            return err
     if (module_name == "bcftools" and sub == "query"
             and any(t in _LIST_SAMPLES_FLAGS for t in guarded)):
         handled = _bcftools_list_samples(pysam, guarded)
@@ -452,22 +807,19 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
         guarded, out_path, oerr = _extract_output_path(guarded)
         if oerr:
             return oerr
-    from pysam.utils import SamtoolsError
-    with _DISPATCH_LOCK:
-        try:
-            out = fn(*guarded)
-        except SamtoolsError as e:
-            return _cap(f"[{module_name} error] {str(e).strip() or 'non-zero exit'}")
-        except (OSError, ValueError) as e:
-            return _open_err(e, " ".join(argv))
-        except Exception as e:  # noqa: BLE001 - never let a dispatch kill the loop
-            return f"error: {module_name} raised {type(e).__name__}: {e}"
+    limit = MAX_FILE_BYTES if is_write else READ_FILE_BYTES
+    res = _run_worker(module_name, sub, guarded, out_path, limit)
+    if res.get("error"):
+        return _worker_error(res, module_name, argv, out_path, limit, is_write)
     if out_path is not None:
-        return _write_output(out, out_path, module_name, argv[0])
-    out = "" if out is None else (out if isinstance(out, str) else str(out))
+        name = os.path.basename(out_path)
+        if not res.get("written"):
+            return f"({module_name} {argv[0]}: produced no output; wrote empty {name})"
+        return f"wrote {res['written']:,} bytes ({res['lines']:,} lines) to {name}"
+    out = res.get("stdout") or ""
     if not out.strip():
         return (f"({module_name} {argv[0]}: completed with no stdout"
-                + ("; output written" if _mk_writes(readset)(args) else "") + ")")
+                + ("; output written" if is_write else "") + ")")
     return _cap(out)
 
 
@@ -561,7 +913,7 @@ def _tabix_index(args) -> str:
         return ("error: 'preset' must be one of gff | bed | vcf | sam | psltbl "
                 "(the tabix column layout for this file type).")
     try:
-        with _DISPATCH_LOCK:                 # tabix_index compresses in place if needed
+        with _INDEX_LOCK:
             out_path = pysam.tabix_index(target, preset=preset, force=True, keep_original=True)
     except Exception as e:  # noqa: BLE001
         return _open_err(e, target)

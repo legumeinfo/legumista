@@ -31,6 +31,23 @@ def test_sandbox_still_refuses_hidden_and_secret_files():
     assert err, "paths outside the workspace must be refused"
 
 
+def test_sandbox_refuses_the_servers_own_catalog_and_cache(tmp_path, monkeypatch):
+    """An operator may point the cache or the pinned catalog inside the workspace. No
+    tool may then address them: overwriting either would change what every later lis_*
+    call is told, and the cache also holds htslib's scratch directory."""
+    from legumista_agent import tools_catalog
+
+    monkeypatch.setattr(config, "WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("LEGUMISTA_CACHE_DIR", str(tmp_path / "state"))
+    pin = tmp_path / "pinned.json"
+    monkeypatch.setattr(tools_catalog, "CATALOG_PATH", str(pin))
+    for p in ("state", "state/catalog.json", "state/htslib/x.bam.bai", "pinned.json"):
+        _, err = _sandbox_path(p)
+        assert err and "server's own catalog or cache" in err, p
+    rp, err = _sandbox_path("statement.bed")     # a sibling, not a prefix match
+    assert err is None and rp.endswith("statement.bed")
+
+
 # --- paper_search: the fan-out that makes the per-source tools unnecessary ------------
 def _stub_get(monkeypatch, openalex=(), crossref=(), preprints=()):
     """Replace tools_native._get with a URL-routing stub. Returns the URL log."""

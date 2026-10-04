@@ -105,7 +105,12 @@ tools tell them, so the server never words an outage as an absence.
 ## The toolset
 
 Started with `--allow-write`, `samtools`, `bcftools` and `tabix_index` also permit their
-write operations. Without it (the default) they run reads only and refuse writes.
+write operations. Without it (the default) they run reads only and refuse writes. A read
+is an allowlist, not a guess: a read subcommand used with only the options known to have
+no filesystem side effect. Any other option — `-o`, `view -U`, `fastq -1`,
+`--write-index`, one the list does not know — makes the call a write. Each
+`samtools`/`bcftools` call runs in its own child process with a time limit and a per-file
+size limit.
 
 ### LIS Data Store — the resident catalog
 
@@ -236,7 +241,11 @@ The most useful ones:
 | `LEGUMISTA_CATALOG_POLL` | Seconds between freshness checks. Default `86400`; `0` disables |
 
 To pin a catalog rather than downloading one, uncomment the `./catalog.json` mount in
-`compose.yaml`.
+`compose.yaml` and set `LEGUMISTA_CATALOG_PATH=/etc/legumista/catalog.json` in `.env`.
+
+The compose service runs as an unprivileged user on a read-only root filesystem with
+every capability dropped. Its only writable paths are the catalog cache volume and two
+size-capped tmpfs mounts: `/tmp`, and the workspace `/work`, which is wiped on restart.
 
 Without compose, the equivalent is:
 
@@ -310,14 +319,18 @@ and leave every `lis_*` tool answering confidently from nothing.
 
 ### Pinning a specific catalog
 
-A `catalog.json` in the working directory (or at the root of a source checkout) wins over
-everything above: it is used verbatim, nothing is downloaded, and polling is switched off.
-That is the offline and reproducibility path. The webhook reports `pinned` rather than
-overriding it.
+`LEGUMISTA_CATALOG_PATH` names a local `catalog.json` that wins over everything above: it
+is used verbatim, nothing is downloaded, and polling is switched off. That is the offline
+and reproducibility path. The webhook reports `pinned` rather than overriding it.
 
 ```bash
-docker run --rm -i -v /path/to/catalog.json:/work/catalog.json:ro legumista
+docker run --rm -i -v /path/to/catalog.json:/etc/legumista/catalog.json:ro \
+    -e LEGUMISTA_CATALOG_PATH=/etc/legumista/catalog.json legumista
 ```
+
+The pin is never discovered from the working directory. That directory is, by default,
+the workspace the genomics tools may write into, so a file a tool call wrote there could
+otherwise take over every `lis_*` answer.
 
 ### One wrinkle worth knowing
 
@@ -351,13 +364,17 @@ client refreshes it.
 | Variable | Effect |
 | --- | --- |
 | `LEGUMISTA_CATALOG_URL` | Where to download the catalog. Default: the published datastore-metadata release asset |
+| `LEGUMISTA_CATALOG_PATH` | Pin to this local `catalog.json` instead: nothing is downloaded and polling is off |
 | `LEGUMISTA_CACHE_DIR` | Where the download is cached. Default: `~/.cache/legumista` (`/var/cache/legumista` in the image) |
 | `LEGUMISTA_CATALOG_POLL` | Seconds between background freshness checks. Default `86400`; `0` disables |
 | `LEGUMISTA_WEBHOOK_SECRET` | Enables `POST /catalog/refresh`. Unset, the route does not exist |
 | `LEGUMISTA_HOME` | Sandbox root for local file arguments. Default: the launch directory (same as `-C`) |
 | `LEGUMISTA_DSCENSOR_PATH` | Where to find the DSCensor package |
 | `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex, Crossref and Unpaywall. Set it on any shared server: retraction checks and `verify_ids` query Crossref once per DOI |
-| `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional URL-prefix allowlist for the genomics tools |
+| `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional allowlist of `scheme://host[/path]` prefixes the genomics tools may open, matched by host. Recommended on any server others can reach: htslib follows HTTP redirects itself, after the SSRF check |
+| `LEGUMISTA_PYSAM_TIMEOUT` | Seconds before a `samtools`/`bcftools` call is killed. Default `300` |
+| `LEGUMISTA_PYSAM_WORKERS` | How many `samtools`/`bcftools` calls may run at once. Default `4` |
+| `LEGUMISTA_PYSAM_MAX_FILE_BYTES` | Largest file one write may produce. Default 4 GiB; `0` disables (reads are capped at 64 MiB) |
 | `NCBI_API_KEY` | Raises the Entrez rate limit |
 
 ---

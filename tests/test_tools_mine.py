@@ -25,13 +25,14 @@ def clean():
 
     Prevents two cross-test leaks that would make results depend on test order: a cached
     response answering the next test's identical query without touching the fake mine,
-    and the repo's real catalog.json silently steering mine routing and symbol lookup."""
-    saved = (C.CATALOG_PATH, C._CANDIDATES)
-    C.CATALOG_PATH, C._CANDIDATES = "", ()
+    and an operator's LEGUMISTA_CATALOG_PATH silently steering mine routing and symbol
+    lookup."""
+    saved = C.CATALOG_PATH
+    C.CATALOG_PATH = ""
     C.reset()
     M.reset_cache()
     yield
-    C.CATALOG_PATH, C._CANDIDATES = saved
+    C.CATALOG_PATH = saved
     C.reset()
     M.reset_cache()
 

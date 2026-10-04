@@ -48,10 +48,19 @@ services:
     # lis_* tools dark.
     volumes:
       - catalog-cache:/var/cache/legumista
-      # To pin a specific catalog instead of using the published one, uncomment this.
-      # A catalog.json in the working directory wins over the download: nothing is
+      # To pin a specific catalog instead of using the published one, uncomment this and
+      # set LEGUMISTA_CATALOG_PATH=/etc/legumista/catalog.json in .env. Nothing is
       # fetched, polling is off, and the refresh webhook reports "pinned".
-      # - ./catalog.json:/work/catalog.json:ro
+      # - ./catalog.json:/etc/legumista/catalog.json:ro
+
+    # Everything else is read-only. The two writable paths are memory-backed and
+    # size-capped, so no tool call can fill the host's disk: /tmp (the genomics workers'
+    # captured output) and /work, the workspace. /work starts empty and is wiped on every
+    # restart — it is scratch space for --allow-write output, not storage.
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /work:size=1g,uid=10001,gid=10001,mode=0755
 
     # The image deliberately ships no HEALTHCHECK, because its default transport is stdio
     # and a baked-in HTTP probe would mark every stdio container unhealthy. Here the
@@ -67,6 +76,10 @@ services:
       start_period: 15s
       retries: 3
 
+    # The server needs no Linux capabilities at all: it binds an unprivileged port and
+    # runs as an unprivileged user (see the Dockerfile).
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
 

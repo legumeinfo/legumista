@@ -12,6 +12,7 @@
   tools_native.py   literature (OpenAlex/Crossref/Europe PMC), NCBI CLIs, web search
   tools_local.py    web_fetch
   tools_pysam.py    samtools/bcftools/tabix over local and remote indexed files
+  _pysam_worker.py  the child process each samtools/bcftools call runs in
 
 Every tool is read-only unless the server was started with --allow-write, which only the
 genomics dispatchers act on.

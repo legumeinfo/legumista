@@ -8,10 +8,10 @@ from a published URL and cached on disk, so data and code move independently.
 
 Resolution order, highest first:
 
-1. **A local `catalog.json`** — at the install root or in the working directory. This is
-   the pin/offline path: present, it is used verbatim and nothing is fetched. It is what a
-   `-v /path/catalog.json:/work/catalog.json:ro` mount lands on, and what a developer gets
-   from a checkout that still has one.
+1. **A pinned file** — `LEGUMISTA_CATALOG_PATH`. This is the pin/offline path: set, it
+   is used verbatim and nothing is fetched. (It is never discovered from the working
+   directory: that is the genomics tools' writable workspace, so a file a tool call wrote
+   there could otherwise take over the catalog.)
 2. **The cache** — a previously downloaded copy under the cache directory.
 3. **The network** — an explicit fetch, at startup or on demand.
 
@@ -27,6 +27,7 @@ with no body, which is what makes a 24-hour poll unremarkable.
 
 Environment:
 
+    LEGUMISTA_CATALOG_PATH   pin to this local file instead (see tools_catalog)
     LEGUMISTA_CATALOG_URL    where to fetch from (default: the datastore-metadata release)
     LEGUMISTA_CACHE_DIR      where to cache it (default: ~/.cache/legumista)
     LEGUMISTA_CATALOG_POLL   seconds between background checks; 0 disables (default 86400)

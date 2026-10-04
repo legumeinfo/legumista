@@ -35,9 +35,12 @@
 #
 #   docker run -v legumista-cache:/var/cache/legumista ... legumista
 #
-# Pin a specific catalog instead, bypassing the download entirely:
+# Pin a specific catalog instead, bypassing the download entirely. The pin is named by an
+# environment variable and mounted outside /work, the workspace the genomics tools may
+# write into — nothing a tool writes can change which catalog the server serves:
 #
-#   docker run --rm -i -v /path/to/catalog.json:/work/catalog.json:ro legumista
+#   docker run --rm -i -v /path/to/catalog.json:/etc/legumista/catalog.json:ro \
+#       -e LEGUMISTA_CATALOG_PATH=/etc/legumista/catalog.json legumista
 #
 # Refresh a running container the moment a new catalog is published -- set a secret and
 # point a GitHub webhook (or any signed POST) at /catalog/refresh:
@@ -135,17 +138,29 @@ WORKDIR /src
 COPY . /src
 RUN pip install --no-cache-dir .
 
-# htslib caches a remote file's index into the process working directory, so give it a
-# writable scratch dir rather than letting it litter /src (or fail on a read-only mount).
-# A catalog.json mounted here pins the server to it; otherwise the download is used.
-WORKDIR /work
+# Run unprivileged. If any guard is ever bypassed, a write lands as this user — able to
+# touch only the workspace and the cache below — rather than as root. The two
+# directories are created and chowned BEFORE the VOLUME line, so a new named volume
+# inherits the ownership. (A cache volume created by an older, root-run image stays
+# root-owned: `docker volume rm legumista-cache` once, or chown it, and the next start
+# re-downloads the catalog.)
+RUN groupadd --system --gid 10001 legumista \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin legumista \
+    && mkdir -p /var/cache/legumista /work \
+    && chown legumista:legumista /var/cache/legumista /work
 
-# The downloaded catalog lands here. A named volume on this path survives `docker run
-# --rm` and restarts, so a container that starts while the release host is unreachable
-# still has its last good catalog to fall back on.
+# The downloaded catalog lands here, and htslib's scratch directory (the genomics
+# workers' cwd, where remote indexes are cached) beside it. A named volume on this path
+# survives `docker run --rm` and restarts, so a container that starts while the release
+# host is unreachable still has its last good catalog to fall back on.
 ENV LEGUMISTA_CACHE_DIR=/var/cache/legumista
-RUN mkdir -p /var/cache/legumista
 VOLUME /var/cache/legumista
+
+# The workspace: local file arguments to the genomics tools are confined here, and
+# --allow-write output lands here.
+WORKDIR /work
+USER legumista
 
 # Fail the build if the served toolset is not actually complete: every tool the MCP
 # server advertises must be present, and the four CLI-backed ones must really be callable.

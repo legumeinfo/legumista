@@ -111,6 +111,19 @@ def _is_sensitive(realpath: str) -> bool:
     return bool(_SECRET_RE.search(os.path.basename(realpath)))
 
 
+def _is_server_state(realpath: str) -> bool:
+    """True for the server's own state: the pinned catalog and the cache directory (the
+    downloaded catalog, its metadata, htslib's scratch space). Either may sit inside the
+    workspace if an operator points them there, and a tool that could overwrite them
+    could change what every later call is told, so no tool may address them at all."""
+    from . import catalog_source, tools_catalog   # lazy: both import this module
+
+    if tools_catalog.CATALOG_PATH and realpath == os.path.realpath(tools_catalog.CATALOG_PATH):
+        return True
+    cache = os.path.realpath(catalog_source.cache_dir())
+    return realpath == cache or realpath.startswith(cache + os.sep)
+
+
 def _sandbox_path(path: str):
     """Resolve `path` (absolute, or relative to WORKSPACE) inside the project
     workspace. Returns (realpath, None) if allowed, else (None, error_string)."""
@@ -124,6 +137,8 @@ def _sandbox_path(path: str):
                       f"({root}); only files under the workspace may be read")
     if _is_sensitive(rp):
         return None, f"error: refused — '{path}' is a dotfile or secret-like file"
+    if _is_server_state(rp):
+        return None, f"error: refused — '{path}' is the server's own catalog or cache"
     return rp, None
 
 
