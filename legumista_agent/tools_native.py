@@ -46,15 +46,32 @@ class BlockedURLError(Exception):
     """Raised when a URL resolves to a disallowed scheme/host/address."""
 
 
+# NAT64's well-known prefix carries an IPv4 address in its low 32 bits. Python counts
+# 64:ff9b::/96 as global, so `64:ff9b::a9fe:a9fe` — the metadata endpoint, on a NAT64
+# network — would pass an is_global test unless it is unwrapped first.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _ip_is_blocked(ip_str: str) -> bool:
+    """True unless `ip_str` is a public unicast address.
+
+    An allowlist (`is_global`) rather than a list of private ranges: the ranges are not
+    all "private" — 100.64.0.0/10 (shared address space) holds Alibaba Cloud's metadata
+    service and Tailscale's addresses, and is_private misses it. The named checks stay
+    as a second net. IPv4 addresses embedded in IPv6 (mapped, NAT64, 6to4) are judged
+    as the IPv4 address they reach."""
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        return True                       # unparseable -> refuse
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped                       # unwrap ::ffff:a.b.c.d so v4 rules apply
-    return bool(ip.is_loopback or ip.is_link_local or ip.is_private
+        return True                       # unparseable (or a scoped fe80::1%eth0) -> refuse
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip in _NAT64:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+    return bool(not ip.is_global or ip.is_loopback or ip.is_link_local or ip.is_private
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
 
 

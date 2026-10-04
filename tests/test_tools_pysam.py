@@ -203,8 +203,8 @@ def test_bcftools_query_list_samples_is_sandboxed(fixtures):
 def test_bcftools_query_list_samples_declines_mixed_argv(fixtures):
     """Combined with other options it is not a plain listing — fall through to the
     dispatcher rather than guessing which token is the file."""
-    assert P._bcftools_list_samples(pysam, ["-l", "-r", "chr1", "variants.vcf.gz"]) is None
-    assert P._bcftools_list_samples(pysam, ["-l"]) is None
+    assert P._bcftools_list_samples(["-l", "-r", "chr1", "variants.vcf.gz"]) is None
+    assert P._bcftools_list_samples(["-l"]) is None
 
 
 def test_bcftools_query_format_still_dispatches(fixtures):

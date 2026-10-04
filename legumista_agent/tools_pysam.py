@@ -31,8 +31,10 @@ smuggles a second, unchecked path or URL inside one token, is refused outright. 
 dispatch runs in a child process (`_pysam_worker.py`) with a wall-clock timeout and a
 per-file size limit, in htslib's own scratch directory rather than the workspace or the
 server's cwd — so a bare filename can never reach a file the sandbox did not vet, and a
-stuck call is killed rather than stalling every other one. The helpers use pysam's
-Python API in-process (offloaded with `asyncio.to_thread`). pysam is a dependency of
+stuck call is killed rather than stalling every other one. The read-only helpers run
+there too. Workers reach the network only through the egress proxy (egress_proxy.py),
+which refuses any non-public destination on every connection, redirect hops included —
+so any public host is readable and no private one is. pysam is a dependency of
 legumista, imported lazily (only when a genomics tool actually runs) so the heavy htslib
 extension isn't loaded by sessions that never touch a genomics tool.
 
@@ -50,6 +52,7 @@ import tempfile
 import threading
 import urllib.parse
 
+from . import egress_proxy
 from .tool import Tool
 from .tools_native import MAX_CHARS, BlockedURLError, _cap, _sandbox_path, _validate_url
 
@@ -566,18 +569,17 @@ _OUTPUT_FLAGS = ("-o", "--output", "--output-file")
 _LIST_SAMPLES_FLAGS = ("-l", "--list-samples")
 
 
-def _bcftools_list_samples(pysam, argv):
+def _bcftools_list_samples(argv):
     """Answer `bcftools query -l <file>` from the header. Returns the text, or None if
     this argv is not a plain sample listing (combined with other options), in which case
     the caller runs the normal dispatcher rather than guessing at the intent."""
     rest = [t for t in argv if t not in _LIST_SAMPLES_FLAGS]
     if len(rest) != 1 or rest[0].startswith("-"):
         return None
-    try:
-        with pysam.VariantFile(rest[0]) as vf:
-            samples = list(vf.header.samples)
-    except (OSError, ValueError) as e:
-        return _open_err(e, rest[0])
+    res = _run_worker({"op": "samples", "path": rest[0]}, READ_FILE_BYTES)
+    if res.get("error"):
+        return _worker_error(res, "bcftools query -l", rest[0], tool="bcftools")
+    samples = res["samples"]
     if not samples:
         return "(no samples declared in this VCF/BCF header)"
     return _cap(f"{len(samples)} sample(s):\n" + "\n".join(samples))
@@ -697,25 +699,28 @@ def _scratch_dir() -> str:
     return _SCRATCH["dir"]
 
 
-def _run_worker(module_name: str, sub: str, argv: list, out_path, max_file_bytes: int):
-    """Run one dispatch in a child process; return the worker's result dict, or one with
-    `error` set to busy/timeout/crash. Blocks the calling (to_thread) worker thread."""
+def _run_worker(req: dict, max_file_bytes: int = 0) -> dict:
+    """Run one htslib operation in a child process (see _pysam_worker.py for the ops);
+    return the worker's result dict, or one with `error` set to busy/timeout/crash.
+    Blocks the calling (to_thread) thread.
+
+    The child's environment routes all of htslib's HTTP through the egress proxy, which
+    refuses non-public destinations on every connection — redirect hops included."""
     if not _WORKER_SLOTS.acquire(timeout=TIMEOUT):
         return {"error": "busy"}
     try:
         with tempfile.TemporaryDirectory(prefix="legumista-pysam-") as tmp:
             req_path = os.path.join(tmp, "req.json")
             with open(req_path, "w", encoding="utf-8") as fh:
-                json.dump({"module": module_name, "sub": sub, "argv": argv,
-                           "out_path": out_path, "head_bytes": MAX_CHARS * 4,
-                           "max_file_bytes": max_file_bytes}, fh)
+                json.dump({**req, "max_file_bytes": max_file_bytes}, fh)
             try:
                 # -P: the script's directory and the cwd stay off sys.path, so nothing a
                 # write left in the scratch directory can shadow an import.
                 proc = subprocess.run(
                     [sys.executable, "-P", _WORKER, req_path],
-                    cwd=_scratch_dir(), stdin=subprocess.DEVNULL,
-                    capture_output=True, timeout=TIMEOUT, check=False)
+                    cwd=_scratch_dir(), env=egress_proxy.child_env(),
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=TIMEOUT,
+                    check=False)
             except subprocess.TimeoutExpired:
                 return {"error": "timeout"}
         try:
@@ -728,30 +733,34 @@ def _run_worker(module_name: str, sub: str, argv: list, out_path, max_file_bytes
         _WORKER_SLOTS.release()
 
 
-def _worker_error(res: dict, module_name: str, argv: list, out_path, limit: int,
-                  is_write: bool) -> str:
+def _worker_error(res: dict, what: str, target: str, *, tool: str = "", out_path=None,
+                  limit: int = READ_FILE_BYTES, is_write: bool = False) -> str:
+    """Turn a worker's error result into the tool's error text. `what` names the call
+    (`samtools view`, `fasta_fetch`); `tool` is the CLI, for errors the CLI reported."""
     kind, msg = res["error"], (res.get("message") or "").strip()
     if kind == "busy":
         return (f"error: all {WORKERS} genomics workers stayed busy for {TIMEOUT}s; "
                 "try again shortly.")
     if kind == "timeout":
-        return (f"error: `{module_name} {argv[0]}` ran past the {TIMEOUT}s limit and was "
-                "stopped. Narrow the region or use a smaller input.")
+        return (f"error: `{what}` ran past the {TIMEOUT}s limit and was stopped. Narrow "
+                "the region or use a smaller input.")
     if kind == "limit":
-        return (f"error: `{module_name} {argv[0]}` stopped at this server's {limit:,}-byte "
-                "limit on a file one call may write"
+        return (f"error: `{what}` stopped at this server's {limit:,}-byte limit on a "
+                "file one call may write"
                 + ("" if is_write else " (a read only needs what fits in the result)")
                 + ". Narrow the region or filter more tightly.")
     if kind == "tool":
-        return _cap(f"[{module_name} error] {msg or 'non-zero exit'}")
+        return _cap(f"[{tool} error] {msg or 'non-zero exit'}")
     if kind == "open":
-        exc = (OSError if res.get("class") == "os" else ValueError)(msg)
-        return _open_err(exc, " ".join(argv))
+        cls = res.get("class") or "Error"
+        exc = (OSError(msg) if cls == "os" else ValueError(msg) if cls == "value"
+               else type(cls, (Exception,), {})(msg))
+        return _open_err(exc, target)
     if kind == "write":
         return f"error: could not write {os.path.basename(out_path or '')}: {msg}"
     if kind == "other":
-        return f"error: {module_name} raised {res.get('class')}: {msg}"
-    return f"error: the {module_name} worker failed ({msg})"
+        return f"error: {tool or what} raised {res.get('class')}: {msg}"
+    return f"error: the {tool or what} worker failed ({msg})"
 
 
 def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
@@ -796,7 +805,7 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
             return err
     if (module_name == "bcftools" and sub == "query"
             and any(t in _LIST_SAMPLES_FLAGS for t in guarded)):
-        handled = _bcftools_list_samples(pysam, guarded)
+        handled = _bcftools_list_samples(guarded)
         if handled is not None:
             return handled
     out_path = None
@@ -808,9 +817,13 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
         if oerr:
             return oerr
     limit = MAX_FILE_BYTES if is_write else READ_FILE_BYTES
-    res = _run_worker(module_name, sub, guarded, out_path, limit)
+    res = _run_worker({"op": "dispatch", "module": module_name, "sub": sub,
+                       "argv": guarded, "out_path": out_path,
+                       "head_bytes": MAX_CHARS * 4}, limit)
     if res.get("error"):
-        return _worker_error(res, module_name, argv, out_path, limit, is_write)
+        return _worker_error(res, f"{module_name} {argv[0]}", " ".join(argv),
+                             tool=module_name, out_path=out_path, limit=limit,
+                             is_write=is_write)
     if out_path is not None:
         name = os.path.basename(out_path)
         if not res.get("written"):
@@ -834,23 +847,13 @@ def _fasta_fetch(args) -> str:
     contig, start, end, rerr = _parse_region(args.get("region"))
     if rerr:
         return rerr
-    try:
-        fa = pysam.FastaFile(target)
-    except Exception as e:  # noqa: BLE001
-        return _open_err(e, target)
-    try:
-        clen = fa.lengths[fa.references.index(contig)] if contig in set(fa.references) else None
-        if start is None:
-            start, end = 0, min(clen if clen is not None else MAX_SEQ, MAX_SEQ)
-        span = end - start
-        truncated = span > MAX_SEQ
-        seq = fa.fetch(reference=contig, start=start, end=start + MAX_SEQ if truncated else end)
-    except Exception as e:  # noqa: BLE001
-        return _open_err(e, target)
-    finally:
-        fa.close()
+    res = _run_worker({"op": "fasta", "path": target, "contig": contig, "start": start,
+                       "end": end, "max_seq": MAX_SEQ}, READ_FILE_BYTES)
+    if res.get("error"):
+        return _worker_error(res, "fasta_fetch", target)
+    seq, start, end, span = res["seq"], res["start"], res["end"], res["span"]
     head = (f">{contig}:{start + 1}-{end} ({len(seq):,} bp"
-            + (f" of {span:,}; truncated to {MAX_SEQ:,}" if truncated else "") + ")\n")
+            + (f" of {span:,}; truncated to {MAX_SEQ:,}" if res["truncated"] else "") + ")\n")
     wrapped = "\n".join(seq[i:i + 70] for i in range(0, len(seq), 70))
     return _cap(head + (wrapped or "(empty — region outside the contig?)"))
 
@@ -862,39 +865,30 @@ def _tabix_query(args) -> str:
     target, err = _resolve_source(args.get("path"))
     if err:
         return err
-    try:
-        tbx = pysam.TabixFile(target)
-    except Exception as e:  # noqa: BLE001
-        return _open_err(e, target)
-    try:
-        region = (args.get("region") or "").strip()
-        if not region:
-            contigs = list(tbx.contigs)
-            shown = ", ".join(contigs[:MAX_RECORDS]) + (
-                f" … (+{len(contigs) - MAX_RECORDS})" if len(contigs) > MAX_RECORDS else "")
-            return _cap(f"tabix {os.path.basename(target)}: {len(contigs)} contig(s): "
-                        f"{shown or '(none)'}\n(pass a 'region' to fetch feature lines)")
-        contig, start, end, rerr = _parse_region(region)
-        if rerr:
-            return rerr
-        limit = min(int(args.get("max_records") or MAX_RECORDS), MAX_RECORDS)
-        rows, n, more = [], 0, False
-        try:
-            for line in tbx.fetch(contig, start, end):
-                if n >= limit:
-                    more = True
-                    break
-                rows.append("  " + line[:300])
-                n += 1
-        except Exception as e:  # noqa: BLE001
-            return _open_err(e, target)
-        span = contig if start is None else f"{contig}:{start + 1}-{end}"
-        if not rows:
-            return f"No records in {span} of {os.path.basename(target)}."
-        head = f"{n} record(s) in {span}" + ("  [capped]" if more else "") + ":\n"
-        return _cap(head + "\n".join(rows))
-    finally:
-        tbx.close()
+    region = (args.get("region") or "").strip()
+    if not region:
+        res = _run_worker({"op": "tabix", "path": target, "contig": None}, READ_FILE_BYTES)
+        if res.get("error"):
+            return _worker_error(res, "tabix_query", target)
+        contigs = res["contigs"]
+        shown = ", ".join(contigs[:MAX_RECORDS]) + (
+            f" … (+{len(contigs) - MAX_RECORDS})" if len(contigs) > MAX_RECORDS else "")
+        return _cap(f"tabix {os.path.basename(target)}: {len(contigs)} contig(s): "
+                    f"{shown or '(none)'}\n(pass a 'region' to fetch feature lines)")
+    contig, start, end, rerr = _parse_region(region)
+    if rerr:
+        return rerr
+    limit = min(int(args.get("max_records") or MAX_RECORDS), MAX_RECORDS)
+    res = _run_worker({"op": "tabix", "path": target, "contig": contig, "start": start,
+                       "end": end, "limit": limit}, READ_FILE_BYTES)
+    if res.get("error"):
+        return _worker_error(res, "tabix_query", target)
+    rows = ["  " + line for line in res["rows"]]
+    span = contig if start is None else f"{contig}:{start + 1}-{end}"
+    if not rows:
+        return f"No records in {span} of {os.path.basename(target)}."
+    head = f"{len(rows)} record(s) in {span}" + ("  [capped]" if res["more"] else "") + ":\n"
+    return _cap(head + "\n".join(rows))
 
 
 # --- write helper: build a bgzip+tabix index -----------------------------------------

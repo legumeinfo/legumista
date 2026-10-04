@@ -110,7 +110,11 @@ is an allowlist, not a guess: a read subcommand used with only the options known
 no filesystem side effect. Any other option — `-o`, `view -U`, `fastq -1`,
 `--write-index`, one the list does not know — makes the call a write. Each
 `samtools`/`bcftools` call runs in its own child process with a time limit and a per-file
-size limit.
+size limit, and reaches the network only through a built-in egress proxy. The proxy
+refuses any destination that is not a public address — checked on every connection,
+so a redirect from a public URL to a private one (a cloud metadata endpoint, say) is
+refused too — and connects to the exact address it checked. Any public host stays
+readable.
 
 ### LIS Data Store — the resident catalog
 
@@ -371,7 +375,9 @@ client refreshes it.
 | `LEGUMISTA_HOME` | Sandbox root for local file arguments. Default: the launch directory (same as `-C`) |
 | `LEGUMISTA_DSCENSOR_PATH` | Where to find the DSCensor package |
 | `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex, Crossref and Unpaywall. Set it on any shared server: retraction checks and `verify_ids` query Crossref once per DOI |
-| `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional allowlist of `scheme://host[/path]` prefixes the genomics tools may open, matched by host. Recommended on any server others can reach: htslib follows HTTP redirects itself, after the SSRF check |
+| `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional allowlist of `scheme://host[/path]` prefixes the genomics tools may open, matched by host. Unset, any public host is allowed |
+| `LEGUMISTA_EGRESS_PORTS` | Ports the genomics tools may connect to. Default `80,443` |
+| `LEGUMISTA_EGRESS_IDLE_SECONDS` / `LEGUMISTA_EGRESS_MAX_SECONDS` | When a genomics connection is dropped: idle, and in total. Defaults `60` / `900` |
 | `LEGUMISTA_PYSAM_TIMEOUT` | Seconds before a `samtools`/`bcftools` call is killed. Default `300` |
 | `LEGUMISTA_PYSAM_WORKERS` | How many `samtools`/`bcftools` calls may run at once. Default `4` |
 | `LEGUMISTA_PYSAM_MAX_FILE_BYTES` | Largest file one write may produce. Default 4 GiB; `0` disables (reads are capped at 64 MiB) |

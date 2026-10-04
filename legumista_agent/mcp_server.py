@@ -15,7 +15,7 @@ read-only flag becomes the MCP `readOnlyHint` annotation.
 `fastmcp` is imported inside `build_server` (not at module top) so merely importing this
 module stays cheap until you actually serve. The server is started via `legumista mcp`.
 """
-import os
+
 
 # Registry mapping tool name -> the legumista async handler. Kept module-level (not a
 # field on the pydantic FastMCP Tool model) so the bridge subclass stays a plain schema
@@ -144,14 +144,6 @@ def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000,
         log(f"    {report['stamp']}")
 
     server = build_server(allow_write=allow_write)
-
-    # htslib caches a remote file's index in the process's working directory, so with the
-    # launch directory as cwd every remote read by fasta_fetch/tabix_query left an index
-    # behind there — usually the workspace. Run from htslib's scratch directory instead,
-    # as the samtools/bcftools workers do. Safe this late: config.WORKSPACE has already
-    # captured the launch directory, and every tool path is absolute.
-    from .tools_pysam import _scratch_dir
-    os.chdir(_scratch_dir())
 
     if transport != "stdio":
         webhook.register(server, refresh_fn=tools_catalog.refresh, log=log)

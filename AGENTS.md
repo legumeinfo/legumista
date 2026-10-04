@@ -35,8 +35,11 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
     on-disk cache, conditional GETs, and the background poller.
   - `webhook.py` — `POST /catalog/refresh`, authenticated with GitHub's HMAC scheme.
   - `tools_lis.py`, `tools_mine.py`, `tools_native.py`, `tools_local.py`, `tools_pysam.py`.
-  - `_pysam_worker.py` — runs one `samtools`/`bcftools` call in a child process for
-    `tools_pysam` (standalone: stdlib + pysam only).
+  - `_pysam_worker.py` — runs one htslib operation (a `samtools`/`bcftools` call, or a
+    `fasta_fetch`/`tabix_query` read) in a child process for `tools_pysam` (standalone:
+    stdlib + pysam only).
+  - `egress_proxy.py` — the loopback proxy every worker's HTTP goes through; refuses
+    non-public destinations on every connection, redirect hops included.
 - `legumista_assets/prompts/tools_native.md` — the tool-use doctrine served as the MCP
   server's `instructions`. Package data; editing it changes what every client is told.
 - `compose.yaml` / `.env.example` — the deployment path: builds the image from the
@@ -67,10 +70,12 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   secret-like names and the server's own catalog/cache, and rewrites to absolute. Its
   consumer is `tools_pysam`. Do not bypass it when adding a tool that takes a path.
   htslib's `##idx##` syntax hides a second path inside one token, so it is refused.
-  `samtools`/`bcftools` calls run in `_pysam_worker.py` child processes, with a timeout,
-  a file-size rlimit, and htslib's scratch directory as cwd, so a bare name the guard
+  Every htslib operation runs in a `_pysam_worker.py` child process, with a timeout, a
+  file-size rlimit, and htslib's scratch directory as cwd, so a bare name the guard
   could not recognise as a path never resolves against the workspace or the launch
-  directory.
+  directory. **Never open a remote file with pysam in the server process:** libcurl
+  follows redirects and resolves hosts itself, so only the egress proxy, which the
+  workers' environment names, can keep it off private addresses.
 - **No metadata HTTP to data.legumeinfo.org.** The `lis_*` tools answer from
   `catalog.json`, not by crawling the store. The two remaining reads there are *data*
   (a gene-models BED, a synonym file), not metadata. Keep it that way: a metadata question

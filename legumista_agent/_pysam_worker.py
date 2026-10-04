@@ -20,11 +20,18 @@ to the RLIMIT_FSIZE below, so a result file could be cut short by the very limit
 reporting. File descriptor 1 itself is pointed at a scratch file for the dispatch, which
 also recovers output from subcommands that bypass pysam's capture (samtools fasta/fastq).
 
-The request is a JSON object:
-    module, sub, argv     the dispatch: pysam.<module>.<sub>(*argv)
-    out_path              optional: write the captured stdout here instead of returning it
-    head_bytes            how much captured stdout to send back
-    max_file_bytes        RLIMIT_FSIZE for this process (0: unlimited)
+Every htslib read runs here, the read-only helpers included, so all of htslib's network
+traffic leaves through the egress proxy named in this process's environment
+(egress_proxy.child_env) and all of it is bounded by the parent's timeout.
+
+The request is a JSON object with an `op`:
+    dispatch   module, sub, argv: pysam.<module>.<sub>(*argv)
+               out_path: optional, write the captured stdout here instead of returning it
+               head_bytes: how much captured stdout to send back
+    fasta      path, contig, start, end, max_seq: a subsequence (fasta_fetch)
+    tabix      path, contig, start, end, limit: feature lines, or contigs if no contig
+    samples    path: the sample names in a VCF/BCF header
+and, for every op, max_file_bytes: RLIMIT_FSIZE for this process (0: unlimited).
 """
 import importlib
 import json
@@ -40,7 +47,71 @@ import tempfile
 _HIT_LIMIT = []
 
 
+def _error(e: Exception) -> dict:
+    kind = "os" if isinstance(e, OSError) else "value" if isinstance(e, ValueError) else ""
+    return {"error": "open", "class": kind or type(e).__name__, "message": str(e)}
+
+
+def _fasta(req: dict) -> dict:
+    import pysam
+
+    contig, start, end, max_seq = req["contig"], req["start"], req["end"], req["max_seq"]
+    try:
+        fa = pysam.FastaFile(req["path"])
+    except Exception as e:  # noqa: BLE001 - reported to the parent
+        return _error(e)
+    try:
+        clen = fa.lengths[fa.references.index(contig)] if contig in set(fa.references) else None
+        if start is None:
+            start, end = 0, min(clen if clen is not None else max_seq, max_seq)
+        span = end - start
+        truncated = span > max_seq
+        seq = fa.fetch(reference=contig, start=start, end=start + max_seq if truncated else end)
+    except Exception as e:  # noqa: BLE001
+        return _error(e)
+    finally:
+        fa.close()
+    return {"seq": seq, "start": start, "end": end, "span": span, "truncated": truncated}
+
+
+def _tabix(req: dict) -> dict:
+    import pysam
+
+    try:
+        tbx = pysam.TabixFile(req["path"])
+    except Exception as e:  # noqa: BLE001
+        return _error(e)
+    try:
+        if req.get("contig") is None:
+            return {"contigs": list(tbx.contigs)}
+        rows, more = [], False
+        try:
+            for line in tbx.fetch(req["contig"], req["start"], req["end"]):
+                if len(rows) >= req["limit"]:
+                    more = True
+                    break
+                rows.append(line[:300])
+        except Exception as e:  # noqa: BLE001
+            return _error(e)
+        return {"rows": rows, "more": more}
+    finally:
+        tbx.close()
+
+
+def _samples(req: dict) -> dict:
+    import pysam
+
+    try:
+        with pysam.VariantFile(req["path"]) as vf:
+            return {"samples": list(vf.header.samples)}
+    except (OSError, ValueError) as e:
+        return _error(e)
+
+
 def _run(req: dict) -> dict:
+    op = req.get("op", "dispatch")
+    if op != "dispatch":
+        return {"fasta": _fasta, "tabix": _tabix, "samples": _samples}[op](req)
     from pysam.utils import SamtoolsError
 
     fn = getattr(importlib.import_module(f"pysam.{req['module']}"), req["sub"])
@@ -54,8 +125,7 @@ def _run(req: dict) -> dict:
             return {"error": "limit"}
         return {"error": "tool", "message": str(e)[: max(head, 4096)]}
     except (OSError, ValueError) as e:
-        return {"error": "open", "class": "os" if isinstance(e, OSError) else "value",
-                "message": str(e)}
+        return _error(e)
     except Exception as e:  # noqa: BLE001 - report it; the parent formats the error
         return {"error": "other", "class": type(e).__name__, "message": str(e)}
     data = b"" if out is None else (out if isinstance(out, bytes) else str(out).encode())
