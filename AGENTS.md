@@ -73,7 +73,8 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   Every htslib operation runs in a `_pysam_worker.py` child process, with a timeout, a
   file-size rlimit, and htslib's scratch directory as cwd, so a bare name the guard
   could not recognise as a path never resolves against the workspace or the launch
-  directory. **Never open a remote file with pysam in the server process:** libcurl
+  directory. That cwd is keyed by the call's remote URLs (`_worker_cwd`), because htslib
+  reuses a cached index by filename alone. **Never open a remote file with pysam in the server process:** libcurl
   follows redirects and resolves hosts itself, so only the egress proxy, which the
   workers' environment names, can keep it off private addresses.
 - **No metadata HTTP to data.legumeinfo.org.** The `lis_*` tools answer from

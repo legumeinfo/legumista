@@ -376,6 +376,7 @@ client refreshes it.
 | `LEGUMISTA_DSCENSOR_PATH` | Where to find the DSCensor package |
 | `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex, Crossref and Unpaywall. Set it on any shared server: retraction checks and `verify_ids` query Crossref once per DOI |
 | `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional allowlist of `scheme://host[/path]` prefixes the genomics tools may open, matched by host. Unset, any public host is allowed |
+| `LEGUMISTA_INDEX_TTL` | Seconds a downloaded remote index (`.tbi`/`.bai`/`.csi`) is reused before it is fetched again. Indexes are cached per URL. Default `3600` |
 | `LEGUMISTA_EGRESS_PORTS` | Ports the genomics tools may connect to. Default `80,443` |
 | `LEGUMISTA_EGRESS_IDLE_SECONDS` / `LEGUMISTA_EGRESS_MAX_SECONDS` | When a genomics connection is dropped: idle, and in total. Defaults `60` / `900` |
 | `LEGUMISTA_PYSAM_TIMEOUT` | Seconds before a `samtools`/`bcftools` call is killed. Default `300` |

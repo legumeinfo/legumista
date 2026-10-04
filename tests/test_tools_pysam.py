@@ -428,7 +428,7 @@ def test_bare_output_name_lands_in_scratch_not_cwd_or_workspace(fixtures, tmp_pa
     out = _sam(["view", "-q", "30", "-U", "bare", "reads.sorted.bam"], allow_write=True)
     assert "read3" in out
     assert not (elsewhere / "bare").exists() and not (fixtures / "bare").exists()
-    assert os.path.exists(os.path.join(P._scratch_dir(), "bare"))
+    assert os.path.exists(os.path.join(P._scratch_dir(), "local", "bare"))
 
 
 def test_fastq_output_is_captured_not_leaked(fixtures, capfd):
@@ -470,3 +470,41 @@ def test_allowed_urls_match_by_host_not_string_prefix():
     assert not P._url_allowed("http://data.legumeinfo.org/x.bam", allow)
     assert P._url_allowed("https://h.example/a/b.bam", ["https://h.example/a/"])
     assert not P._url_allowed("https://h.example/c/b.bam", ["https://h.example/a/"])
+
+
+# --- remote indexes are cached per URL, not per filename -------------------------------
+LIS = "https://data.legumeinfo.org/Glycine/max/diversity/x/glyma.SNPs.vcf.gz"
+EVIL = "https://evil.example/glyma.SNPs.vcf.gz"
+
+
+def test_same_filename_on_two_hosts_never_shares_an_index():
+    """htslib reuses a cached index by filename alone. In one shared directory, whoever
+    read `evil.example/<name>` first would decide the index for the real LIS file."""
+    lis = P._worker_cwd({"argv": ["view", "-H", LIS, "chr1:1-10"]})
+    evil = P._worker_cwd({"argv": ["view", "-H", EVIL, "chr1:1-10"]})
+    assert lis != evil
+    open(os.path.join(evil, "glyma.SNPs.vcf.gz.tbi"), "w").close()
+    assert not os.path.exists(os.path.join(lis, "glyma.SNPs.vcf.gz.tbi"))
+
+
+def test_one_url_keeps_its_cache_across_calls_and_tools():
+    """The cache still works: every call on the same URL lands in the same directory,
+    whether it is a dispatch, a helper, or a URL attached to an option."""
+    a = P._worker_cwd({"argv": ["view", "-H", LIS]})
+    assert P._worker_cwd({"op": "tabix", "path": LIS}) == a
+    ref = "https://data.legumeinfo.org/ref.fa"
+    both = P._worker_cwd({"argv": ["mpileup", f"--fasta-ref={ref}", LIS]})
+    assert both == P._worker_cwd({"argv": ["mpileup", "-f", ref, LIS]}) != a
+    assert P._worker_cwd({"argv": ["view", "local.vcf.gz"]}).endswith(os.sep + "local")
+
+
+def test_a_cached_index_expires(monkeypatch):
+    """htslib never revalidates; a file republished upstream must not keep its old
+    index forever."""
+    cwd = P._worker_cwd({"path": LIS})
+    stale, fresh = os.path.join(cwd, "old.tbi"), os.path.join(cwd, "new.tbi")
+    for name in (stale, fresh):
+        open(name, "w").close()
+    os.utime(stale, (0, 0))
+    P._worker_cwd({"path": LIS})
+    assert not os.path.exists(stale) and os.path.exists(fresh)

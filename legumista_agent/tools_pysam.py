@@ -42,6 +42,7 @@ Coordinates: `region` in the helpers is samtools-style — `seqid`, `seqid:start
 `seqid:start-end`, 1-based inclusive — converted to pysam's 0-based half-open internally.
 """
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -50,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 
 from . import egress_proxy
@@ -71,6 +73,8 @@ TIMEOUT = int(os.environ.get("LEGUMISTA_PYSAM_TIMEOUT", "300"))
 WORKERS = max(1, int(os.environ.get("LEGUMISTA_PYSAM_WORKERS", "4")))
 MAX_FILE_BYTES = int(os.environ.get("LEGUMISTA_PYSAM_MAX_FILE_BYTES", str(4 << 30)))
 READ_FILE_BYTES = min(64 << 20, MAX_FILE_BYTES or 64 << 20)
+# Seconds a downloaded remote index is trusted before htslib fetches it again.
+INDEX_TTL = int(os.environ.get("LEGUMISTA_INDEX_TTL", "3600"))
 _WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_pysam_worker.py")
 _WORKER_SLOTS = threading.BoundedSemaphore(WORKERS)
 _SCRATCH = {"dir": ""}
@@ -679,7 +683,7 @@ def _extract_output_path(argv: list):
 
 
 def _scratch_dir() -> str:
-    """The worker's cwd: htslib's own scratch space, never the workspace.
+    """The root of the workers' cwds: htslib's own scratch space, never the workspace.
 
     htslib caches a remote file's index in its cwd, and resolves any bare filename the
     sandbox could not recognise as a path against it. Pointing that at the workspace
@@ -693,10 +697,53 @@ def _scratch_dir() -> str:
     path = cache_dir() / "htslib"
     try:
         path.mkdir(parents=True, exist_ok=True)
+        # Workers run in subdirectories (see _worker_cwd). A plain file at the root is an
+        # index cached by an older release under its bare filename: never consulted
+        # again, and not to be trusted, so clear it.
+        for entry in os.scandir(path):
+            if entry.is_file(follow_symlinks=False):
+                os.unlink(entry.path)
         _SCRATCH["dir"] = str(path)
     except OSError:
         _SCRATCH["dir"] = tempfile.mkdtemp(prefix="legumista-htslib-")
     return _SCRATCH["dir"]
+
+
+_URL_RE = re.compile(r"(?i)https?://\S+")
+
+
+def _worker_cwd(req: dict) -> str:
+    """The directory one worker runs in: keyed by every remote URL the call opens.
+
+    htslib caches a remote file's index in its cwd under the index's FILENAME alone, and
+    reuses any local file of that name without asking which host it came from
+    (hts.c, idx_test_and_fetch). In one shared directory, a caller who first reads
+    `https://evil.example/<name>.vcf.gz` decides the index every later caller gets for
+    the real `https://data.legumeinfo.org/.../<name>.vcf.gz`: a well-formed index with
+    wrong offsets, so region queries silently return wrong or missing records. Keying
+    the directory by the full URLs means an index is only ever reused for the URL it
+    was downloaded beside. A call naming several remote files is keyed by the whole set.
+
+    htslib also never revalidates a cached index, so a file republished upstream would
+    keep its old index forever. Anything cached longer than INDEX_TTL is removed first,
+    and htslib downloads it afresh."""
+    tokens = req.get("argv") or [req.get("path") or ""]
+    urls = sorted({m.group(0) for tok in tokens for m in [_URL_RE.search(tok)] if m})
+    if not urls:
+        path = os.path.join(_scratch_dir(), "local")
+    else:
+        key = hashlib.sha256("\n".join(urls).encode()).hexdigest()[:32]
+        path = os.path.join(_scratch_dir(), "remote", key)
+    os.makedirs(path, exist_ok=True)
+    cutoff = time.time() - INDEX_TTL
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if entry.is_file(follow_symlinks=False) and entry.stat().st_mtime < cutoff:
+                try:
+                    os.unlink(entry.path)
+                except FileNotFoundError:      # another worker expired it first
+                    continue
+    return path
 
 
 def _run_worker(req: dict, max_file_bytes: int = 0) -> dict:
@@ -718,7 +765,7 @@ def _run_worker(req: dict, max_file_bytes: int = 0) -> dict:
                 # write left in the scratch directory can shadow an import.
                 proc = subprocess.run(
                     [sys.executable, "-P", _WORKER, req_path],
-                    cwd=_scratch_dir(), env=egress_proxy.child_env(),
+                    cwd=_worker_cwd(req), env=egress_proxy.child_env(),
                     stdin=subprocess.DEVNULL, capture_output=True, timeout=TIMEOUT,
                     check=False)
             except subprocess.TimeoutExpired:
