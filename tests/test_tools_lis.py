@@ -669,3 +669,12 @@ def test_gene_locus_names_its_assembly_and_convention(catalog):
     """Coordinates without their assembly are the commonest cross-assembly mistake."""
     out = L._gene({"gene": "Glyma.12G040000", "collection": ANN})
     assert "coordinates: assembly glyma.Wm82.gnm4; 1-based, inclusive" in out
+
+
+def test_the_bed_locus_is_called_the_coding_extent(catalog):
+    """gene_models_main.bed holds each transcript's first-to-last CDS base (LIS builds it
+    with gff_to_bed7_mRNA.awk), so the UTRs are outside it. Calling it the mRNA extent
+    once led to flanks measured from inside the 5' UTR."""
+    out = L._gene({"gene": "glyma.Wm82.gnm4.ann1.Glyma.12G040000"})
+    assert "coding extent:  glyma.Wm82.gnm4.Gm12:2,875,801-2,879,231 (-)" in out
+    assert "excludes the UTRs" in out and "mRNA extent" not in out

@@ -20,7 +20,10 @@ Two file reads over http(s) remain, and they are deliberate -- they are *data*, 
 metadata endpoints, and no catalog can carry them:
 
 * ``gene_models_main.bed.gz`` -- gene coordinates. `lis_gene`'s whole job is turning a
-  name into a locus, and the loci live in this file. The catalog supplies its URL.
+  name into a locus, and the loci live in this file. The catalog supplies its URL. Its
+  coordinates are each transcript's CODING extent (first CDS base to last; LIS builds it
+  with datastore-specifications' gff_to_bed7_mRNA.awk, and it was named cds.bed until
+  2024), so they exclude the UTRs and must never be called the mRNA or gene span.
 * the annotation's synonym file -- superseded gene IDs, likewise a data file whose URL
   comes from the catalog.
 
@@ -511,12 +514,13 @@ def _gene(args) -> str:
     assembly = _genome_of(f"{record.get('scientific_name_abbrev', '')}.{record['id']}")
     lines = [f"{label} in {record['id']}"
              + (f"\n  resolved from: {provenance}" if provenance else ""),
-             f"  locus:  {contig}:{start:,}-{end:,} ({strand})   "
-             f"[mRNA extent from gene_models_main.bed; "
+             f"  coding extent:  {contig}:{start:,}-{end:,} ({strand})   "
+             f"[first CDS base to last, from gene_models_main.bed — excludes the UTRs; "
              f"{len(hits)} model(s): {', '.join(seq_names)}]",
              f"  coordinates: assembly {assembly}; 1-based, inclusive (converted from the "
              "BED's 0-based start). Coordinates on another assembly differ.",
-             f"  region string for tabix_query/samtools: {contig}:{start}-{end}"]
+             f"  region string for tabix_query/samtools (coding extent; widen it to take "
+             f"in the UTRs): {contig}:{start}-{end}"]
     for label_text, suffix in (("protein", ".protein_primary.faa.gz"),
                                ("CDS", ".cds_primary.fna.gz")):
         hit = next((n for n in by_name if n.endswith(suffix)), None)
