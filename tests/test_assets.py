@@ -29,9 +29,11 @@ def test_no_orphaned_pipeline_prompts_remain():
 # The instructions are sent at initialize and stay in the client model's context for the
 # whole session, with the resident catalog map (~1,400 tokens) appended. Growing them
 # should be a decision made in review, not drift: raise this in the same PR, with a reason.
-# ~4,100 tokens; the file was 15,801 characters when this was set, which leaves room for
-# corrections but not for a new section.
-INSTRUCTIONS_BUDGET_CHARS = 16_500
+# ~8,000 tokens (at ~4 characters a token). Raised from 16,500 when the first wave of
+# new tools (gene sets, feature extraction, viewer links, data-issue reports) was planned:
+# the file was 15,953 characters, with no room for a line per new tool. Room to add
+# tools is not licence to pad: keep each line terse but self-explanatory.
+INSTRUCTIONS_BUDGET_CHARS = 32_000
 
 
 def _instructions() -> str:

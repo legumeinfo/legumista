@@ -60,7 +60,9 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 - **Read vs write.** Read-only is the default everywhere. Write-capable tools declare a
   per-call `writes(args)` classifier, because a dispatcher like `samtools` reads on `view`
   and writes on `sort`. The MCP server has no permission gate, so `--allow-write` is the
-  only control: without it, write subcommands fail closed. For the dispatchers a read is
+  only control: without it, write subcommands fail closed — and those tools are then
+  advertised as read-only, because they cannot write (`bio_tools` sets `read_only` from
+  the flag). For the dispatchers a read is
   an **allowlist** (`_SAM_SPEC`/`_BCF_SPEC` in `tools_pysam.py`: each read subcommand's
   side-effect-free options, from the bundled CLI source); anything not listed is a write.
   Never turn it back into a denylist of output flags — `view -U`, `fastq -1` and getopt

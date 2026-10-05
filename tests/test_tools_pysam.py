@@ -125,7 +125,19 @@ def test_tabix_index_is_write_gated(fixtures):
     tools = {t.name: t for t in P.bio_tools(allow_write=False)}
     # tabix_index always classifies as a write
     assert tools["tabix_index"].writes({}) is True
-    assert tools["tabix_index"].read_only is False
+
+
+def test_write_capable_tools_are_read_only_exactly_when_writes_are_off():
+    """`read_only` becomes the MCP readOnlyHint, which clients use to decide whether to
+    ask before each call. Without --allow-write these tools cannot write, so prompting
+    for them is noise; with it they can, and must be advertised as such."""
+    names = ("samtools", "bcftools", "tabix_index")
+    off = {t.name: t for t in P.bio_tools(allow_write=False)}
+    on = {t.name: t for t in P.bio_tools(allow_write=True)}
+    assert all(off[n].read_only is True for n in names)
+    assert all(on[n].read_only is False for n in names)
+    # The per-call classifier is unchanged: it is what refuses a write when writes are off.
+    assert off["samtools"].writes({"args": ["sort", "-o", "x.bam", "y.bam"]}) is True
 
 
 def test_parse_region_follows_samtools_coordinate_spec():

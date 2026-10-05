@@ -992,7 +992,12 @@ def _mk(name, description, params, sync_fn, *, read_only=True, writes=None):
 def bio_tools(allow_write: bool = False) -> list:
     """The pysam/htslib toolset. `allow_write` gates the dispatchers' and `tabix_index`'s
     write operations at the tool boundary (belt-and-suspenders alongside the permission
-    gate, and the sole gate on the MCP server, which has no permission layer)."""
+    gate, and the sole gate on the MCP server, which has no permission layer).
+
+    It also decides how those three tools are advertised. Without it they cannot write
+    anything — every write is refused — so they are read-only and say so: clients use
+    `readOnlyHint` to decide whether to ask the user before each call, and a prompt for
+    a tool that cannot write is noise. With it they can, and are advertised as such."""
     args_arr = {"args": {"type": "array", "items": {"type": "string"},
                          "description": "argv for the CLI: the subcommand followed by its "
                                         "flags/arguments, e.g. [\"view\",\"-c\",\"reads.bam\","
@@ -1013,7 +1018,7 @@ def bio_tools(allow_write: bool = False) -> list:
             "--allow-write. Regions are 1-based (e.g. 'chr1:1000-2000').",
             {"type": "object", "properties": {**args_arr}, "required": ["args"]},
             lambda a: _dispatch("samtools", _SAM_READ, allow_write, a),
-            read_only=False, writes=_mk_writes(_SAM_READ)),
+            read_only=not allow_write, writes=_mk_writes(_SAM_READ)),
         _mk("bcftools",
             "Run any bcftools subcommand on VCF/BCF (view, query, stats, call, norm, "
             "annotate, merge, index, consensus, …). Args: {args: [subcommand, ...]}. "
@@ -1021,7 +1026,7 @@ def bio_tools(allow_write: bool = False) -> list:
             "(call/norm/index/…) need --allow-write. Regions are 1-based.",
             {"type": "object", "properties": {**args_arr}, "required": ["args"]},
             lambda a: _dispatch("bcftools", _BCF_READ, allow_write, a),
-            read_only=False, writes=_mk_writes(_BCF_READ)),
+            read_only=not allow_write, writes=_mk_writes(_BCF_READ)),
         _mk("fasta_fetch",
             "Extract a subsequence from an indexed FASTA (.fai) — a guaranteed read-only "
             f"convenience over `samtools faidx`. Args: {{path, region}}. Capped at {MAX_SEQ:,} "
@@ -1048,5 +1053,5 @@ def bio_tools(allow_write: bool = False) -> list:
                                        "description": "Column layout of the file: gff, "
                                                       "bed, vcf, sam or psltbl."}},
              "required": ["path", "preset"]}, _tabix_index,
-            read_only=False, writes=lambda a: True),
+            read_only=not allow_write, writes=lambda a: True),
     ]

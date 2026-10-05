@@ -37,8 +37,9 @@ def _source_tools():
 def test_served_toolset_conforms_to_mcp_spec():
     """Every legumista tool the server means to serve is advertised, and the served
     surface satisfies the MCP tool spec: name grammar, a JSON-serializable object
-    inputSchema, and a readOnlyHint that matches the source tool's read_only flag (so
-    write-capable dispatchers like samtools are correctly advertised as not-read-only)."""
+    inputSchema, and a readOnlyHint that matches the source tool's read_only flag. The
+    write-capable dispatchers are read-only exactly when the server was started without
+    --allow-write, since they then cannot write."""
     from fastmcp import Client
     from legumista_agent.mcp_server import build_server
 
@@ -58,6 +59,9 @@ def test_served_toolset_conforms_to_mcp_spec():
                 assert isinstance(schema.get("properties", {}), dict)
                 json.dumps(schema)                 # advertised schema must serialize
             samtools = next(t for t in tools if t.name == "samtools")
+            assert _field(samtools.annotations, "read_only_hint", "readOnlyHint") is True
+        async with Client(build_server(allow_write=True)) as c:
+            samtools = next(t for t in await c.list_tools() if t.name == "samtools")
             assert _field(samtools.annotations, "read_only_hint", "readOnlyHint") is False
 
     _run(check())
