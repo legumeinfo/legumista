@@ -31,6 +31,15 @@ The request is a JSON object with an `op`:
     fasta      path, contig, start, end, max_seq: a subsequence (fasta_fetch)
     tabix      path, contig, start, end, limit: feature lines, or contigs if no contig
     samples    path: the sample names in a VCF/BCF header
+    batch      items: many small reads in one process, each file opened once — for a
+               tool that needs dozens of sequences or feature rows per call:
+                 {"kind": "fasta", "path", "name", "start"?, "end"?, "max_len"}
+                   -> {"seq", "ref_len"}; start/end 0-based half-open, clipped to the
+                      sequence; a whole record when both are absent
+                 {"kind": "pick", "path", "names", "rule": "present" | "longest"}
+                   -> {"name", "length"}: the first name the FASTA holds, or the longest
+                 {"kind": "tabix", "path", "contig", "start", "end", "limit"} -> {"rows"}
+               An item that fails carries {"error", "class"}; the others still run.
 and, for every op, max_file_bytes: RLIMIT_FSIZE for this process (0: unlimited).
 """
 import importlib
@@ -108,10 +117,60 @@ def _samples(req: dict) -> dict:
         return _error(e)
 
 
+def _batch(req: dict) -> dict:
+    import pysam
+
+    handles, out = {}, []
+
+    def open_file(kind, path):
+        key = (kind, path)
+        if key not in handles:
+            handles[key] = (pysam.FastaFile(path) if kind != "tabix"
+                            else pysam.TabixFile(path))
+        return handles[key]
+
+    for item in req.get("items", []):
+        kind = item.get("kind")
+        try:
+            handle = open_file(kind, item["path"])
+            if kind == "fasta":
+                name = item["name"]
+                ref_len = handle.get_reference_length(name)
+                start = max(0, int(item.get("start") or 0))
+                end = ref_len if item.get("end") is None else min(int(item["end"]), ref_len)
+                end = min(end, start + int(item.get("max_len") or end - start))
+                seq = handle.fetch(reference=name, start=start, end=end) if end > start else ""
+                out.append({"seq": seq, "ref_len": ref_len, "start": start, "end": end})
+            elif kind == "pick":
+                lengths = dict(zip(handle.references, handle.lengths))
+                present = [n for n in item["names"] if n in lengths]
+                if item.get("rule") == "longest" and present:
+                    present.sort(key=lambda n: (-lengths[n], n))
+                name = present[0] if present else None
+                out.append({"name": name, "length": lengths.get(name) if name else None})
+            elif kind == "tabix":
+                rows = []
+                if item["contig"] in set(handle.contigs):
+                    for row in handle.fetch(item["contig"], int(item["start"]),
+                                            int(item["end"])):
+                        rows.append(row)
+                        if len(rows) >= int(item.get("limit") or 5000):
+                            break
+                out.append({"rows": rows})
+            else:
+                out.append({"error": f"unknown batch item kind {kind!r}", "class": "value"})
+        except Exception as e:  # noqa: BLE001 - one failed item must not sink the rest
+            out.append(_error(e))
+    for handle in handles.values():
+        handle.close()
+    return {"items": out}
+
+
 def _run(req: dict) -> dict:
     op = req.get("op", "dispatch")
     if op != "dispatch":
-        return {"fasta": _fasta, "tabix": _tabix, "samples": _samples}[op](req)
+        return {"fasta": _fasta, "tabix": _tabix, "samples": _samples,
+                "batch": _batch}[op](req)
     from pysam.utils import SamtoolsError
 
     fn = getattr(importlib.import_module(f"pysam.{req['module']}"), req["sub"])

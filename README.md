@@ -4,7 +4,7 @@
 
 # Legumista — an MCP server for legume genomics
 
-**Legumista** gives a model working access to legume genomics. It serves 31 tools,
+**Legumista** gives a model working access to legume genomics. It serves 32 tools,
 read-only by default, over the [Model Context Protocol](https://modelcontextprotocol.io): a resident
 snapshot of the [LIS Data Store](https://data.legumeinfo.org) catalog, InterMine queries
 against the LIS mines, scholarly literature search and full-text retrieval, NCBI
@@ -151,6 +151,19 @@ proxy caps what a connection may send far below any useful upload.
 | `fasta_fetch` | Extract a subsequence from an indexed FASTA — read-only by construction |
 | `tabix_query` | Query a bgzip+tabix table; with no region, list its indexed contigs |
 | `tabix_index` | Build a bgzip+tabix index so a local file becomes region-queryable |
+
+### Gene selections — sequence
+
+`extract_features` takes a **gene selector**, one short argument the
+server resolves on every call (nothing is stored, so a selector copied from an old chat
+still works): `{"ids": [...]}` (up to 200 IDs, symbols or superseded IDs),
+`{"region": "contig:start-end"}` or `{"family": "legume.fam3.…", "collection": …}`, with
+an optional `translate_to` another annotation (by gene name and synonym files within a
+species, through shared gene families across species). Every input is accounted for.
+
+| Tool | What it does |
+| --- | --- |
+| `extract_features` | Strand-correct protein, CDS, mRNA, gene, upstream, downstream or UTR sequence for a selection, spans taken from the GFF3, headers carrying locus and source. Large output becomes a workspace FASTA + BED with `--allow-write` |
 
 ### Literature, NCBI and the web
 
@@ -358,7 +371,7 @@ client refreshes it.
   The container clones it for you.
 
   Either one missing degrades cleanly rather than failing: the six `lis_*` tools report
-  the catalog as unavailable and name the URL they tried, and the other 25 tools are
+  the catalog as unavailable and name the URL they tried, and the other 26 tools are
   unaffected (`verify_ids` reports collection IDs as UNCHECKED).
 - **NCBI CLIs** (optional, for `ncbi_datasets`/`ncbi_assembly_status`/`edirect`/`sra_runs`):
   NCBI `datasets` and EDirect on `PATH`. An `NCBI_API_KEY` raises the Entrez rate limit

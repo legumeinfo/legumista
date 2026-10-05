@@ -29,9 +29,11 @@ def _source_tools():
     from legumista_agent.tools_native import native_tools
     from legumista_agent.tools_pysam import bio_tools
     from legumista_agent.tools_verify import verify_tools
+    from legumista_agent.tools_extract import extract_tools
     return {t.name: t
             for t in (local_read_tools() + native_tools() + lis_tools()
-                      + mine_tools() + catalog_tools() + bio_tools() + verify_tools())}
+                      + mine_tools() + catalog_tools() + bio_tools() + extract_tools()
+                      + verify_tools())}
 
 
 def test_served_toolset_conforms_to_mcp_spec():
@@ -126,3 +128,4 @@ def test_every_tool_property_is_described():
                      for prop, spec in (tool.parameters.get("properties") or {}).items()
                      if not (spec.get("description") or "").strip())
     assert not missing, f"parameters without a description: {missing}"
+

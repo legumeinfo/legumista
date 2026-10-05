@@ -49,7 +49,8 @@ def mcp(
     allow_write: bool = typer.Option(
         False, "--allow-write",
         help="Expose the genomics tools' write operations (samtools sort/index, bcftools "
-             "call, tabix_index). Off by default — read operations only."),
+             "call, tabix_index, large extract_features output). Off by default — read "
+             "operations only."),
 ):
     """Start a spec-compliant FastMCP server exposing legumista's tools: the LIS Data
     Store catalog (lis_find/lis_files/lis_gene/lis_synteny, lis_survey/lis_lineage),

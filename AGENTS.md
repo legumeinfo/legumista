@@ -40,6 +40,9 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
     stdlib + pysam only).
   - `egress_proxy.py` — the loopback proxy every worker's HTTP goes through; refuses
     non-public destinations on every connection, redirect hops included.
+  - `genes.py` — gene selectors (`ids`, `region`, `family`, `translate_to`): a gene list
+    by definition, resolved on every call; nothing is stored, so nothing needs a session.
+  - `tools_extract.py` — `extract_features`, strand-correct sequence for a selection.
 - `legumista_assets/prompts/tools_native.md` — the tool-use doctrine served as the MCP
   server's `instructions`. Package data; editing it changes what every client is told.
 - `compose.yaml` / `.env.example` — the deployment path: builds the image from the

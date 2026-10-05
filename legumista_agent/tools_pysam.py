@@ -772,6 +772,7 @@ def _run_worker(req: dict, max_file_bytes: int = 0) -> dict:
 
     The child's environment routes all of htslib's HTTP through the egress proxy, which
     refuses non-public destinations on every connection — redirect hops included."""
+    _ensure_ca_bundle()      # the child's libcurl reads it; set it for every caller
     if not _WORKER_SLOTS.acquire(timeout=TIMEOUT):
         return {"error": "busy"}
     try:

@@ -229,6 +229,37 @@ without downloading the file.
 
 ---
 
+## Gene selections (`extract_features`)
+
+It takes `genes`, a **selector**: a short definition the server resolves on every call,
+so it can be reused verbatim later. Exactly one of:
+
+- `{"ids": [...], "collection"?: "<annotation>"}` — up to 200 IDs, curated symbols or
+  superseded IDs; `collection` is needed unless an ID is fully qualified.
+- `{"region": "glyma.Wm82.gnm4.Gm12:2800000-3000000"}` — genes whose coding extent
+  overlaps it (1-based).
+- `{"family": "legume.fam3.12584", "collection": "<annotation>"}` — that family's members
+  in one annotation.
+
+Add `"translate_to": "<annotation>"` to move a selection to another annotation (same
+species: by gene name or synonym file; across species: through shared gene families —
+one-to-many, so a match can be a paralog). Add `"offset": N` to page. The reply accounts
+for every input — resolved, via symbol, via superseded ID, not found, or refused (one
+annotation per selection) — so report a miss with the routes it names.
+
+- **`extract_features`** — strand-correct sequence: `feature` = `protein`, `cds`, `mrna`
+  (by model name, primary model by default; `isoforms:"all"` for every model), or `gene`,
+  `upstream`, `downstream`, `utr5`, `utr3` (from the genome, using the GFF3's gene and UTR
+  spans; minus-strand records are reverse-complemented, and upstream on the minus strand
+  lies at higher coordinates). `flank` (default 2,000, max 10,000), `anchor`
+  (`gene_start` or `start_codon`), `stop_at_neighbor`. Headers carry locus, source and
+  notes such as clipping. CDS notes (no ATG, no stop, internal stop) are information:
+  partial models are normal, never a data defect. `dry_run` gives record counts and bases
+  without fetching. Large output is written to a workspace FASTA + BED only with
+  `--allow-write`; otherwise the reply says how many records it left out.
+
+---
+
 ## LIS InterMine (`legumemine_*`, `lis_trait_*`, `lis_marker_position`)
 
 Per-question queries over the LIS mines; every result names the mine that answered.

@@ -195,7 +195,7 @@ def startup() -> dict:
 
     A pinned local file short-circuits. Otherwise fetch — conditionally, so a warm cache
     costs one 304 — and fall back to whatever is cached when the network is unavailable.
-    Never fatal: a server with no catalog still serves its other 24 tools.
+    Never fatal: a server with no catalog still serves its other tools.
     """
     if is_pinned():
         return {"status": "pinned", "detail": _resolve_path(), "reloaded": False}
