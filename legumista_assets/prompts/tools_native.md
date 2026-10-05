@@ -287,6 +287,21 @@ Per-question queries over the LIS mines; every result names the mine that answer
   data lives only in per-genus mines. A species with no mine is reported as such; its
   data, if any, is in the Data Store (`lis_find`).
 
+## report_data_issue — file a data defect (when the server offers it)
+
+Served only where enabled. For **defects in the LIS Data Store or a mine** that a curator
+would fix: a README that does not parse or names the wrong collection, a field that
+contradicts its siblings, a typo'd identifier, a mine record that contradicts the store.
+Not for missing files, CDS notes, site or browser configuration, or your own suspicions.
+
+Name one `subject` (a collection; or `<mine>/<Class>/<primaryIdentifier>`), one `field`
+(`readme`, `readme.<key>`, `catalog.<key>`; or a mine attribute) and the value you
+`observed`. The server re-reads that field and **refuses if it differs** — so quote it
+exactly. `summary` is the title (the object and the defect); `expected` and `reason` are
+shown as unverified. The user confirms before anything is filed: either the server asks
+them, or you get a PREVIEW and must show it to them and call again with `confirm` only
+after they agree. Never confirm on their behalf. A duplicate returns the existing issue.
+
 ## verify_ids — check identifiers before you answer
 
 Pass your draft as `text` (or lists of DOIs, gene IDs, collection IDs, GCA_/GCF_

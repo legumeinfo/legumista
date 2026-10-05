@@ -24,7 +24,7 @@
           "type": "positional",
           "value": "mcp",
           "valueHint": "subcommand",
-          "description": "Start the MCP server (stdio) via `uvx legumista mcp`. Append '--allow-write' to permit write operations."
+          "description": "Start the MCP server (stdio) via `uvx legumista mcp`. Append '--allow-write' to permit write operations, and '--allow-report' (with a GitHub App configured) to serve report_data_issue."
         }
       ],
       "environmentVariables": [
@@ -67,6 +67,42 @@
         {
           "name": "LEGUMISTA_PYSAM_ALLOWED_URLS",
           "description": "Optional comma-separated http(s) URL-prefix allowlist for the genomics tools; when unset, any public host is allowed (private/loopback are always blocked).",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_CATALOG_PATH",
+          "description": "Pin the server to a local catalog.json instead of downloading one: nothing is fetched and polling is off.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_DEPLOYMENT",
+          "description": "'public' advertises every tool as read-only so a public host's users are not prompted; anything else (the default) keeps the hints honest, so local users are asked before a tool writes or files an issue.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_GITHUB_APP_ID",
+          "description": "The GitHub App report_data_issue files issues as (with --allow-report). Give it only Issues read & write, installed only on the target repository. Unset, the tool is not served.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_GITHUB_APP_KEY_FILE",
+          "description": "Path to the GitHub App's private key (PEM). The server signs short-lived tokens with it; the key never leaves the server.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_GITHUB_APP_INSTALLATION_ID",
+          "description": "Optional: the App's installation ID. Unset, it is looked up from the target repository.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "LEGUMISTA_REPORT_REPOS",
+          "description": "Where report_data_issue files, as service=owner/repo#label pairs. Defaults to datastore=matthewwiese/datastore-metadata#datastore-issue,mine=matthewwiese/datastore-metadata#mine-issue.",
           "isRequired": false,
           "isSecret": false
         }

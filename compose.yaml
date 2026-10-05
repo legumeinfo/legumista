@@ -52,6 +52,9 @@ services:
       # set LEGUMISTA_CATALOG_PATH=/etc/legumista/catalog.json in .env. Nothing is
       # fetched, polling is off, and the refresh webhook reports "pinned".
       # - ./catalog.json:/etc/legumista/catalog.json:ro
+      # For report_data_issue: the GitHub App's private key, read-only. Set
+      # LEGUMISTA_GITHUB_APP_KEY_FILE=/run/secrets/legumista-app.pem in .env.
+      # - ./legumista-app.pem:/run/secrets/legumista-app.pem:ro
 
     # Everything else is read-only. The two writable paths are memory-backed and
     # size-capped, so no tool call can fill the host's disk: /tmp (the genomics workers'

@@ -130,3 +130,52 @@ def test_every_tool_property_is_described():
                      if not (spec.get("description") or "").strip())
     assert not missing, f"parameters without a description: {missing}"
 
+
+def _hints(**build):
+    from fastmcp import Client
+    from legumista_agent.mcp_server import build_server
+
+    async def collect():
+        async with Client(build_server(**build)) as c:
+            return {t.name: _field(t.annotations, "read_only_hint", "readOnlyHint")
+                    for t in await c.list_tools()}
+    return _run(collect())
+
+
+def test_a_local_deployment_advertises_write_capable_tools_honestly(monkeypatch):
+    """Locally the hints stay honest, so a client asks before a tool that can write a
+    file or file an issue."""
+    from legumista_agent import tools_report
+
+    monkeypatch.delenv("LEGUMISTA_DEPLOYMENT", raising=False)
+    monkeypatch.setattr(tools_report, "_app_configured", lambda: True)
+    hints = _hints(allow_write=True, allow_report=True)
+    for name in ("samtools", "bcftools", "tabix_index", "extract_features",
+                 "report_data_issue"):
+        assert hints[name] is False, name
+    assert hints["browser_link"] is True and hints["lis_gene"] is True
+
+
+def test_a_public_deployment_advertises_every_tool_read_only(monkeypatch):
+    """A public host's users are not prompted; the server's own checks stand in."""
+    from legumista_agent import tools_report
+
+    monkeypatch.setenv("LEGUMISTA_DEPLOYMENT", "public")
+    monkeypatch.setattr(tools_report, "_app_configured", lambda: True)
+    hints = _hints(allow_write=True, allow_report=True)
+    assert all(hints.values()), [n for n, v in hints.items() if not v]
+
+
+def test_an_unknown_deployment_value_fails_safe_toward_prompting(monkeypatch):
+    monkeypatch.setenv("LEGUMISTA_DEPLOYMENT", "pubilc")       # a typo
+    assert _hints(allow_write=True)["samtools"] is False
+
+
+def test_report_data_issue_is_served_only_with_the_flag_and_an_app(monkeypatch):
+    from legumista_agent import tools_report
+
+    monkeypatch.setattr(tools_report, "_app_configured", lambda: False)
+    assert "report_data_issue" not in _hints(allow_report=True)
+    monkeypatch.setattr(tools_report, "_app_configured", lambda: True)
+    assert "report_data_issue" not in _hints(allow_report=False)
+    assert "report_data_issue" in _hints(allow_report=True)

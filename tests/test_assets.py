@@ -41,6 +41,9 @@ def _instructions() -> str:
 
 
 def _served_tool_names() -> set:
+    """Every tool a server can serve, including report_data_issue, which exists only
+    with --allow-report and a GitHub App but still needs its line of doctrine."""
+    from legumista_agent import tools_report
     from legumista_agent.tools_browser import browser_tools
     from legumista_agent.tools_catalog import catalog_tools
     from legumista_agent.tools_extract import extract_tools
@@ -50,9 +53,15 @@ def _served_tool_names() -> set:
     from legumista_agent.tools_native import native_tools
     from legumista_agent.tools_pysam import bio_tools
     from legumista_agent.tools_verify import verify_tools
+    real = tools_report._app_configured
+    tools_report._app_configured = lambda: True
+    try:
+        report = tools_report.report_tools(allow_report=True)
+    finally:
+        tools_report._app_configured = real
     return {t.name for t in (local_read_tools() + native_tools() + lis_tools()
                              + mine_tools() + catalog_tools() + bio_tools()
-                             + extract_tools() + browser_tools()
+                             + extract_tools() + browser_tools() + report
                              + verify_tools())}
 
 

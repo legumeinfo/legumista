@@ -34,6 +34,8 @@ dependencies = [
     "fastmcp>=3.0,<5", # the server; mcp_server.py handles 3.x and 4.x (see _make_bridge_class)
     "pysam>=0.22",     # htslib bindings for the samtools/bcftools/tabix tools
     "certifi>=2023.7", # CA bundle for htslib's vendored libcurl (remote genomics I/O)
+    "pyyaml>=6",       # report_data_issue re-reads datastore READMEs, which are YAML
+    "pyjwt[crypto]>=2.8",  # report_data_issue signs as a GitHub App (RS256)
 ]
 
 [project.optional-dependencies]

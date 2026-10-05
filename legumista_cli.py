@@ -8,6 +8,7 @@ server is self-contained and the collection catalog ships with the package.
     legumista mcp                      # stdio — how an MCP client spawns a server
     legumista mcp -t http --port 8000  # a long-running HTTP endpoint
     legumista mcp --allow-write        # also expose the write-capable genomics ops
+    legumista mcp --allow-report       # also serve report_data_issue (needs a GitHub App)
 """
 
 import os
@@ -51,6 +52,10 @@ def mcp(
         help="Expose the genomics tools' write operations (samtools sort/index, bcftools "
              "call, tabix_index, large extract_features output). Off by default — read "
              "operations only."),
+    allow_report: bool = typer.Option(
+        False, "--allow-report",
+        help="Serve report_data_issue, which files data defects as GitHub issues. Also "
+             "needs a GitHub App (LEGUMISTA_GITHUB_APP_ID and _KEY_FILE). Off by default."),
 ):
     """Start a spec-compliant FastMCP server exposing legumista's tools: the LIS Data
     Store catalog (lis_find/lis_files/lis_gene/lis_synteny, lis_survey/lis_lineage),
@@ -71,10 +76,11 @@ def mcp(
     log = _err if transport == "stdio" else _out
     log(f"[*] legumista MCP server (transport={transport}"
         + (f", http://{host}:{port}/mcp" if transport == "http" else "")
-        + (", writes ENABLED" if allow_write else "") + ") …")
+        + (", writes ENABLED" if allow_write else "")
+        + (", issue reports ENABLED" if allow_report else "") + ") …")
     try:
         serve(transport=transport, host=host, port=port, allow_write=allow_write,
-              log=log)
+              allow_report=allow_report, log=log)
     except KeyboardInterrupt:
         log("[*] stopped.")
 

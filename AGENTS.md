@@ -42,8 +42,9 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
     non-public destinations on every connection, redirect hops included.
   - `genes.py` — gene selectors (`ids`, `region`, `family`, `translate_to`): a gene list
     by definition, resolved on every call; nothing is stored, so nothing needs a session.
-  - `tools_extract.py` (`extract_features`), `tools_browser.py` (`browser_link`, which
-    reads the catalog's JBrowse placements and predicts names only without them).
+  - `tools_extract.py` (`extract_features`), `tools_browser.py` (`browser_link`),
+    `tools_report.py` (`report_data_issue`, served only with `--allow-report` and a
+    GitHub App; it authenticates only as that App).
 - `legumista_assets/prompts/tools_native.md` — the tool-use doctrine served as the MCP
   server's `instructions`. Package data; editing it changes what every client is told.
 - `compose.yaml` / `.env.example` — the deployment path: builds the image from the
@@ -66,7 +67,10 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   and writes on `sort`. The MCP server has no permission gate, so `--allow-write` is the
   only control: without it, write subcommands fail closed — and those tools are then
   advertised as read-only, because they cannot write (`bio_tools` sets `read_only` from
-  the flag). For the dispatchers a read is
+  the flag). `LEGUMISTA_DEPLOYMENT=public` is the one deliberate exception: it advertises
+  every tool as read-only so a public host's users are not prompted, and the server's own
+  checks stand in (a confirmation dialog before any issue is filed; the sandbox and caps
+  for files). The default is honest hints. For the dispatchers a read is
   an **allowlist** (`_SAM_SPEC`/`_BCF_SPEC` in `tools_pysam.py`: each read subcommand's
   side-effect-free options, from the bundled CLI source); anything not listed is a write.
   Never turn it back into a denylist of output flags — `view -U`, `fastq -1` and getopt

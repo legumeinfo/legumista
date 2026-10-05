@@ -2,10 +2,11 @@
 
 This used to configure a whole research pipeline (crawl budgets, LLM endpoints, ideation
 parameters, per-project YAML). legumista is now solely an MCP server, so what remains is
-the three things the served tools actually need:
+the things the served tools actually need:
 
     WORKSPACE        the directory local file arguments are confined to
     contact_email()  the polite-pool mailto sent to OpenAlex/Crossref/Unpaywall
+    deployment()     'local' or 'public': how the tools are advertised to clients
     tools_spec()     the tool-use doctrine appended to the server's MCP instructions
 
 Everything is environment-driven; there is no config file to find, parse, or get wrong.
@@ -53,6 +54,21 @@ def contact_email() -> str:
     # from a compose `environment:` block or an `EMAIL=` line) would otherwise be sent to
     # OpenAlex as the mailto, which is worse than the obviously-fake default.
     return os.environ.get("LEGUMISTA_CONTACT_EMAIL") or "you@example.org"
+
+
+def deployment() -> str:
+    """'public' or 'local' (the default), from LEGUMISTA_DEPLOYMENT.
+
+    It decides one thing: how write-capable tools are advertised. Clients use the MCP
+    `readOnlyHint` to decide whether to ask the user before each call. Locally they
+    should ask before a tool writes a file or files an issue, so the hints stay honest.
+    A public host advertises every tool as read-only so its users are not prompted; its
+    own checks stand in for the prompt (a confirmation dialog the user answers before
+    any issue is filed, and the workspace sandbox and per-file caps for files).
+    Anything other than 'public' is 'local': an unrecognised value fails safe, toward
+    prompting."""
+    value = (os.environ.get("LEGUMISTA_DEPLOYMENT") or "").strip().lower()
+    return "public" if value == "public" else "local"
 
 
 def tools_spec() -> str:

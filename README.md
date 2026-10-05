@@ -152,7 +152,7 @@ proxy caps what a connection may send far below any useful upload.
 | `tabix_query` | Query a bgzip+tabix table; with no region, list its indexed contigs |
 | `tabix_index` | Build a bgzip+tabix index so a local file becomes region-queryable |
 
-### Gene selections — sequence and browser links
+### Gene selections — sequence, browser links, defect reports
 
 `extract_features` and `browser_link` take a **gene selector**, one short argument the
 server resolves on every call (nothing is stored, so a selector copied from an old chat
@@ -165,6 +165,7 @@ species, through shared gene families across species). Every input is accounted 
 | --- | --- |
 | `extract_features` | Strand-correct protein, CDS, mRNA, gene, upstream, downstream or UTR sequence for a selection, spans taken from the GFF3, headers carrying locus and source. Large output becomes a workspace FASTA + BED with `--allow-write` |
 | `browser_link` | A link into an LIS JBrowse 2 instance for a selection or region, genes highlighted on the gene models track; or a dotplot of two genomes. Names come from the catalog's record of each instance's deployed config, so it can say when no instance serves an assembly |
+| `report_data_issue` | Files a data defect in the Data Store or a mine as a GitHub issue, after re-reading the field from its source and only with the user's confirmation. Authenticates as a GitHub App; served only with `--allow-report` and an App configured |
 
 ### Literature, NCBI and the web
 
@@ -225,6 +226,7 @@ legumista mcp                          # stdio — how clients spawn a server
 legumista mcp -t http --port 8000      # long-running HTTP endpoint at /mcp
 legumista mcp -C /data                 # confine local file arguments to /data
 legumista mcp --allow-write            # permit genomics write ops (sort/index/call/…)
+legumista mcp --allow-report           # serve report_data_issue (needs a GitHub App)
 ```
 
 The server needs no project, config file, or particular working directory. Local file
@@ -391,8 +393,15 @@ client refreshes it.
 | `LEGUMISTA_DSCENSOR_PATH` | Where to find the DSCensor package |
 | `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex, Crossref and Unpaywall. Set it on any shared server: retraction checks and `verify_ids` query Crossref once per DOI |
 | `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional allowlist of `scheme://host[/path]` prefixes the genomics tools may open, matched by host. Unset, any public host is allowed |
+| `LEGUMISTA_DEPLOYMENT` | `public` advertises every tool as read-only, so a public host's users are not prompted. Anything else (the default) keeps the hints honest: local users are asked before a tool writes or files an issue |
 | `LEGUMISTA_JBROWSE_INSTANCE` | The JBrowse instance `browser_link` prefers when several serve an assembly. Default `all-genera` |
 | `LEGUMISTA_JBROWSE_URL` | The instance `browser_link` targets when the catalog records no JBrowse placements (names are then predicted). Default: LIS all-genera |
+| `LEGUMISTA_GITHUB_APP_ID` | The GitHub App `report_data_issue` files as (with `--allow-report`). Give the App only the Issues read & write permission and install it only on the target repository |
+| `LEGUMISTA_GITHUB_APP_KEY_FILE` | Path to the App's private key (PEM). Mount it read-only; it never leaves the server |
+| `LEGUMISTA_GITHUB_APP_INSTALLATION_ID` | Optional: the App's installation ID. Unset, it is looked up from the target repository |
+| `LEGUMISTA_REPORT_REPOS` | Where reports go, as `service=owner/repo#label` pairs. Default: the development fork, `datastore-issue` and `mine-issue` labels |
+| `LEGUMISTA_METADATA_REPO` | The datastore-metadata repository READMEs are re-read from, at the catalog's commit. Default `matthewwiese/datastore-metadata` |
+| `LEGUMISTA_REPORT_DAILY_LIMIT` | Issues one server may file per day. Default `20` |
 | `LEGUMISTA_INDEX_TTL` | Seconds a downloaded remote index (`.tbi`/`.bai`/`.csi`) is reused before it is fetched again. Indexes are cached per URL. Default `3600` |
 | `LEGUMISTA_EGRESS_PORTS` | Ports the genomics tools may connect to. Default `80,443` |
 | `LEGUMISTA_EGRESS_MAX_SEND_BYTES` | Most a genomics connection may send. Reads send about 1 KB; this bounds an upload. Default `65536` |

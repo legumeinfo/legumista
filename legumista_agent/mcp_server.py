@@ -65,7 +65,8 @@ def _make_bridge_class():
     return _BridgeTool
 
 
-def build_server(name: str = "legumista", *, allow_write: bool = False):
+def build_server(name: str = "legumista", *, allow_write: bool = False,
+                 allow_report: bool = False):
     """Assemble a FastMCP server exposing legumista's full toolset.
 
     Returns the `FastMCP` instance (not yet running). Every tool is registered with its
@@ -84,6 +85,7 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
     from .tools_mine import mine_tools
     from .tools_native import native_tools
     from .tools_pysam import bio_tools
+    from .tools_report import report_tools
     from .tools_verify import verify_tools
 
     Bridge = _make_bridge_class()
@@ -106,23 +108,27 @@ def build_server(name: str = "legumista", *, allow_write: bool = False):
 
     server = FastMCP(name=name, instructions=instructions)
 
+    # A public host advertises every tool as read-only, so its users are not prompted
+    # before each call; config.deployment() explains what stands in for the prompt.
+    public = config.deployment() == "public"
     _HANDLERS.clear()
     for tool in (local_read_tools() + native_tools() + lis_tools() + mine_tools()
                  + catalog_tools() + bio_tools(allow_write=allow_write)
                  + extract_tools(allow_write=allow_write) + browser_tools()
-                 + verify_tools()):
+                 + report_tools(allow_report=allow_report) + verify_tools()):
         _HANDLERS[tool.name] = tool.run
         server.add_tool(Bridge(
             name=tool.name,
             description=tool.description,
             parameters=_normalize_params(tool.parameters),
-            annotations={"readOnlyHint": bool(tool.read_only)},
+            annotations={"readOnlyHint": bool(tool.read_only) or public},
         ))
     return server
 
 
 def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000,
-          show_banner: bool = False, *, allow_write: bool = False, log=None) -> None:
+          show_banner: bool = False, *, allow_write: bool = False,
+          allow_report: bool = False, log=None) -> None:
     """Build and run the server (blocking). `transport` is 'stdio' (default; how MCP
     clients spawn a server) or 'http' (a long-running HTTP endpoint on host:port).
     `allow_write` enables the write-capable genomics tools' write operations.
@@ -146,7 +152,7 @@ def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000,
     if report.get("stamp"):
         log(f"    {report['stamp']}")
 
-    server = build_server(allow_write=allow_write)
+    server = build_server(allow_write=allow_write, allow_report=allow_report)
 
     if transport != "stdio":
         webhook.register(server, refresh_fn=tools_catalog.refresh, log=log)
