@@ -83,11 +83,25 @@ def _fasta(req: dict) -> dict:
     return {"seq": seq, "start": start, "end": end, "span": span, "truncated": truncated}
 
 
+def _open_tabix(pysam, path):
+    """Open a bgzip+tabix file whatever its index. pysam asks htslib only for `.tbi`, so a
+    file published with only a `.csi` (chromosomes too long for TBI: four pea, two faba
+    bean and one lentil annotation) fails to open; retry naming the `.csi`, and report
+    the original error if that fails too."""
+    try:
+        return pysam.TabixFile(path)
+    except OSError as first:
+        try:
+            return pysam.TabixFile(path, index=path + ".csi")
+        except OSError:
+            raise first from None
+
+
 def _tabix(req: dict) -> dict:
     import pysam
 
     try:
-        tbx = pysam.TabixFile(req["path"])
+        tbx = _open_tabix(pysam, req["path"])
     except Exception as e:  # noqa: BLE001
         return _error(e)
     try:
@@ -126,7 +140,7 @@ def _batch(req: dict) -> dict:
         key = (kind, path)
         if key not in handles:
             handles[key] = (pysam.FastaFile(path) if kind != "tabix"
-                            else pysam.TabixFile(path))
+                            else _open_tabix(pysam, path))
         return handles[key]
 
     for item in req.get("items", []):

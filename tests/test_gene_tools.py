@@ -341,6 +341,23 @@ def test_start_codon_anchor_and_utrs(world):
         rc(sl(CONTIG12, 1001, 1040))
 
 
+
+def test_a_csi_only_gff_is_read(world):
+    """Four pea, two faba bean and one lentil annotation index their GFF3 with CSI only;
+    pysam alone would look for a .tbi and fail every genomic feature."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    ann = next(c for c in doc["collections"] if c["id"] == "Wm82.gnm4.ann1.T8TQ")
+    gff = os.path.join(ann["base_url"], f"{P4}.T8TQ.gene_models_main.gff3.gz")
+    os.unlink(gff + ".tbi")
+    pysam.tabix_index(gff, preset="gff", csi=True, force=True)
+    for entry in ann["files"]:
+        if entry["n"].endswith("gene_models_main.gff3.gz"):
+            entry["i"] = [".csi"]
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    out = extract(genes={"ids": [Bg], "collection": "Wm82.gnm4.ann1.T8TQ"}, feature="gene")
+    assert records(out.text)[Bg] == rc(sl(CONTIG12, 1001, 1300))
+
 def test_a_gene_without_a_utr_is_a_problem_not_an_empty_record(world):
     out = extract(genes={"ids": [Cg], "collection": "Wm82.gnm4.ann1.T8TQ"}, feature="utr5")
     assert records(out.text) == {}

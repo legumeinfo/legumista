@@ -120,6 +120,19 @@ def test_tabix_query(fixtures):
     assert "ID=gene1" in out and "ID=exon1" in out
 
 
+def test_a_csi_only_table_is_read(fixtures):
+    """pysam asks htslib only for a .tbi; a file published with only a .csi (pea, faba
+    bean and lentil gene models, whose chromosomes are too long for TBI) must still
+    open."""
+    gff = fixtures / "long.gff3"
+    gff.write_text("chr1\ttest\tgene\t10\t50\t.\t+\t.\tID=gene9\n")
+    pysam.tabix_compress(str(gff), str(gff) + ".gz", force=True)
+    pysam.tabix_index(str(gff) + ".gz", preset="gff", csi=True, force=True)
+    assert not (fixtures / "long.gff3.gz.tbi").exists()
+    assert "ID=gene9" in P._tabix_query({"path": "long.gff3.gz", "region": "chr1:1-100"})
+    assert "1 contig(s)" in P._tabix_query({"path": "long.gff3.gz"})
+
+
 def test_tabix_index_is_write_gated(fixtures):
     # bio_tools wires allow_write into the tool; the handler itself must fail closed
     tools = {t.name: t for t in P.bio_tools(allow_write=False)}
