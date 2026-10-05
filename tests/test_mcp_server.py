@@ -29,11 +29,12 @@ def _source_tools():
     from legumista_agent.tools_native import native_tools
     from legumista_agent.tools_pysam import bio_tools
     from legumista_agent.tools_verify import verify_tools
+    from legumista_agent.tools_browser import browser_tools
     from legumista_agent.tools_extract import extract_tools
     return {t.name: t
             for t in (local_read_tools() + native_tools() + lis_tools()
                       + mine_tools() + catalog_tools() + bio_tools() + extract_tools()
-                      + verify_tools())}
+                      + browser_tools() + verify_tools())}
 
 
 def test_served_toolset_conforms_to_mcp_spec():

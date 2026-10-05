@@ -1,4 +1,4 @@
-"""Gene selectors and `extract_features`.
+"""Gene selectors, `extract_features` and `browser_link`.
 
 A small synthetic soybean contig with real bgzipped, indexed FASTA and GFF3 files, so
 the htslib worker really runs and every expected sequence is computed from the contig
@@ -17,6 +17,7 @@ import json
 import os
 import random
 import sys
+import urllib.parse
 
 import pytest
 
@@ -24,6 +25,7 @@ pysam = pytest.importorskip("pysam")
 
 import config  # noqa: E402
 from legumista_agent import genes as G  # noqa: E402
+from legumista_agent import tools_browser as B  # noqa: E402
 from legumista_agent import tools_catalog as C  # noqa: E402
 from legumista_agent import tools_extract as X  # noqa: E402
 from legumista_agent import tools_lis as L  # noqa: E402
@@ -399,3 +401,173 @@ def test_bad_arguments_fail_clearly(world):
     assert "feature" in extract(genes=SEL, feature="exon").text
     assert "between 1 and" in extract(genes=SEL, feature="upstream", flank=50_000).text
 
+
+# --- browser_link --------------------------------------------------------------------
+def _params(url):
+    return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+
+
+def _links(text):
+    return [line.strip() for line in text.splitlines() if line.strip().startswith("https://")]
+
+
+def test_a_gene_link_highlights_it_on_the_gene_track(world):
+    out = run(asyncio.to_thread(B._browser_link, {"genes": {"ids": ["GmNARK"],
+                                                            "collection": "Wm82.gnm4.ann1.T8TQ"}}))
+    (url,) = _links(out.text)
+    params = _params(url)
+    assert params["assembly"] == "glyma.Wm82.gnm4"
+    assert params["loc"] == f"{GM12}:41-2250"
+    assert params["highlight"] == f"{GM12}:1041-1250"
+    assert params["tracks"] == f"{P4}.T8TQ.gene_models_main.gff3"
+    assert "PREDICTED" in out.text and "no JBrowse placements yet" in out.text
+
+
+def test_inline_features_are_zero_based_half_open(world):
+    out = run(asyncio.to_thread(B._browser_link, {
+        "genes": {"ids": [Bg], "collection": "Wm82.gnm4.ann1.T8TQ"}, "mark": "features"}))
+    session = json.loads(_params(_links(out.text)[0])["sessionTracks"])
+    (feature,) = session[0]["adapter"]["features"]
+    assert (feature["start"], feature["end"], feature["strand"]) == (1040, 1250, -1)
+
+
+def test_a_csi_only_gff_becomes_a_session_track_with_its_csi(world):
+    out = run(asyncio.to_thread(B._browser_link, {"region": "pissa.ZW6.gnm1.chr1:1-1000"}))
+    session = json.loads(_params(_links(out.text)[0])["sessionTracks"])
+    adapter = session[0]["adapter"]
+    assert _params(_links(out.text)[0])["tracks"] == session[0]["trackId"]   # shown
+    assert adapter["index"]["indexType"] == "CSI"
+    assert adapter["index"]["location"]["uri"].startswith(B.DATA_HOST)
+    assert adapter["index"]["location"]["uri"].endswith(".gff3.gz.csi")
+
+
+def test_a_url_is_never_accepted_as_a_track(world):
+    out = run(asyncio.to_thread(B._browser_link, {
+        "region": f"{GM12}:1-100", "tracks": ["https://evil.example/x.gff3.gz"]}))
+    assert out.is_error and "never accepted" in out.text
+
+
+def test_dotplot_uses_the_catalogs_alignment(world):
+    out = run(asyncio.to_thread(B._browser_link, {
+        "region": f"{GM12}:1-100", "view": "dotplot", "compare": "phavu.G19833.gnm2"}))
+    spec = json.loads(_params(_links(out.text)[0])["session"][len("spec-"):])
+    view = spec["views"][0]
+    assert view["type"] == "DotplotView"
+    assert view["tracks"] == ["glyma.Wm82.gnm4.x.phavu.G19833.gnm2.ABCD.paf"]
+    missing = run(asyncio.to_thread(B._browser_link, {
+        "region": f"{GM12}:1-100", "view": "dotplot", "compare": "medtr.A17.gnm5"}))
+    assert missing.is_error and "no synteny track" in missing.text
+
+
+def test_a_long_url_marks_fewer_genes_and_says_so(world, monkeypatch):
+    monkeypatch.setattr(B, "MAX_URL_CHARS", 420)
+    out = run(asyncio.to_thread(B._browser_link, {
+        "genes": {"region": f"{GM12}:1-2000"}, "mark": "features"}))
+    assert "the URL limit cut the rest" in out.text
+
+
+
+# --- browser_link with the catalog's JBrowse placements ------------------------------
+AG = "https://all-genera.lis.ncgr.org/tools/jbrowse2/"
+CICER = "https://cicer.legumeinfo.org/tools/jbrowse2/"
+GENE_TRACK = f"{P4}.T8TQ.gene_models_main.gff3"
+
+
+@pytest.fixture
+def placed(world):
+    """The fixture catalog as populate-catalog writes it once it records placements
+    (JBROWSE_IDS_IN_CATALOG.md): two instances up, one unavailable at build time."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    doc["jbrowse_instances"] = {
+        "all-genera": {"url": AG, "status": "ok", "fetched_at": "2026-10-05T12:00:00Z"},
+        "cicer": {"url": CICER, "status": "ok", "fetched_at": "2026-10-05T12:00:00Z"},
+        "peanutbase": {"url": "https://www.peanutbase.org/tools/jbrowse2/",
+                       "status": "unavailable", "detail": "HTTP 503"}}
+    by_id = {c["id"]: c for c in doc["collections"]}
+    by_id["Wm82.gnm4.4PTR"]["jbrowse"] = [
+        {"instance": "all-genera", "assemblies": ["glyma.Wm82.gnm4"]},
+        {"instance": "cicer", "assemblies": ["glyma.Wm82.gnm4"]}]
+    by_id["Wm82.gnm4.ann1.T8TQ"]["jbrowse"] = [
+        {"instance": "all-genera", "assemblies": ["glyma.Wm82.gnm4"],
+         "tracks": [{"id": GENE_TRACK, "type": "FeatureTrack",
+                     "file": f"{P4}.T8TQ.gene_models_main.gff3.gz", "index": "TBI"}]},
+        {"instance": "cicer", "assemblies": ["glyma.Wm82.gnm4"],
+         "tracks": [{"id": "glyma_custom_genes", "type": "FeatureTrack",
+                     "file": f"{P4}.T8TQ.gene_models_main.gff3.gz", "index": "TBI"}]}]
+    doc["collections"].append(
+        {"path": "Pisum/sativum/genomes/ZW6.gnm1.ABCD", "id": "ZW6.gnm1.ABCD",
+         "type": "genomes", "genus": "Pisum", "species": "sativum",
+         "base_url": f"{DS}/Pisum/sativum/genomes/ZW6.gnm1.ABCD", "index_status": "known",
+         "scientific_name_abbrev": "pissa", "files": [],
+         "jbrowse": [{"instance": "all-genera", "assemblies": ["pissa.ZW6.gnm1"]}]})
+    by_id["ZW6.gnm1.ann1.TKZX"]["jbrowse"] = [
+        {"instance": "all-genera", "assemblies": ["pissa.ZW6.gnm1"],
+         "tracks": [{"id": "pissa.ZW6.gnm1.ann1.TKZX.gene_models_main.gff3",
+                     "type": "FeatureTrack", "index": "TBI",
+                     "file": "pissa.ZW6.gnm1.ann1.TKZX.gene_models_main.gff3.gz"}]}]
+    by_id["Wm82.gnm4.wga.ABCD"]["jbrowse"] = [
+        {"instance": "all-genera", "assemblies": ["glyma.Wm82.gnm4", "phavu.G19833.gnm2"],
+         "tracks": [{"id": "deployed.synteny.track", "type": "SyntenyTrack",
+                     "file": "glyma.Wm82.gnm4.x.phavu.G19833.gnm2.ABCD.paf.gz"}]}]
+    doc["collections"].append(
+        {"path": "Phaseolus/vulgaris/genomes/G19833.gnm2.fC0g", "id": "G19833.gnm2.fC0g",
+         "type": "genomes", "genus": "Phaseolus", "species": "vulgaris",
+         "base_url": f"{DS}/Phaseolus/vulgaris/genomes/G19833.gnm2.fC0g",
+         "index_status": "known", "scientific_name_abbrev": "phavu", "files": []})
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    return world
+
+
+def link(**args):
+    return run(asyncio.to_thread(B._browser_link, args))
+
+
+def test_placed_names_come_from_the_deployed_config(placed):
+    out = link(genes={"ids": ["GmNARK"], "collection": "Wm82.gnm4.ann1.T8TQ"})
+    (url,) = _links(out.text)
+    assert url.startswith(AG)
+    assert _params(url)["tracks"] == GENE_TRACK
+    assert "from all-genera's deployed config" in out.text and "PREDICTED" not in out.text
+
+
+def test_a_track_only_a_genus_portal_serves_picks_that_portal(placed):
+    out = link(region=f"{GM12}:1-2000", tracks=["glyma_custom_genes"])
+    (url,) = _links(out.text)
+    assert url.startswith(CICER) and _params(url)["tracks"] == "glyma_custom_genes"
+
+
+def test_an_assembly_no_instance_serves_is_a_finding_with_what_was_checked(placed):
+    out = link(region="phavu.G19833.gnm2.Chr02:1-1000")
+    assert not out.is_error and not _links(out.text)
+    assert "no LIS JBrowse instance serves phavu.G19833.gnm2 (checked: all-genera, cicer)" \
+        in out.text
+    assert "NOT CHECKED: peanutbase" in out.text
+
+
+def test_an_explicit_instance_that_does_not_serve_it_says_who_does(placed):
+    out = link(region="pissa.ZW6.gnm1.chr1:1-1000", instance="cicer")
+    assert "cicer does not serve pissa.ZW6.gnm1; all-genera does" in out.text
+    assert "NOT CHECKED" in link(region=f"{GM12}:1-100", instance="peanutbase").text
+
+
+def test_a_config_pointing_at_a_missing_tbi_gets_the_csi_session_track(placed):
+    out = link(region="pissa.ZW6.gnm1.chr1:1-1000")
+    params = _params(_links(out.text)[0])
+    session = json.loads(params["sessionTracks"])
+    assert session[0]["adapter"]["index"]["indexType"] == "CSI"
+    assert params["tracks"] == session[0]["trackId"]
+    assert "points ZW6.gnm1.ann1.TKZX's gene models at a .tbi" in out.text
+
+
+def test_a_track_id_the_catalog_does_not_place_is_flagged_not_refused(placed):
+    out = link(region=f"{GM12}:1-2000", tracks=[GENE_TRACK, "someone_elses_track"])
+    assert _links(out.text) and "not in the catalog's placements for all-genera: " \
+        "someone_elses_track" in out.text
+
+
+def test_the_dotplot_uses_the_placed_synteny_track(placed):
+    out = link(region=f"{GM12}:1-100", view="dotplot", compare="G19833.gnm2.fC0g")
+    spec = json.loads(_params(_links(out.text)[0])["session"][len("spec-"):])
+    assert spec["views"][0]["tracks"] == ["deployed.synteny.track"]
+    assert _links(out.text)[0].startswith(AG)

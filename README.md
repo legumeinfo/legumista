@@ -4,7 +4,7 @@
 
 # Legumista — an MCP server for legume genomics
 
-**Legumista** gives a model working access to legume genomics. It serves 32 tools,
+**Legumista** gives a model working access to legume genomics. It serves 33 tools,
 read-only by default, over the [Model Context Protocol](https://modelcontextprotocol.io): a resident
 snapshot of the [LIS Data Store](https://data.legumeinfo.org) catalog, InterMine queries
 against the LIS mines, scholarly literature search and full-text retrieval, NCBI
@@ -152,9 +152,9 @@ proxy caps what a connection may send far below any useful upload.
 | `tabix_query` | Query a bgzip+tabix table; with no region, list its indexed contigs |
 | `tabix_index` | Build a bgzip+tabix index so a local file becomes region-queryable |
 
-### Gene selections — sequence
+### Gene selections — sequence and browser links
 
-`extract_features` takes a **gene selector**, one short argument the
+`extract_features` and `browser_link` take a **gene selector**, one short argument the
 server resolves on every call (nothing is stored, so a selector copied from an old chat
 still works): `{"ids": [...]}` (up to 200 IDs, symbols or superseded IDs),
 `{"region": "contig:start-end"}` or `{"family": "legume.fam3.…", "collection": …}`, with
@@ -164,6 +164,7 @@ species, through shared gene families across species). Every input is accounted 
 | Tool | What it does |
 | --- | --- |
 | `extract_features` | Strand-correct protein, CDS, mRNA, gene, upstream, downstream or UTR sequence for a selection, spans taken from the GFF3, headers carrying locus and source. Large output becomes a workspace FASTA + BED with `--allow-write` |
+| `browser_link` | A link into an LIS JBrowse 2 instance for a selection or region, genes highlighted on the gene models track; or a dotplot of two genomes. Names come from the catalog's record of each instance's deployed config, so it can say when no instance serves an assembly |
 
 ### Literature, NCBI and the web
 
@@ -371,7 +372,7 @@ client refreshes it.
   The container clones it for you.
 
   Either one missing degrades cleanly rather than failing: the six `lis_*` tools report
-  the catalog as unavailable and name the URL they tried, and the other 26 tools are
+  the catalog as unavailable and name the URL they tried, and the other 27 tools are
   unaffected (`verify_ids` reports collection IDs as UNCHECKED).
 - **NCBI CLIs** (optional, for `ncbi_datasets`/`ncbi_assembly_status`/`edirect`/`sra_runs`):
   NCBI `datasets` and EDirect on `PATH`. An `NCBI_API_KEY` raises the Entrez rate limit
@@ -390,6 +391,8 @@ client refreshes it.
 | `LEGUMISTA_DSCENSOR_PATH` | Where to find the DSCensor package |
 | `LEGUMISTA_CONTACT_EMAIL` | Polite-pool mailto sent to OpenAlex, Crossref and Unpaywall. Set it on any shared server: retraction checks and `verify_ids` query Crossref once per DOI |
 | `LEGUMISTA_PYSAM_ALLOWED_URLS` | Optional allowlist of `scheme://host[/path]` prefixes the genomics tools may open, matched by host. Unset, any public host is allowed |
+| `LEGUMISTA_JBROWSE_INSTANCE` | The JBrowse instance `browser_link` prefers when several serve an assembly. Default `all-genera` |
+| `LEGUMISTA_JBROWSE_URL` | The instance `browser_link` targets when the catalog records no JBrowse placements (names are then predicted). Default: LIS all-genera |
 | `LEGUMISTA_INDEX_TTL` | Seconds a downloaded remote index (`.tbi`/`.bai`/`.csi`) is reused before it is fetched again. Indexes are cached per URL. Default `3600` |
 | `LEGUMISTA_EGRESS_PORTS` | Ports the genomics tools may connect to. Default `80,443` |
 | `LEGUMISTA_EGRESS_MAX_SEND_BYTES` | Most a genomics connection may send. Reads send about 1 KB; this bounds an upload. Default `65536` |

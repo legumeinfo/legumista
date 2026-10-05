@@ -229,9 +229,9 @@ without downloading the file.
 
 ---
 
-## Gene selections (`extract_features`)
+## Gene selections (`extract_features`, `browser_link`)
 
-It takes `genes`, a **selector**: a short definition the server resolves on every call,
+Both take `genes`, a **selector**: a short definition the server resolves on every call,
 so it can be reused verbatim later. Exactly one of:
 
 - `{"ids": [...], "collection"?: "<annotation>"}` — up to 200 IDs, curated symbols or
@@ -257,6 +257,12 @@ annotation per selection) — so report a miss with the routes it names.
   partial models are normal, never a data defect. `dry_run` gives record counts and bases
   without fetching. Large output is written to a workspace FASTA + BED only with
   `--allow-write`; otherwise the reply says how many records it left out.
+- **`browser_link`** — a JBrowse 2 link for a selector or a `region`: the gene models
+  track, genes highlighted (`mark:"features"` adds them as an inline track instead), or
+  `view:"dotplot"` with `compare` (another genome). Names come from the catalog's record
+  of each instance's config (`instance` picks one; all-genera first), so "no instance
+  serves X (checked: …)" is a finding; an older catalog makes it predict names and say
+  so. Give the user the link; it reads no data itself.
 
 ---
 

@@ -41,6 +41,7 @@ def _instructions() -> str:
 
 
 def _served_tool_names() -> set:
+    from legumista_agent.tools_browser import browser_tools
     from legumista_agent.tools_catalog import catalog_tools
     from legumista_agent.tools_extract import extract_tools
     from legumista_agent.tools_lis import lis_tools
@@ -51,7 +52,7 @@ def _served_tool_names() -> set:
     from legumista_agent.tools_verify import verify_tools
     return {t.name for t in (local_read_tools() + native_tools() + lis_tools()
                              + mine_tools() + catalog_tools() + bio_tools()
-                             + extract_tools()
+                             + extract_tools() + browser_tools()
                              + verify_tools())}
 
 
