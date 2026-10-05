@@ -358,6 +358,16 @@ def test_a_csi_only_gff_is_read(world):
     out = extract(genes={"ids": [Bg], "collection": "Wm82.gnm4.ann1.T8TQ"}, feature="gene")
     assert records(out.text)[Bg] == rc(sl(CONTIG12, 1001, 1300))
 
+
+def test_lis_gene_reads_the_gene_span_from_the_real_gff3(world):
+    """lis_gene end to end through the worker: B's coding extent is 1,041-1,250, but the
+    gene, UTRs included, spans 1,001-1,300 on the minus strand."""
+    out = L._gene({"gene": Bg})
+    assert f"gene span:  {GM12}:1,001-1,300 (-)" in out
+    assert f"mRNA {Bg}.1: 1,001-1,300" in out
+    assert f"coding extent:  {GM12}:1,041-1,250 (-)" in out
+    assert f"(gene span): {GM12}:1001-1300" in out
+
 def test_a_gene_without_a_utr_is_a_problem_not_an_empty_record(world):
     out = extract(genes={"ids": [Cg], "collection": "Wm82.gnm4.ann1.T8TQ"}, feature="utr5")
     assert records(out.text) == {}

@@ -188,6 +188,11 @@ def catalog(tmp_path, monkeypatch):
         return None, "unexpected fetch in a test"
 
     monkeypatch.setattr(L, "_fetch_gz_text", fake_fetch)
+    # The gene span is one indexed GFF3 read in an htslib worker; real files exercise it
+    # in test_gene_tools. Here it answers as the real Wm82.gnm4 NARK record does.
+    monkeypatch.setattr(L, "_gene_span", lambda record, gff, contig, lo, hi, gene_id: (
+        ((2875521, 2879322, "-"), [(f"{gene_id}.1", 2875521, 2879322)], "")
+        if gene_id.endswith("Glyma.12G040000") else (None, [], "")))
     yield fetched
     C.reset()
 
@@ -320,7 +325,7 @@ def test_files_unknown_collection_is_an_honest_miss(catalog):
 # --- lis_gene -------------------------------------------------------------------------
 def test_gene_resolves_locus_and_sequence_handles(catalog):
     out = L._gene({"gene": "Glyma.12G040000", "collection": ANN})
-    assert "glyma.Wm82.gnm4.Gm12:2875801-2879231" in out  # BED start is 0-based
+    assert "coding extent:  glyma.Wm82.gnm4.Gm12:2,875,801-2,879,231" in out  # 0-based BED
     assert "fasta_fetch(" in out and "protein_primary.faa.gz" in out
     assert "region='glyma.Wm82.gnm4.ann1.Glyma.12G040000.1'" in out
     assert "tabix_query(" in out
@@ -344,14 +349,14 @@ def test_gene_matching_is_exact_not_substring(catalog):
 def test_gene_accepts_prefixed_and_mrna_forms(catalog):
     for gid in ("glyma.Wm82.gnm4.ann1.Glyma.12G040000",
                 "glyma.Wm82.gnm4.ann1.Glyma.12G040000.1"):
-        assert "2875801-2879231" in L._gene({"gene": gid, "collection": ANN})
+        assert "2,875,801-2,879,231" in L._gene({"gene": gid, "collection": ANN})
 
 
 def test_gene_derives_the_collection_from_a_qualified_id(catalog):
     """The qualified ID carries the annotation stem but not the 4-char key; the key
     now comes from the catalog rather than a directory listing."""
     out = L._gene({"gene": "glyma.Wm82.gnm4.ann1.Glyma.12G040000"})
-    assert "Wm82.gnm4.ann1.T8TQ" in out and "2875801-2879231" in out
+    assert "Wm82.gnm4.ann1.T8TQ" in out and "2,875,801-2,879,231" in out
 
 
 def test_gene_resolves_a_curated_symbol_from_the_catalog(catalog):
@@ -360,18 +365,18 @@ def test_gene_resolves_a_curated_symbol_from_the_catalog(catalog):
     assert "curated symbol 'GmNARK'" in out
     assert "carried in the catalog" in out
     assert "10.1126/science.1077937" in out
-    assert "2875801-2879231" in out
+    assert "2,875,801-2,879,231" in out
     assert catalog == [f"{DS}/{ANN}/{PREFIX}.gene_models_main.bed.gz"]
 
 
 def test_symbol_match_is_case_insensitive(catalog):
-    assert "2875801-2879231" in L._gene({"gene": "gmnark", "collection": ANN})
+    assert "2,875,801-2,879,231" in L._gene({"gene": "gmnark", "collection": ANN})
 
 
 def test_gene_resolves_a_superseded_id(catalog):
     out = L._gene({"gene": "Glyma12g04000", "collection": ANN})
     assert "superseded ID 'Glyma12g04000'" in out
-    assert "2875801-2879231" in out
+    assert "2,875,801-2,879,231" in out
 
 
 def test_exact_id_is_never_shadowed_by_an_alias(catalog):
@@ -678,3 +683,27 @@ def test_the_bed_locus_is_called_the_coding_extent(catalog):
     out = L._gene({"gene": "glyma.Wm82.gnm4.ann1.Glyma.12G040000"})
     assert "coding extent:  glyma.Wm82.gnm4.Gm12:2,875,801-2,879,231 (-)" in out
     assert "excludes the UTRs" in out and "mRNA extent" not in out
+
+
+
+def test_the_gene_span_comes_from_the_gff3_and_sets_the_region(catalog):
+    """The BED's coding extent leaves out the UTRs; the GFF3's gene row does not."""
+    out = L._gene({"gene": "GmNARK", "collection": ANN})
+    assert "gene span:  glyma.Wm82.gnm4.Gm12:2,875,521-2,879,322 (-)" in out
+    assert "UTRs included" in out
+    assert "region string for tabix_query/samtools (gene span): " \
+        "glyma.Wm82.gnm4.Gm12:2875521-2879322" in out
+    assert "region='glyma.Wm82.gnm4.Gm12:2875521-2879322'" in out       # the models call
+
+
+def test_an_unreadable_gff3_leaves_the_span_not_checked(catalog, monkeypatch):
+    monkeypatch.setattr(L, "_gene_span", lambda *a: (None, [], "timed out"))
+    out = L._gene({"gene": "Glyma.12G040000", "collection": ANN})
+    assert "gene span:  NOT CHECKED — timed out" in out
+    assert "(coding extent; widen it to take in the UTRs): " \
+        "glyma.Wm82.gnm4.Gm12:2875801-2879231" in out
+
+
+def test_a_gene_without_a_gff3_row_says_so(catalog):
+    out = L._gene({"gene": "Glyma.12G0400001", "collection": ANN})
+    assert "NOT CHECKED — no gene row with ID" in out

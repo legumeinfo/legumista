@@ -26,6 +26,8 @@ metadata endpoints, and no catalog can carry them:
   2024), so they exclude the UTRs and must never be called the mRNA or gene span.
 * the annotation's synonym file -- superseded gene IDs, likewise a data file whose URL
   comes from the catalog.
+* ``gene_models_main.gff3.gz`` -- one indexed region, read through an htslib worker, for
+  the gene's true span: the BED's coding extent leaves out the UTRs.
 
 Curated gene *symbols* used to be a third such read; they are now carried in the
 catalog itself, so ``GmNARK`` resolves without touching the network at all.
@@ -468,6 +470,34 @@ def _bed_hits(bed, gene):
     return hits
 
 
+def _gene_span(record, gff_name, contig, lo, hi, gene_id):
+    """The gene's span and its transcripts' spans from the GFF3, 1-based inclusive.
+
+    Returns (gene, mrnas, error): gene is (start, end, strand) or None, mrnas is
+    [(id, start, end)], error is "" or why the GFF3 could not be read. One indexed region
+    covering the coding extent, read in a worker, so the egress proxy and timeout apply
+    and a CSI-only index is handled."""
+    from .tools_pysam import READ_FILE_BYTES, _run_worker
+
+    res = _run_worker({"op": "batch", "items": [
+        {"kind": "tabix", "path": _file_url(record, gff_name), "contig": contig,
+         "start": max(0, lo - 1), "end": hi, "limit": 5000}]}, READ_FILE_BYTES)
+    item = (res.get("items") or [{}])[0] if not res.get("error") else res
+    if item.get("error"):
+        return None, [], str(item.get("message") or item["error"])
+    gene, mrnas = None, []
+    for row in item.get("rows", []):
+        cols = row.split("\t")
+        if len(cols) < 9:
+            continue
+        attrs = dict(p.split("=", 1) for p in cols[8].split(";") if "=" in p)
+        if cols[2] == "gene" and attrs.get("ID") == gene_id:
+            gene = (int(cols[3]), int(cols[4]), cols[6])
+        elif cols[2] == "mRNA" and attrs.get("Parent") == gene_id:
+            mrnas.append((attrs.get("ID", "?"), int(cols[3]), int(cols[4])))
+    return gene, sorted(mrnas, key=lambda m: (m[1], m[0])), ""
+
+
 def _gene(args) -> str:
     gene = (args.get("gene") or "").strip()
     if not gene:
@@ -512,25 +542,42 @@ def _gene(args) -> str:
     seq_names = sorted({h[4] for h in hits})
 
     assembly = _genome_of(f"{record.get('scientific_name_abbrev', '')}.{record['id']}")
+    gene_id = hits[0][5] or hits[0][4].rsplit(".", 1)[0]
+    gff = next((n for n in by_name if n.endswith(".gene_models_main.gff3.gz")
+                and {".tbi", ".csi"} & set(by_name[n].get("i") or [])), None)
+    span, mrnas, span_err = (_gene_span(record, gff, contig, start, end, gene_id) if gff
+                             else (None, [], "no indexed gene_models_main.gff3 is published"))
     lines = [f"{label} in {record['id']}"
-             + (f"\n  resolved from: {provenance}" if provenance else ""),
-             f"  coding extent:  {contig}:{start:,}-{end:,} ({strand})   "
-             f"[first CDS base to last, from gene_models_main.bed — excludes the UTRs; "
-             f"{len(hits)} model(s): {', '.join(seq_names)}]",
-             f"  coordinates: assembly {assembly}; 1-based, inclusive (converted from the "
-             "BED's 0-based start). Coordinates on another assembly differ.",
-             f"  region string for tabix_query/samtools (coding extent; widen it to take "
-             f"in the UTRs): {contig}:{start}-{end}"]
+             + (f"\n  resolved from: {provenance}" if provenance else "")]
+    if span:
+        region_lo, region_hi = span[0], span[1]
+        models = "; ".join(f"{m}: {a:,}-{b:,}" for m, a, b in mrnas)
+        lines.append(f"  gene span:  {contig}:{span[0]:,}-{span[1]:,} ({span[2]})   "
+                     f"[gene row in gene_models_main.gff3, UTRs included"
+                     + (f"; mRNA {models}" if models else "") + "]")
+    else:
+        region_lo, region_hi = start, end
+        lines.append("  gene span:  NOT CHECKED — "
+                     + (span_err if span_err else f"no gene row with ID {gene_id} in the "
+                        "GFF3 over this locus")
+                     + ". The coding extent below excludes the UTRs.")
+    lines += [f"  coding extent:  {contig}:{start:,}-{end:,} ({strand})   "
+              f"[first CDS base to last, from gene_models_main.bed — excludes the UTRs; "
+              f"{len(hits)} model(s): {', '.join(seq_names)}]",
+              f"  coordinates: assembly {assembly}; 1-based, inclusive (converted from the "
+              "BED's 0-based start). Coordinates on another assembly differ.",
+              f"  region string for tabix_query/samtools ("
+              + ("gene span" if span else "coding extent; widen it to take in the UTRs")
+              + f"): {contig}:{region_lo}-{region_hi}"]
     for label_text, suffix in (("protein", ".protein_primary.faa.gz"),
                                ("CDS", ".cds_primary.fna.gz")):
         hit = next((n for n in by_name if n.endswith(suffix)), None)
         if hit and ".fai" in (by_name[hit].get("i") or []):
             lines.append(f"  {label_text}: fasta_fetch("
                          f"path='{_file_url(record, hit)}', region='{seq_names[0]}')")
-    gff = next((n for n in by_name if n.endswith(".gene_models_main.gff3.gz")), None)
-    if gff and ".tbi" in (by_name[gff].get("i") or []):
+    if gff:
         lines.append(f"  models: tabix_query(path='{_file_url(record, gff)}', "
-                     f"region='{contig}:{start}-{end}')")
+                     f"region='{contig}:{region_lo}-{region_hi}')")
     if record.get("publication_doi"):
         lines.append(f"  publication_doi: {record['publication_doi']}"
                      "   -> openalex_by_doi")
