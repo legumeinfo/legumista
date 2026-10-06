@@ -188,6 +188,7 @@ species, through shared gene families across species). Every input is accounted 
 | Tool | What it does |
 | --- | --- |
 | `verify_ids` | Check a draft's DOIs, LIS gene and collection IDs, and GCA_/GCF_ accessions against their sources before answering |
+| `guide` | The detail behind each tool family (argument forms, what replies mean, the traps), by topic |
 
 ---
 

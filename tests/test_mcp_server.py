@@ -31,10 +31,11 @@ def _source_tools():
     from legumista_agent.tools_verify import verify_tools
     from legumista_agent.tools_browser import browser_tools
     from legumista_agent.tools_extract import extract_tools
+    from legumista_agent.tools_guide import guide_tools
     return {t.name: t
             for t in (local_read_tools() + native_tools() + lis_tools()
                       + mine_tools() + catalog_tools() + bio_tools() + extract_tools()
-                      + browser_tools() + verify_tools())}
+                      + browser_tools() + verify_tools() + guide_tools())}
 
 
 def test_served_toolset_conforms_to_mcp_spec():

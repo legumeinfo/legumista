@@ -29,11 +29,11 @@ def test_no_orphaned_pipeline_prompts_remain():
 # The instructions are sent at initialize and stay in the client model's context for the
 # whole session, with the resident catalog map (~1,400 tokens) appended. Growing them
 # should be a decision made in review, not drift: raise this in the same PR, with a reason.
-# ~8,000 tokens (at ~4 characters a token). Raised from 16,500 when the first wave of
-# new tools (gene sets, feature extraction, viewer links, data-issue reports) was planned:
-# the file was 15,953 characters, with no room for a line per new tool. Room to add
-# tools is not licence to pad: keep each line terse but self-explanatory.
-INSTRUCTIONS_BUDGET_CHARS = 32_000
+# ~2,500 tokens (at ~4 characters a token; the file was 5,394 characters). Cut from 32,000 when the per-tool detail
+# moved to the `guide` tool, which costs nothing until it is read: the instructions keep
+# only how to read a result, where to start, and the LIS conventions. Detail belongs in
+# a guide topic, not here.
+INSTRUCTIONS_BUDGET_CHARS = 10_000
 
 
 def _instructions() -> str:
@@ -47,6 +47,7 @@ def _served_tool_names() -> set:
     from legumista_agent.tools_browser import browser_tools
     from legumista_agent.tools_catalog import catalog_tools
     from legumista_agent.tools_extract import extract_tools
+    from legumista_agent.tools_guide import guide_tools
     from legumista_agent.tools_lis import lis_tools
     from legumista_agent.tools_local import local_read_tools
     from legumista_agent.tools_mine import mine_tools
@@ -62,7 +63,7 @@ def _served_tool_names() -> set:
     return {t.name for t in (local_read_tools() + native_tools() + lis_tools()
                              + mine_tools() + catalog_tools() + bio_tools()
                              + extract_tools() + browser_tools() + report
-                             + verify_tools())}
+                             + verify_tools() + guide_tools())}
 
 
 def test_instructions_name_every_served_tool():
@@ -81,3 +82,47 @@ def test_instructions_stay_within_budget():
     assert size <= INSTRUCTIONS_BUDGET_CHARS, (
         f"tools_native.md is {size} characters (budget {INSTRUCTIONS_BUDGET_CHARS}); cut "
         "something or raise the budget deliberately")
+
+
+# --- guide topics ---------------------------------------------------------------------
+def _guides() -> dict:
+    folder = resources.files("legumista_assets") / "guide"
+    return {p.name[:-3]: _read(p) for p in folder.iterdir() if p.name.endswith(".md")}
+
+
+def test_guide_topics_are_bundled_with_a_summary_line():
+    """The `guide` index shows each file's first line, `# <topic> — <summary>`."""
+    guides = _guides()
+    assert guides, "guide/*.md is not packaged"
+    for name, text in guides.items():
+        first = text.splitlines()[0]
+        assert first.startswith(f"# {name} — ") and len(first) > len(name) + 10, name
+
+
+def test_guides_name_only_tools_that_exist():
+    """A guide that names a renamed or removed tool sends the model to a dead end."""
+    import re
+    served = _served_tool_names()
+    prefixes = ("lis_", "legumemine_", "ncbi_", "tabix_", "fasta_", "extract_",
+                "browser_", "report_", "verify_", "paper_", "europepmc_", "openalex_",
+                "read_", "web_", "sra_")
+    for name, text in _guides().items():
+        named = {w for w in re.findall(r"(?<![\w.-])([a-z]+_[a-z_]+)(?![\w(-])", text)
+                 if w.startswith(prefixes) and not w.endswith("_")}
+        named -= {"legumemine_", "lis_trait_"}
+        unknown = sorted(w for w in named if w not in served and not any(
+            s.startswith(w) for s in served))
+        assert not unknown, f"guide {name!r} names tools that are not served: {unknown}"
+
+
+def test_guide_tool_serves_topics_and_refuses_unknown_ones():
+    import asyncio
+    from legumista_agent.results import coerce
+    from legumista_agent.tools_guide import guide_tools
+    tool = guide_tools()[0]
+    index = coerce(asyncio.run(tool.run({}))).text
+    for name in _guides():
+        assert f"  {name}: " in index
+    assert coerce(asyncio.run(tool.run({"topic": "genes"}))).text == _guides()["genes"]
+    missing = coerce(asyncio.run(tool.run({"topic": "nonesuch"})))
+    assert missing.is_error and "datastore" in missing.text

@@ -44,9 +44,11 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
     by definition, resolved on every call; nothing is stored, so nothing needs a session.
   - `tools_extract.py` (`extract_features`), `tools_browser.py` (`browser_link`),
     `tools_report.py` (`report_data_issue`, served only with `--allow-report` and a
-    GitHub App; it authenticates only as that App).
+    GitHub App; it authenticates only as that App), `tools_guide.py` (`guide`).
 - `legumista_assets/prompts/tools_native.md` — the tool-use doctrine served as the MCP
   server's `instructions`. Package data; editing it changes what every client is told.
+- `legumista_assets/guide/*.md` — one topic per tool family, served on demand by `guide`.
+  Each opens with `# <topic> — <summary>`, which the topic index shows.
 - `compose.yaml` / `.env.example` — the deployment path: builds the image from the
   checkout and runs it as an HTTP server. `.env` is gitignored (it holds the webhook
   secret); the compose file is meant to be used unedited.
@@ -99,8 +101,12 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 - **Never present a cap as a total.** Any list that can be truncated is described with
   `results.count_phrase`.
 - **Names go through `resolve_taxon`.** No tool splits a taxon string by hand.
-- **The instructions name every tool.** `tests/test_assets.py` enforces coverage and a
-  size budget, so a new tool needs a line in `tools_native.md`.
+- **The instructions name every tool; the guide holds the detail.** `tools_native.md`
+  keeps only how to read a result, where to start (a table naming every tool) and the
+  LIS conventions a model cannot know, within a size budget. A new tool needs a row
+  there and its detail in a `legumista_assets/guide/` topic. `tests/test_assets.py`
+  enforces coverage, the budget, and that guides name only served tools. Write for a
+  capable model: legume examples, no generic biology, no tutorials.
 - **Producers derive, consumers are dumb.** Anything that can be computed once at
   catalog-build time belongs in LIS-autocontent, not here — LIS-autocontent's output feeds
   other projects too, so deriving it here would duplicate the logic in the wrong place.

@@ -61,4 +61,4 @@ py-modules = ["legumista_cli", "config"]
 packages = ["legumista_assets", "legumista_agent"]
 
 [tool.setuptools.package-data]
-legumista_assets = ["prompts/*.md", "legumista.png"]
+legumista_assets = ["prompts/*.md", "guide/*.md", "legumista.png"]
