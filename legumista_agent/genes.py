@@ -275,16 +275,16 @@ def _annotation(spec, hint_gene=""):
     return record, err
 
 
+def _genome_of_record(record):
+    """The assembly (abbrev.strain.gnmN) an annotation collection's genes sit on."""
+    return tools_lis._genome_of(f"{record.get('scientific_name_abbrev', '')}.{record['id']}")
+
+
 def _annotations_for_genome(genome):
     """Annotation collections whose genes sit on `genome` (abbrev.strain.gnmN)."""
     ctl = controller()
-    out = []
-    for record in ctl.collections if ctl else []:
-        if record.get("type") != "annotations":
-            continue
-        prefix = f"{record.get('scientific_name_abbrev', '')}.{record['id']}"
-        if tools_lis._genome_of(prefix) == genome:
-            out.append(record)
+    out = [record for record in (ctl.collections if ctl else [])
+           if record.get("type") == "annotations" and _genome_of_record(record) == genome]
     return sorted(out, key=lambda r: r["id"])
 
 
@@ -381,6 +381,41 @@ def _resolve_family(family, record, index, sel):
     return genes
 
 
+def _translate_by_locus(genes, tindex, genome, sel):
+    """Map genes between two annotations of one assembly by where they are.
+
+    Their loci are directly comparable, and a re-annotation renames freely (peanut's
+    Tifrunner gnm2 ann1 Arahy.UDJX6I is ann2's Ah03g097600, and ann2 publishes no synonym
+    file), so names cannot be trusted to carry over. A gene maps to every target gene on
+    its strand whose coding extent overlaps its own: usually one, more where models were
+    split or merged."""
+    out = {}
+    for gene in genes:
+        hits, opposite = [], []
+        for cand in tindex["by_contig"].get(gene.contig, []):
+            if cand.start > gene.end:
+                break                       # by_contig is in start order
+            if cand.end < gene.start:
+                continue
+            shared = min(gene.end, cand.end) - max(gene.start, cand.start) + 1
+            pct = round(100 * shared / max(gene.end - gene.start + 1,
+                                           cand.end - cand.start + 1))
+            (hits if cand.strand == gene.strand else opposite).append((cand, pct))
+        for cand, _pct in hits:
+            out.setdefault(cand.id, None)
+        if hits:
+            sel.mapping.append((gene.id, ", ".join(c.id for c, _ in hits),
+                                "; ".join(f"{pct}% overlap" for _, pct in hits)))
+        else:
+            sel.mapping.append((gene.id, "", "no gene overlaps it on the same strand"
+                                + (" (opposite strand: " + ", ".join(
+                                    c.id for c, _ in opposite) + ")" if opposite else "")))
+    sel.lines.append(f"translated by locus: both annotations are on {genome}, so each gene "
+                     "maps to every same-strand gene whose coding extent overlaps it; the "
+                     "percentage is shared bases over the longer of the two")
+    return [tindex["genes"][g] for g in out]
+
+
 def _translate(genes, source, target_spec, sel):
     """Map genes from `source` to the annotation `target_spec`. Returns target genes."""
     target, err = _annotation(target_spec)
@@ -393,6 +428,9 @@ def _translate(genes, source, target_spec, sel):
     if err:
         sel.error = err
         return [], None
+    genome = _genome_of_record(source)
+    if genome and genome == _genome_of_record(target):
+        return _translate_by_locus(genes, tindex, genome, sel), target
     same_species = (source.get("scientific_name_abbrev")
                     and source.get("scientific_name_abbrev") == target.get(
                         "scientific_name_abbrev"))
@@ -540,8 +578,9 @@ SELECTOR_SCHEMA = {
     "description": ("A gene selector — exactly one of 'ids' (up to 200 names: IDs, symbols "
                     "or superseded IDs), 'region' ('contig:start-end', 1-based) or 'family' "
                     "(a legume.fam3 or legfed_v1_0 family id, with 'collection'). Optional: "
-                    "'collection' (the annotation), 'translate_to' (another annotation) and "
-                    "'offset' (paging)."),
+                    "'collection' (the annotation), 'translate_to' (another annotation: by "
+                    "locus on the same assembly, by name within a species, by family "
+                    "across species) and 'offset' (paging)."),
     "properties": {
         "ids": {"type": "array", "items": {"type": "string"}},
         "region": {"type": "string"},

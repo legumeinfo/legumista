@@ -244,8 +244,9 @@ so it can be reused verbatim later. Exactly one of:
   in one annotation.
 
 Add `"translate_to": "<annotation>"` to move a selection to another annotation (same
-species: by gene name or synonym file; across species: through shared gene families —
-one-to-many, so a match can be a paralog). Add `"offset": N` to page. The reply accounts
+assembly: by locus overlap, so renamed genes still map; same species: by gene name or
+synonym file; across species: through shared gene families — one-to-many, so a match
+can be a paralog). Add `"offset": N` to page. The reply accounts
 for every input — resolved, via symbol, via superseded ID, not found, or refused (one
 annotation per selection) — so report a miss with the routes it names.
 

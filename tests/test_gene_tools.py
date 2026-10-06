@@ -87,6 +87,13 @@ P2 = "glyma.Wm82.gnm2.ann1"
 BED2 = "".join(f"{c}\t{s}\t{e}\t{m}\t0\t+\t{g}\n" for c, s, e, m, g in [
     ("glyma.Wm82.gnm2.Gm12", 900, 1100, f"{P2}.Glyma.12G040000.1", f"{P2}.Glyma.12G040000"),
     ("glyma.Wm82.gnm2.Gm12", 5000, 5100, f"{P2}.Glyma.12G099999.1", f"{P2}.Glyma.12G099999")])
+# A re-annotation of the same assembly that renamed every gene, as peanut's Tifrunner
+# gnm2 ann2 did: A survives as one model, B's only overlap is on the other strand, and C
+# was split in two.
+P4B = "glyma.Wm82.gnm4.ann2"
+BED4B = "".join(f"{c}\t{s}\t{e}\t{P4B}.{n}.1\t0\t{st}\t{P4B}.{n}\n" for c, s, e, n, st in [
+    (GM12, 259, 450, "Gm12g000100", "+"), (GM12, 1049, 1240, "Gm12g000200", "+"),
+    (GM12, 1399, 1440, "Gm12g000300", "+"), (GM12, 1449, 1500, "Gm12g000400", "+")])
 PV = "phavu.G19833.gnm2.ann1"
 BEDPV = "".join(f"phavu.G19833.gnm2.Chr02\t{s}\t{e}\t{PV}.{n}.1\t0\t+\t{PV}.{n}\n"
                 for s, e, n in [(100, 200, "Phvul.002G100400"), (300, 400, "Phvul.002G100500")])
@@ -192,6 +199,7 @@ def world(tmp_path, monkeypatch):
         fetched.append(url)
         for marker, text in [(f"{P4}.T8TQ.gene_models_main.bed.gz", BED4),
                              (f"{P2}.RVB6.gene_models_main.bed.gz", BED2),
+                             (f"{P4B}.ZZ9Q.gene_models_main.bed.gz", BED4B),
                              (f"{PV}.pScz.gene_models_main.bed.gz", BEDPV),
                              (f"{P4}.T8TQ.info_synonyms.txt.gz", SYN4),
                              (f"{P4}.T8TQ.legume.fam3", FAM4),
@@ -279,6 +287,30 @@ def test_translate_within_a_species_by_gene_name(world):
     assert [g.id for g in sel.genes] == [f"{P2}.Glyma.12G040000"]
     text = sel.summary()
     assert "same gene name" in text and "no match by name or synonym" in text
+
+
+def test_translate_within_an_assembly_by_locus(world):
+    """A re-annotation renames freely and may publish no synonym file, so on one
+    assembly genes map by where they are, never by name."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    doc["collections"].append(_ann("Wm82.gnm4.ann2.ZZ9Q", "glyma",
+                                   f"{DS}/Glycine/max/annotations/Wm82.gnm4.ann2.ZZ9Q",
+                                   [{"n": f"{P4B}.ZZ9Q.gene_models_main.bed.gz"}]))
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    sel = G.resolve({"ids": [A, Bg, Cg], "collection": "Wm82.gnm4.ann1.T8TQ",
+                     "translate_to": "Wm82.gnm4.ann2.ZZ9Q"})
+    assert sel.record["id"] == "Wm82.gnm4.ann2.ZZ9Q"
+    assert [g.id for g in sel.genes] == [f"{P4B}.Gm12g000100", f"{P4B}.Gm12g000300",
+                                         f"{P4B}.Gm12g000400"]
+    text = sel.summary()
+    assert "translated by locus: both annotations are on glyma.Wm82.gnm4" in text
+    assert f"{A} -> {P4B}.Gm12g000100   [91% overlap]" in text
+    # Overlapping on the other strand is a different gene, not a match.
+    assert (f"{Bg} -> (none)   [no gene overlaps it on the same strand (opposite "
+            f"strand: {P4B}.Gm12g000200)]") in text
+    assert f"{Cg} -> {P4B}.Gm12g000300, {P4B}.Gm12g000400   [41% overlap; 50% overlap]" \
+        in text
 
 
 def test_translate_across_species_is_one_to_many_through_families(world):
