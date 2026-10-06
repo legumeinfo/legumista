@@ -285,11 +285,11 @@ def test_missing_gene_is_rejected(mine):
 def test_tools_are_read_only_and_well_formed():
     tools = M.mine_tools()
     assert {t.name for t in tools} == {
-        "legumemine_gene_proteins", "legumemine_gene_families",
-        "legumemine_gene_ontology", "legumemine_gene_expression",
-        "legumemine_gene_symbol", "legumemine_gene_family_members",
-        "legumemine_gene_search", "mine_search",
-        "lis_trait_qtls", "lis_trait_gwas", "lis_marker_position"}
+        "mine_gene_proteins", "mine_gene_families",
+        "mine_gene_ontology", "mine_gene_expression",
+        "mine_gene_symbol", "mine_gene_family_members",
+        "mine_gene_search", "mine_search",
+        "mine_trait_qtls", "mine_trait_gwas", "mine_marker_position"}
     for t in tools:
         assert t.read_only is True
         assert t.parameters.get("additionalProperties") is False
@@ -297,12 +297,12 @@ def test_tools_are_read_only_and_well_formed():
         for req in t.parameters["required"]:
             assert req in t.parameters["properties"], (t.name, req)
     by_name = {t.name: t for t in tools}
-    assert by_name["legumemine_gene_symbol"].parameters["required"] == ["symbol"]
-    assert by_name["legumemine_gene_search"].parameters["required"] == ["query"]
-    assert by_name["lis_trait_qtls"].parameters["required"] == ["trait"]
-    assert by_name["lis_marker_position"].parameters["required"] == ["marker"]
+    assert by_name["mine_gene_symbol"].parameters["required"] == ["symbol"]
+    assert by_name["mine_gene_search"].parameters["required"] == ["query"]
+    assert by_name["mine_trait_qtls"].parameters["required"] == ["trait"]
+    assert by_name["mine_marker_position"].parameters["required"] == ["marker"]
     # family members takes gene OR family, so neither can be schema-required
-    fam = by_name["legumemine_gene_family_members"].parameters
+    fam = by_name["mine_gene_family_members"].parameters
     assert fam["required"] == []
     # 'taxon' used to route the query to a genus mine, which silently lost other genera's
     # genes; the target species is now a filter, never a routing choice.
@@ -312,8 +312,8 @@ def test_tools_are_read_only_and_well_formed():
 def test_tools_are_registered_on_the_mcp_server():
     from legumista_agent.mcp_server import _HANDLERS, build_server
     build_server()
-    assert {"legumemine_gene_proteins", "legumemine_gene_families",
-            "legumemine_gene_ontology", "legumemine_gene_expression"} <= set(_HANDLERS)
+    assert {"mine_gene_proteins", "mine_gene_families",
+            "mine_gene_ontology", "mine_gene_expression"} <= set(_HANDLERS)
 
 
 # --- taxon -> mine routing ------------------------------------------------------------
@@ -556,11 +556,11 @@ def test_the_cache_key_separates_mine_query_and_size(mine):
 
 
 def test_a_repeated_family_members_call_reuses_both_of_its_round_trips(mine):
-    """legumemine_gene_family_members is the two-request tool (gene->family, then
+    """mine_gene_family_members is the two-request tool (gene->family, then
     family->members), so an agent circling back to it is where duplicate traffic
     accumulates.
 
-    NOTE: it still cannot reuse legumemine_gene_families' response — that tool selects
+    NOTE: it still cannot reuse mine_gene_families' response — that tool selects
     five views and this step selects one, so the PathQueries differ and the cache key
     (mine, xml, size) rightly separates them."""
     mine["body"] = {"wasSuccessful": True,
@@ -957,7 +957,7 @@ def test_gene_search_refuses_what_it_cannot_answer(mine):
     assert "'genes' or 'families'" in M._gene_search({"query": "kinase", "search": "x"})
     out = M._gene_search({"query": "kinase", "search": "families",
                           "target_taxon": "peanut"})
-    assert out.startswith("error:") and "legumemine_gene_family_members" in out
+    assert out.startswith("error:") and "mine_gene_family_members" in out
     assert not mine["urls"]
 
 
@@ -1046,7 +1046,7 @@ def test_every_mine_tool_chooses_its_mine_the_same_way():
     for tool in M.mine_tools():
         props = tool.parameters["properties"]
         assert "mine" in props, tool.name
-        if tool.name == "legumemine_gene_family_members":
+        if tool.name == "mine_gene_family_members":
             assert "taxon" not in props and "target_taxon" in props
         else:
             assert "taxon" in props, tool.name

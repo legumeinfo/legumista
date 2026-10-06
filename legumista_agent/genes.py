@@ -378,7 +378,7 @@ def _resolve_family(family, record, index, sel):
     family_set = _family_set_of(family)
     if not family_set:
         sel.error = (f"error: {family!r} is not a family id this server knows — expected a "
-                     "'legume.fam3.' or 'legfed_v1_0.' family (legumemine_gene_families "
+                     "'legume.fam3.' or 'legfed_v1_0.' family (mine_gene_families "
                      "lists a gene's families).")
         return []
     url, err = _load_families(record, family_set)

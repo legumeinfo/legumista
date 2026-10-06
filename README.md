@@ -133,16 +133,16 @@ proxy caps what a connection may send far below any useful upload.
 | Tool | What it answers |
 | --- | --- |
 | `mine_search` | An LIS mine's keyword search, as its search box runs it, with counts by category and organism |
-| `legumemine_gene_search` | Genes or gene families whose description contains a phrase — from a function to candidate genes |
-| `legumemine_gene_symbol` | Resolve a gene symbol to identifiers |
-| `legumemine_gene_proteins` | Protein records: identifier, length, molecular weight |
-| `legumemine_gene_families` | Gene-family assignments |
-| `legumemine_gene_ontology` | GO and other ontology annotations |
-| `legumemine_gene_expression` | Expression across samples, highest first |
-| `legumemine_gene_family_members` | A gene's homologs across species via its family, optionally one target species (homology, not an orthology call) |
-| `lis_trait_qtls` | QTLs for a trait: linkage group, LOD, marker R², source study |
-| `lis_trait_gwas` | GWAS associations for a trait, most significant first |
-| `lis_marker_position` | A marker's physical position on each assembly that carries it |
+| `mine_gene_search` | Genes or gene families whose description contains a phrase — from a function to candidate genes |
+| `mine_gene_symbol` | Resolve a gene symbol to identifiers |
+| `mine_gene_proteins` | Protein records: identifier, length, molecular weight |
+| `mine_gene_families` | Gene-family assignments |
+| `mine_gene_ontology` | GO and other ontology annotations |
+| `mine_gene_expression` | Expression across samples, highest first |
+| `mine_gene_family_members` | A gene's homologs across species via its family, optionally one target species (homology, not an orthology call) |
+| `mine_trait_qtls` | QTLs for a trait: linkage group, LOD, marker R², source study |
+| `mine_trait_gwas` | GWAS associations for a trait, most significant first |
+| `mine_marker_position` | A marker's physical position on each assembly that carries it |
 
 ### Genomics files (pysam/htslib)
 

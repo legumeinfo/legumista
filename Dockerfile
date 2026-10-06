@@ -170,10 +170,10 @@ from legumista_agent.mcp_server import build_server, _HANDLERS; \
 build_server(); \
 missing = {'lis_find','lis_files','lis_gene','samtools','bcftools','fasta_fetch',\
 'tabix_query','ncbi_datasets','edirect','sra_runs','read_paper',\
-'legumemine_gene_proteins','legumemine_gene_families','legumemine_gene_ontology',\
-'legumemine_gene_expression','legumemine_gene_symbol',\
-'legumemine_gene_family_members','lis_trait_qtls','lis_trait_gwas',\
-'lis_marker_position','verify_ids','lis_survey','lis_lineage','lis_synteny'} \
+'mine_gene_proteins','mine_gene_families','mine_gene_ontology',\
+'mine_gene_expression','mine_gene_symbol',\
+'mine_gene_family_members','mine_trait_qtls','mine_trait_gwas',\
+'mine_marker_position','verify_ids','lis_survey','lis_lineage','lis_synteny'} \
 - set(_HANDLERS); \
 assert not missing, missing; \
 print(len(_HANDLERS), 'tools served')"; \

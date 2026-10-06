@@ -28,8 +28,8 @@ model. Each tool below owns a single tested PathQuery, so the traps are handled 
    the catalog's published mines are checked BEFORE any request (see `_known_mines`).
 
 Successful responses are memoized for the life of the process (`_cached`): an agent working
-one gene re-issues the same PathQuery — `legumemine_gene_family_members` re-derives the
-family `legumemine_gene_families` just fetched. Errors are never cached, so a retry retries.
+one gene re-issues the same PathQuery — `mine_gene_family_members` re-derives the
+family `mine_gene_families` just fetched. Errors are never cached, so a retry retries.
 
 Mine selection: `MINE` (env `LEGUMISTA_LIS_MINE`) with a per-call `mine` override. The
 default is `legumemine`, the pan-legume mine — it spans 55 organisms, so its gene families
@@ -92,7 +92,7 @@ def _url(mine: str, xml: str, fmt: str, size: int = None, start: int = 0) -> str
 # --- response cache --------------------------------------------------------------------
 # A mine answer is deterministic for the life of a request: the same PathQuery at the same
 # size returns the same rows. An agent working one gene re-issues them anyway — asking for
-# a gene's family members re-derives the gene->family mapping `legumemine_gene_families`
+# a gene's family members re-derives the gene->family mapping `mine_gene_families`
 # just fetched — so identical queries are collapsed to one round trip.
 #
 # ONLY successes are cached. Caching an error would turn a transient outage into a
@@ -759,7 +759,7 @@ def _gene_search(args) -> str:
         if (args.get("target_taxon") or "").strip():
             return ("error: a gene family spans species, so 'target_taxon' does not apply "
                     "to search='families'. Find the family here, then list one species' "
-                    "members with legumemine_gene_family_members(target_taxon=...), or "
+                    "members with mine_gene_family_members(target_taxon=...), or "
                     "one annotation's with lis_gene(genes={'family': ..., 'collection': "
                     "...}).")
         view = ["GeneFamily.primaryIdentifier", "GeneFamily.size",
@@ -770,7 +770,7 @@ def _gene_search(args) -> str:
         sort, col, scope = "GeneFamily.size desc GeneFamily.primaryIdentifier asc", 2, ""
         nxt = ("A family's members in one annotation, with loci: lis_gene(genes="
                "{'family': <id>, 'collection': <annotation>}); across species: "
-               "legumemine_gene_family_members.")
+               "mine_gene_family_members.")
     else:
         target_cons, scope, terr = _target_constraints(args.get("target_taxon"))
         if terr:
@@ -811,7 +811,7 @@ def _keyword_search(args) -> str:
     """What a mine's search box does: InterMine's keyword search over every indexed class
     and field, with the counts by category and organism its results page shows.
 
-    Not legumemine_gene_search's substring match on descriptions. Keyword search matches
+    Not mine_gene_search's substring match on descriptions. Keyword search matches
     whole words, so "chalcone synthase" finds 280 ArachisMine genes where a substring
     finds 342: "synthase-like" and "deoxychalcone" are other words. Both are right; the
     reply says which one ran."""
@@ -883,7 +883,7 @@ def _keyword_search(args) -> str:
                   total, size, capped=len(hits) >= size, offset=offset, pageable=True,
                   size_max=SEARCH_PAGE_MAX)
     footer = counts + ["Whole words in any indexed field: 'synthase-like' is another word, "
-                       "so this can count fewer than legumemine_gene_search's substring "
+                       "so this can count fewer than mine_gene_search's substring "
                        "match."]
     if any(_BRACKET_RE.search(d) for d in descriptions):
         footer.append(_BRACKET_NOTE)
@@ -988,7 +988,7 @@ def _marker_position(args) -> str:
 # 'mine' names one, and with neither the pan-legume mine answers (the breeding tools,
 # whose data lives only in genus mines, require 'taxon'). 'target_taxon', where a tool
 # has it, filters rows and never picks the mine. The one exception is
-# legumemine_gene_family_members, which takes no routing 'taxon': it is cross-species
+# mine_gene_family_members, which takes no routing 'taxon': it is cross-species
 # by purpose, and a 'taxon' that routed to a genus mine once dropped every other genus's
 # members without a word.
 _MINE_ARGS = {
@@ -1035,19 +1035,19 @@ def _mk(name, description, props, sync_fn, required=("gene",)):
 def mine_tools() -> list:
     """Read-only, per-question tools over a LIS InterMine instance."""
     return [
-        _mk("legumemine_gene_proteins",
+        _mk("mine_gene_proteins",
             "A gene's protein records: identifier, length (aa), molecular weight. For "
             "the sequence itself, use lis_gene's fasta_fetch call.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_proteins),
-        _mk("legumemine_gene_families",
+        _mk("mine_gene_families",
             "A gene's family assignments (legume.fam3, legfed_v1_0), with family size "
             "and description. Families hold paralogs: membership is homology, not "
             "orthology.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_families),
-        _mk("legumemine_gene_ontology",
+        _mk("mine_gene_ontology",
             "A gene's ontology annotations (GO and others): term ID, name, ontology.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_ontology),
-        _mk("legumemine_gene_expression",
+        _mk("mine_gene_expression",
             "A gene's expression values across samples, highest first: sample, its "
             "description, the study, and that study's unit. Compare values only within "
             "one study ('source' restricts to one). Capped, with the total.",
@@ -1056,7 +1056,7 @@ def mine_tools() -> list:
                         "description": "Restrict to one expression study (the source "
                                        "identifier shown in a previous result)."}},
             _gene_expression),
-        _mk("legumemine_gene_symbol",
+        _mk("mine_gene_symbol",
             "A gene symbol (GmNARK, PvSYMRK) to its gene IDs, full name, synopsis and "
             "DOIs: from the catalog's curated symbols when it has the symbol, else "
             "from the mine; the reply says which. The other gene tools match "
@@ -1067,7 +1067,7 @@ def mine_tools() -> list:
              "max_results": {"type": "integer",
                              "description": f"Row cap, 1-500 (default {MAX_ROWS})."}},
             _gene_symbol, required=("symbol",)),
-        _mk("legumemine_gene_family_members",
+        _mk("mine_gene_family_members",
             "A gene family's members across legumes, given a gene or a family. "
             "target_taxon keeps one species, member_assembly/member_annotation one "
             "genome; assembly/annotation pick the gene's own copy. Long lists page "
@@ -1098,7 +1098,7 @@ def mine_tools() -> list:
                                                   "annotation version, e.g. 'ann1'."},
              **_ASSEMBLY_ARGS},
             _gene_family_members, required=()),
-        _mk("legumemine_gene_search",
+        _mk("mine_gene_search",
             "Genes, or with search='families' gene families, whose description "
             "contains a phrase: the way from a function to genes. Matches descriptions "
             "only, never IDs. Descriptions are transferred from homologs, so a hit is "
@@ -1141,21 +1141,21 @@ def mine_tools() -> list:
                         "description": "Results to skip, to continue a list the reply "
                                        "cut short (it names the offset to use)."}},
             _keyword_search, required=("query",)),
-        _mk("lis_trait_qtls",
+        _mk("mine_trait_qtls",
             "QTLs mapped for a trait: QTL, linkage group, LOD, marker R2, study. Needs "
             "taxon: QTL data lives only in genus mines.",
             {"trait": {"type": "string",
                        "description": "Trait name or fragment, e.g. 'seed protein', "
                                       "'days to maturity'. Substring match."},
              **_TAXON_ARG}, _trait_qtls, required=("trait",)),
-        _mk("lis_trait_gwas",
+        _mk("mine_trait_gwas",
             "GWAS associations for a trait, most significant first: marker, p-value, "
             "study. Study ids match Data Store gwas collections, which lis_files "
             "reads. Needs taxon.",
             {"trait": {"type": "string",
                        "description": "Trait name or fragment, e.g. 'seed protein'."},
              **_TAXON_ARG}, _trait_gwas, required=("trait",)),
-        _mk("lis_marker_position",
+        _mk("mine_marker_position",
             "A marker's physical position on each assembly that carries it; positions "
             "differ between assemblies. Needs taxon.",
             {"marker": {"type": "string",

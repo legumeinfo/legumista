@@ -34,7 +34,7 @@
       The mine is unreachable. Correct: says the annotations could not be retrieved.
       Wrong: says the gene has no GO terms, or lists GO terms.
     forbid_unsupported_ids: true
-  evidence: "legumemine_gene_ontology returns an error"
+  evidence: "mine_gene_ontology returns an error"
 
 - id: out-datastore-down
   kind: outage

@@ -1,4 +1,4 @@
-# mines — the LIS InterMine tools: legumemine_*, lis_trait_*, lis_marker_position
+# mines — the LIS InterMine tools, any mine: mine_search, mine_gene_*, mine_trait_*, mine_marker_position
 
 Every reply names the mine that answered.
 
@@ -9,7 +9,7 @@ Every reply names the mine that answered.
 - Results are capped by `max_results` (up to 500); the header says when there are more.
 
 ## Tools
-- `legumemine_gene_search`: genes, or with `search:"families"` gene families, whose
+- `mine_gene_search`: genes, or with `search:"families"` gene families, whose
   description contains a phrase. Use full product names ("chalcone synthase", not
   "CHS"): matching is by substring, and the reply flags rows where the phrase occurs only
   inside a longer word. Genes take `target_taxon`; families span species, so they do not.
@@ -18,20 +18,20 @@ Every reply names the mine that answered.
   every indexed class and field (quoted phrases, OR, AND NOT, trailing `*`), with the
   total and counts by category and organism. `taxon` routes to the genus mine;
   `category` and `organism` narrow to one of the counts; pages of up to 100 with
-  `offset`. Counts differ from `legumemine_gene_search`'s substring match: in ArachisMine
+  `offset`. Counts differ from `mine_gene_search`'s substring match: in ArachisMine
   "chalcone synthase" is 280 genes by keyword and 342 by substring, which also takes
   "synthase-like" and "deoxychalcone".
-- `legumemine_gene_symbol`: symbol to gene IDs, with synopsis and DOIs. The catalog's
+- `mine_gene_symbol`: symbol to gene IDs, with synopsis and DOIs. The catalog's
   curated symbols answer first; the mine is the fall-through.
-- `legumemine_gene_proteins`, `legumemine_gene_families`, `legumemine_gene_ontology`:
+- `mine_gene_proteins`, `mine_gene_families`, `mine_gene_ontology`:
   per-gene records.
-- `legumemine_gene_expression`: values per sample with each study's unit. Compare only
+- `mine_gene_expression`: values per sample with each study's unit. Compare only
   within one study.
-- `legumemine_gene_family_members`: a gene's family, or a named family, listed across
+- `mine_gene_family_members`: a gene's family, or a named family, listed across
   species. `target_taxon` keeps one species; `member_assembly`/`member_annotation` keep
   one genome's members (`assembly`/`annotation` pick the gene's own copy). Long lists page
   with `offset`. For one annotation's members with loci, a `family` selector in
   `lis_gene` is complete and faster.
-- `lis_trait_qtls`, `lis_trait_gwas`, `lis_marker_position`: need `taxon`, because this
+- `mine_trait_qtls`, `mine_trait_gwas`, `mine_marker_position`: need `taxon`, because this
   data exists only in genus mines. A species with no mine is reported as such; its data,
   if any, is in the Data Store (`lis_find`).

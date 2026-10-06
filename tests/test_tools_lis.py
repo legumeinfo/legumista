@@ -800,6 +800,6 @@ def test_a_miss_on_a_function_name_points_to_the_description_search(catalog):
     for its letters and reported Arahy.CHS32V, a dynamin, as a chalcone synthase."""
     out = L._gene({"gene": "CHS", "collection": ANN})
     assert "looks like a function or abbreviation" in out
-    assert "legumemine_gene_search" in out
+    assert "mine_gene_search" in out
     assert "looks like a function" not in L._gene({"gene": "Glyma.12G0400001",
                                                   "collection": ANN})

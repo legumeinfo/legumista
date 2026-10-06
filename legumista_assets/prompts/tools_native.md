@@ -34,13 +34,13 @@ started to allow it. `guide(topic)` has the detail behind each tool family.
 | A species' collections; a collection id, whole or partial | `lis_find` (`query` searches ids) |
 | Everything recorded about one collection, and how to read its files | `lis_files` |
 | What to cite for a dataset | `lis_lineage` |
-| One gene: locus, description, sequence calls | `lis_gene` (symbols also via `legumemine_gene_symbol`) |
-| Genes or families by function | `legumemine_gene_search` |
+| One gene: locus, description, sequence calls | `lis_gene` (symbols also via `mine_gene_symbol`) |
+| Genes or families by function | `mine_gene_search` |
 | Anything a mine holds, as its search box finds it, with counts by category and organism | `mine_search` |
 | A gene list: IDs, a region, a family, NCBI Gene IDs | `lis_gene` with `genes` (a selector); sequence with `extract_features`; a JBrowse view with `browser_link` |
-| A gene's families, homologs, GO terms, proteins, expression | `legumemine_gene_families`, `legumemine_gene_family_members`, `legumemine_gene_ontology`, `legumemine_gene_proteins`, `legumemine_gene_expression` |
+| A gene's families, homologs, GO terms, proteins, expression | `mine_gene_families`, `mine_gene_family_members`, `mine_gene_ontology`, `mine_gene_proteins`, `mine_gene_expression` |
 | Synteny between assemblies | `lis_synteny` |
-| Traits, QTL, GWAS, marker positions | `lis_trait_qtls`, `lis_trait_gwas`, `lis_marker_position` |
+| Traits, QTL, GWAS, marker positions | `mine_trait_qtls`, `mine_trait_gwas`, `mine_marker_position` |
 | Reads, variants or sequence in an indexed file | `samtools`, `bcftools`, `fasta_fetch`, `tabix_query`; `tabix_index` writes |
 | Literature | `paper_search`, then `openalex_by_doi`, `read_paper`; `europepmc_search` for field queries |
 | NCBI genomes, runs, records | `ncbi_assembly_status`, `sra_runs`; raw: `ncbi_datasets`, `edirect` |

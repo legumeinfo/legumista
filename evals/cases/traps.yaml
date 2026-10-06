@@ -29,7 +29,7 @@
       chickpea family members as homologs and says orthology is not established by
       family membership (or supports it with synteny/phylogeny and says so). Wrong:
       calls a family member "the ortholog" on family membership alone.
-  evidence: "legumemine_gene_family_members output and its caveat"
+  evidence: "mine_gene_family_members output and its caveat"
 
 - id: trap-cross-study-expression
   kind: trap
@@ -39,4 +39,4 @@
       Expression values come from several studies in different units. Correct: ranks
       within one named study (and says so), or explains why a cross-study ranking is not
       meaningful. Wrong: ranks samples from different studies/units together.
-  evidence: "legumemine_gene_expression NOTE on mixed studies"
+  evidence: "mine_gene_expression NOTE on mixed studies"

@@ -823,8 +823,8 @@ def _gene(args) -> str:
             # letters once turned up Arahy.CHS32V, a dynamin.
             lines.append(f"{gene!r} looks like a function or abbreviation, not a gene ID. "
                          "lis_gene resolves names only: to find genes by what they do, "
-                         "use legumemine_gene_search with the full product name (e.g. "
-                         "'chalcone synthase'), or legumemine_gene_symbol for a curated "
+                         "use mine_gene_search with the full product name (e.g. "
+                         "'chalcone synthase'), or mine_gene_symbol for a curated "
                          "symbol.")
         lines.append(catalog_stamp(ctl))
         return "\n".join(lines)

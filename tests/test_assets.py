@@ -103,13 +103,13 @@ def test_guides_name_only_tools_that_exist():
     """A guide that names a renamed or removed tool sends the model to a dead end."""
     import re
     served = _served_tool_names()
-    prefixes = ("lis_", "legumemine_", "ncbi_", "tabix_", "fasta_", "extract_",
+    prefixes = ("lis_", "mine_", "ncbi_", "tabix_", "fasta_", "extract_",
                 "browser_", "report_", "verify_", "paper_", "europepmc_", "openalex_",
                 "read_", "web_", "sra_")
     for name, text in _guides().items():
         named = {w for w in re.findall(r"(?<![\w.-])([a-z]+_[a-z_]+)(?![\w(-])", text)
                  if w.startswith(prefixes) and not w.endswith("_")}
-        named -= {"legumemine_", "lis_trait_"}
+        named -= {"mine_gene_", "mine_trait_"}
         unknown = sorted(w for w in named if w not in served and not any(
             s.startswith(w) for s in served))
         assert not unknown, f"guide {name!r} names tools that are not served: {unknown}"
