@@ -270,6 +270,52 @@ def _find_resolved(ctl, genus, species, ctype, query, limit) -> str:
 
 
 # --- lis_files ------------------------------------------------------------------------
+# Catalog fields shown in a collection's record, in this order. Everything the catalog
+# holds about a collection belongs in one reply: a field no tool shows (expression_unit
+# was one) is a question no agent can answer.
+_RECORD_FIELDS = (
+    ("dataset_doi", "dataset_doi"), ("expression_unit", "expression_unit"),
+    ("genetic_map", "genetic_map"), ("related_to", "related_to"),
+    ("dataset_release_date", "released"), ("bioproject", "bioproject"),
+    ("sraproject", "sraproject"), ("genbank_accession", "genbank_accession"),
+    ("chromosome_prefix", "chromosome_prefix"), ("supercontig_prefix", "supercontig_prefix"),
+    ("source", "source"), ("license", "license"),
+)
+
+
+def _record_lines(record):
+    """Everything the catalog records about one collection, as `key: value` lines."""
+    def text(value):
+        return ", ".join(map(str, value)) if isinstance(value, list) else str(value)
+
+    inherited = set(record.get("inherited") or [])
+    parents = record.get("derived_from") or []
+    lines = [f"collection: {record['id']}", f"path: {record['path']}",
+             f"type: {record['type']}"]
+    if record.get("scientific_name"):
+        lines.append(f"taxon: {record['scientific_name']}"
+                     + (f" (taxid {record['taxid']})" if record.get("taxid") else ""))
+    for key in ("genotype", "synopsis", "description"):
+        if record.get(key) and not (key == "description"
+                                    and record[key] == record.get("synopsis")):
+            lines.append(f"{key}: {text(record[key])}")
+    if record.get("publication_doi"):
+        lines.append(f"publication_doi: {record['publication_doi']}"
+                     + (f"  ({record['publication_title']})"
+                        if record.get("publication_title") else "")
+                     + "   -> openalex_by_doi / read_paper")
+    else:
+        lines.append("publication_doi: none — this collection records no publication of "
+                     "its own" + ("; its sources' are in lis_lineage" if parents else ""))
+    if parents:
+        lines.append(f"derived_from: {text(parents)}   -> lis_lineage")
+    for key, label in _RECORD_FIELDS:
+        if record.get(key):
+            lines.append(f"{label}: {text(record[key])}"
+                         + ("  (inherited from derived_from)" if key in inherited else ""))
+    return lines
+
+
 def _files(args) -> str:
     record, err = _lookup(args.get("collection"))
     if record is None:
@@ -277,14 +323,7 @@ def _files(args) -> str:
     ctl = controller()
     data = record.get("files", [])
 
-    head = [f"collection: {record['id']}", f"path: {record['path']}"]
-    if record.get("synopsis"):
-        head.append(f"synopsis: {record['synopsis']}")
-    if record.get("publication_doi"):
-        head.append(f"publication_doi: {record['publication_doi']}"
-                    "   -> openalex_by_doi / read_paper")
-    if record.get("license"):
-        head.append(f"license: {record['license']}")
+    head = _record_lines(record)
     head.append(f"{len(data)} data file(s); base URL {record['base_url']}/")
 
     status = record.get("index_status", "unknown")
@@ -1113,7 +1152,9 @@ def lis_tools() -> list:
                                                 "(default 10)."}},
              "additionalProperties": False}, _find),
         _mk("lis_files",
-            "List a LIS collection's files and — the important part — which ones are "
+            "A LIS collection's full catalog record (taxon, genotype, publication or "
+            "its explicit absence, expression unit, accessions, lineage pointer) and "
+            "its files, with which ones are "
             "RANDOMLY ACCESSIBLE over HTTP, with the exact call to read them. Answers "
             "from the resident catalog, so it is instant and complete. Reports files "
             "that are NOT indexed and therefore unreadable through this toolset, and "

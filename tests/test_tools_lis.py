@@ -280,6 +280,29 @@ def test_files_reports_doi_licence_and_descriptions(catalog):
     assert "Protein sequences - primary only" in out
 
 
+def test_files_shows_the_whole_record(catalog):
+    """Everything the catalog holds about a collection is in one reply: the expression
+    unit, recorded only in the catalog, was once shown by no tool at all."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    rec = next(c for c in doc["collections"] if c["id"] == "Wm82.gnm4.ann1.T8TQ")
+    rec.update(scientific_name="Glycine max", genotype=["Williams 82"],
+               expression_unit="TPM", bioproject="PRJNA1", inherited=["bioproject"])
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    out = L._files({"collection": ANN})
+    for line in ("type: annotations", "taxon: Glycine max (taxid 3847)",
+                 "genotype: Williams 82", "expression_unit: TPM",
+                 "derived_from: Wm82.gnm4.4PTR   -> lis_lineage",
+                 "bioproject: PRJNA1  (inherited from derived_from)"):
+        assert line in out, line
+
+
+def test_files_says_when_a_collection_records_no_publication(catalog):
+    out = L._files({"collection": "Wm82.gnm2.ann1.RVB6"})
+    assert "publication_doi: none — this collection records no publication of its own" \
+        in out
+
+
 def test_files_routes_an_indexed_vcf_to_bcftools(catalog):
     """A .tbi on a VCF means bcftools, not tabix_query — same index, different reader."""
     out = L._files({"collection": "Glycine/max/diversity/Wm82.gnm2.div.X_2020"})
