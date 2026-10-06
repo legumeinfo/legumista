@@ -677,7 +677,8 @@ def _gene_span(record, gff_name, contig, lo, hi, gene_id):
 # peanut's stilbene synthases are described as "chalcone synthase" like its CHS genes.
 _DESCRIPTION_SOURCE = ("the gene row's Note in gene_models_main.gff3: an automated "
                        "description, usually transferred from a homolog — what the gene "
-                       "resembles, not a demonstrated function")
+                       "resembles, not a demonstrated function; a bracketed species names "
+                       "that homolog's species, not the gene's")
 _DESCRIPTION_WIDTH = 100
 
 

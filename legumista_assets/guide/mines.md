@@ -14,6 +14,13 @@ Every reply names the mine that answered.
   "CHS"): matching is by substring, and the reply flags rows where the phrase occurs only
   inside a longer word. Genes take `target_taxon`; families span species, so they do not.
   Families come largest first.
+- `mine_search`: a mine's own keyword search, as its search box runs it: whole words in
+  every indexed class and field (quoted phrases, OR, AND NOT, trailing `*`), with the
+  total and counts by category and organism. `taxon` routes to the genus mine;
+  `category` and `organism` narrow to one of the counts; pages of up to 100 with
+  `offset`. Counts differ from `legumemine_gene_search`'s substring match: in ArachisMine
+  "chalcone synthase" is 280 genes by keyword and 342 by substring, which also takes
+  "synthase-like" and "deoxychalcone".
 - `legumemine_gene_symbol`: symbol to gene IDs, with synopsis and DOIs. The catalog's
   curated symbols answer first; the mine is the fall-through.
 - `legumemine_gene_proteins`, `legumemine_gene_families`, `legumemine_gene_ontology`:

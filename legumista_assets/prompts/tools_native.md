@@ -36,6 +36,7 @@ started to allow it. `guide(topic)` has the detail behind each tool family.
 | What to cite for a dataset | `lis_lineage` |
 | One gene: locus, description, sequence calls | `lis_gene` (symbols also via `legumemine_gene_symbol`) |
 | Genes or families by function | `legumemine_gene_search` |
+| Anything a mine holds, as its search box finds it, with counts by category and organism | `mine_search` |
 | A gene list: IDs, a region, a family, NCBI Gene IDs | `lis_gene` with `genes` (a selector); sequence with `extract_features`; a JBrowse view with `browser_link` |
 | A gene's families, homologs, GO terms, proteins, expression | `legumemine_gene_families`, `legumemine_gene_family_members`, `legumemine_gene_ontology`, `legumemine_gene_proteins`, `legumemine_gene_expression` |
 | Synteny between assemblies | `lis_synteny` |
@@ -64,7 +65,8 @@ started to allow it. `guide(topic)` has the detail behind each tool family.
   `gene_models_main.bed` holds coding extents; the GFF3's gene row adds the UTRs, and
   `lis_gene` reports both.
 - **Descriptions** (GFF3 `Note`, mine descriptions) are automated, transferred from
-  homologs. Close paralogs share them: peanut's stilbene synthases read "chalcone
+  homologs; a bracketed species (`[Glycine max]`) names that homolog's species, not the
+  gene's. Close paralogs share them: peanut's stilbene synthases read "chalcone
   synthase". A description makes a candidate, never a function.
 - **Gene families** (`legume.fam3`, `legfed_v1_0`) show homology, not orthology: they
   hold paralogs. Claim orthology only with synteny or phylogeny behind it.

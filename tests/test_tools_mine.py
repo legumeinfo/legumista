@@ -288,7 +288,7 @@ def test_tools_are_read_only_and_well_formed():
         "legumemine_gene_proteins", "legumemine_gene_families",
         "legumemine_gene_ontology", "legumemine_gene_expression",
         "legumemine_gene_symbol", "legumemine_gene_family_members",
-        "legumemine_gene_search",
+        "legumemine_gene_search", "mine_search",
         "lis_trait_qtls", "lis_trait_gwas", "lis_marker_position"}
     for t in tools:
         assert t.read_only is True
@@ -975,3 +975,65 @@ def test_gene_search_pages(mine):
     _xml, params = _parse(mine["urls"][0])
     assert params["start"] == ["50"]
     assert "showing 51–100 of 436 row(s) — continue with offset=100" in out
+
+
+# --- a mine's own keyword search ---------------------------------------------------------
+def _search_doc(n, total, start=0):
+    return {"wasSuccessful": True, "totalHits": total,
+            "facets": {"Category": {"Gene": total, "OntologyTerm": 10},
+                       "organism.shortName": {"A. hypogaea": total - 3, "A. ipaensis": 3}},
+            "results": [{"type": "Gene", "fields": {
+                "primaryIdentifier": f"arahy.Tifrunner.gnm1.ann1.G{start + i:05d}",
+                "name": f"G{start + i:05d}",
+                "description": "chalcone synthase [Glycine max]; IPR016039",
+                "organism.name": "Arachis hypogaea", "strain.identifier": "Tifrunner",
+                "assemblyVersion": "gnm1", "annotationVersion": "ann1"}}
+                for i in range(n)]}
+
+
+def test_mine_search_runs_the_mines_keyword_search(mine, catalog, monkeypatch):
+    urls = []
+    monkeypatch.setattr(M, "_get", lambda url, accept="": urls.append(url)
+                        or _search_doc(2, 280))
+    out = M._keyword_search({"query": '"chalcone synthase"', "mine": "arachismine",
+                             "category": "Gene", "organism": "A. hypogaea",
+                             "max_results": 2})
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
+    assert urls[0].startswith(f"{M.MINES_BASE}/arachismine/service/search?")
+    assert q["q"] == ['"chalcone synthase"'] and q["facet_Category"] == ["Gene"]
+    assert q["facet_organism.shortName"] == ["A. hypogaea"]
+    assert q["size"] == ["2"] and q["start"] == ["0"]
+    assert "showing 2 of 280 row(s) — continue with offset=2" in out
+    assert "(or raise 'max_results', up to 100)" in out
+    assert "by category: Gene 280, OntologyTerm 10" in out
+    assert "by organism: A. hypogaea 277, A. ipaensis 3" in out
+    assert ("Gene | arahy.Tifrunner.gnm1.ann1.G00000 | G00000 | Arachis hypogaea "
+            "(Tifrunner) | gnm1.ann1 | chalcone synthase [Glycine max]") in out
+    # The bracket names the homolog's species, which the organism column contradicts.
+    assert "not this gene's species" in out
+
+
+def test_mine_search_routes_a_taxon_to_its_genus_mine(mine, catalog, monkeypatch):
+    urls = []
+    monkeypatch.setattr(M, "_get", lambda url, accept="": urls.append(url)
+                        or _search_doc(1, 1))
+    M._keyword_search({"query": "NARK", "taxon": "soybean"})
+    assert "/glycinemine/service/search?" in urls[0]
+
+
+def test_mine_search_failure_is_an_error_not_an_empty_result(mine, monkeypatch):
+    monkeypatch.setattr(M, "_get", lambda url, accept="": {"wasSuccessful": False,
+                                                          "error": "bad query"})
+    assert M._keyword_search({"query": "x"}).startswith("error: legumemine rejected")
+
+    def boom(url, accept=""):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(M, "_get", boom)
+    assert M._keyword_search({"query": "y"}).startswith("error: legumemine search failed")
+
+
+def test_mine_search_offset_past_the_end_reports_the_total(mine, monkeypatch):
+    monkeypatch.setattr(M, "_get", lambda url, accept="": {"wasSuccessful": True,
+                                                          "totalHits": 280, "results": []})
+    out = M._keyword_search({"query": "z", "offset": 300})
+    assert "no results at offset=300; the search has 280 in all" in out

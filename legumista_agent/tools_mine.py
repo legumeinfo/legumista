@@ -201,7 +201,7 @@ def _gene_constraints(args, root="Gene"):
 
 
 def _render(title, mine, gene, rows, cols, total, size, note="", capped=False, offset=0,
-            pageable=False):
+            pageable=False, size_max=500):
     """Rows as a table. Rows past ROW_BUDGET are dropped whole and counted, and a
     `pageable` tool's reply names the offset that continues the list."""
     if not rows:
@@ -223,13 +223,14 @@ def _render(title, mine, gene, rows, cols, total, size, note="", capped=False, o
     if (total is not None and end < total) or (total is None and (capped or cut)):
         if pageable:
             shown += f" — continue with offset={end}"
-            if not cut:
-                shown += " (or raise 'max_results', up to 500)"
+            if not cut and size < size_max:
+                shown += f" (or raise 'max_results', up to {size_max})"
         elif cut:
             shown += (f" — the reply's size limit stopped the list at {len(body)} of the "
                       f"{len(rows)} rows fetched; narrow the query to see the rest")
         else:
-            shown += f" — capped at {size}; raise 'max_results' (up to 500) to see more"
+            shown += (f" — capped at {size}; raise 'max_results' (up to {size_max}) to see "
+                      "more")
     lines = [head, shown + (f"  {note}" if note else ""), header] + body
     return _cap("\n".join(lines))
 
@@ -717,8 +718,9 @@ def _gene_family_members(args) -> str:
 
 # --- search by description -------------------------------------------------------------
 _SEARCH_CAVEAT = (
-    "A description is automated text transferred from a homolog (often ending '[Glycine "
-    "max]'): a match means the gene resembles one, not that its function is shown. Close "
+    "A description is automated text transferred from a homolog: a bracketed species "
+    "('[Glycine max]') names that homolog's species, not the gene's (the genus/species "
+    "columns). A match means the gene resembles one, not that its function is shown. Close "
     "paralogs share descriptions — peanut's stilbene synthases read 'chalcone synthase' "
     "— so a description never settles which paralog a gene is. Only descriptions are "
     "searched: letters inside a gene ID say nothing about function.")
@@ -791,6 +793,97 @@ def _gene_search(args) -> str:
                     assembly_col=None, subject_key="query",
                     subject_hint="description text such as 'chalcone synthase'",
                     footer=footer, on_empty=empty, pageable=True)
+
+
+# --- a mine's own keyword search -----------------------------------------------------
+SEARCH_PAGE_MAX = 100        # the service returns at most 100 results per request
+_BRACKET_RE = re.compile(r"\[[A-Z][a-z]+ [a-z]+\]")
+_BRACKET_NOTE = ("A bracketed species in a description ('[Glycine max]') names the "
+                 "species of the homolog the description was transferred from, not this "
+                 "gene's species: that is the organism column.")
+
+
+def _keyword_search(args) -> str:
+    """What a mine's search box does: InterMine's keyword search over every indexed class
+    and field, with the counts by category and organism its results page shows.
+
+    Not legumemine_gene_search's substring match on descriptions. Keyword search matches
+    whole words, so "chalcone synthase" finds 280 ArachisMine genes where a substring
+    finds 342: "synthase-like" and "deoxychalcone" are other words. Both are right; the
+    reply says which one ran."""
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "error: missing 'query' — keywords, a quoted phrase, OR, AND NOT, or dros*."
+    mine, mine_err = _resolve_mine(args)
+    if mine_err:
+        return mine_err
+    size = max(1, min(int(args.get("max_results") or MAX_ROWS), SEARCH_PAGE_MAX))
+    offset = max(0, int(args.get("offset") or 0))
+    params = {"q": query, "size": str(size), "start": str(offset)}
+    category = (args.get("category") or "").strip()
+    organism = (args.get("organism") or "").strip()
+    if category:
+        params["facet_Category"] = category
+    if organism:
+        params["facet_organism.shortName"] = organism
+    url = f"{_service(mine)}/search?" + urllib.parse.urlencode(params)
+
+    def compute():
+        try:
+            _validate_url(url)
+            doc = _get(url, accept="application/json")
+        except Exception as e:  # noqa: BLE001
+            return f"error: {mine} search failed: {type(e).__name__}: {e}", False
+        if not isinstance(doc, dict) or not doc.get("wasSuccessful", False):
+            detail = (doc.get("error") if isinstance(doc, dict) else "") or "no reason given"
+            return f"error: {mine} rejected the search: {detail}", False
+        return doc, True
+
+    doc = _cached(("search", url), compute)
+    if isinstance(doc, str):
+        return doc
+    total = int(doc.get("totalHits") or 0)
+    hits = doc.get("results") or []
+    scope = ", ".join(x for x in (f"category {category}" if category else "",
+                                  f"organism {organism}" if organism else "") if x)
+    title = f"Keyword search{' (' + scope + ')' if scope else ''}"
+    if not hits:
+        if offset and total:
+            return (f"{title} — {query} [mine: {mine}]: no results at offset={offset}; "
+                    f"the search has {total:,} in all.")
+        return (f"{title} — {query} [mine: {mine}]: no results. Keyword search matches "
+                "whole words in any indexed field; a filter value must match a count the "
+                "unfiltered search shows.")
+    rows, descriptions = [], []
+    for hit in hits:
+        f = hit.get("fields") or {}
+        ident = f.get("primaryIdentifier") or f.get("identifier") or f.get("name") or ""
+        name = f.get("symbol") or f.get("name") or ""
+        organism_name = f.get("organism.name") or f.get("organism.shortName") or ""
+        if f.get("strain.identifier"):
+            organism_name += f" ({f['strain.identifier']})"
+        version = ".".join(v for v in (f.get("assemblyVersion"), f.get("annotationVersion"))
+                           if v)
+        desc = f.get("description") or ""
+        descriptions.append(desc)
+        rows.append([hit.get("type", ""), ident, "" if name == ident else name,
+                     organism_name, version, desc[:160] + ("…" if len(desc) > 160 else "")])
+    counts = []
+    for facet, label in (("Category", "by category"), ("organism.shortName", "by organism")):
+        values = (doc.get("facets") or {}).get(facet) or {}
+        if values:
+            counts.append(f"{label}: " + ", ".join(
+                f"{k} {v:,}" for k, v in sorted(values.items(), key=lambda kv: -kv[1])))
+    out = _render(title, mine, query, rows,
+                  ["type", "identifier", "name", "organism", "version", "description"],
+                  total, size, capped=len(hits) >= size, offset=offset, pageable=True,
+                  size_max=SEARCH_PAGE_MAX)
+    footer = counts + ["Whole words in any indexed field: 'synthase-like' is another word, "
+                       "so this can count fewer than legumemine_gene_search's substring "
+                       "match."]
+    if any(_BRACKET_RE.search(d) for d in descriptions):
+        footer.append(_BRACKET_NOTE)
+    return _cap(out + "\n\n" + "\n".join(footer))
 
 
 def _trait_qtls(args) -> str:
@@ -1006,6 +1099,31 @@ def mine_tools() -> list:
                         "description": "Rows to skip, to continue a list the reply cut "
                                        "short (it names the offset to use)."}},
             _gene_search, required=("query",)),
+        _mk("mine_search",
+            "An LIS mine's own keyword search, as its search box runs it: whole words in "
+            "every indexed class and field, with the total and counts by category and "
+            "organism. taxon routes to that genus's mine (default legumemine); category "
+            "and organism narrow to one of the counts shown. Pages with offset.",
+            {"query": {"type": "string",
+                       "description": "Keywords: a quoted phrase, OR, AND NOT, or a "
+                                      "trailing * (\"chalcone synthase\")."},
+             "taxon": {"type": "string",
+                       "description": "Species or genus whose mine to search: Latin name, "
+                                      "common name or abbreviation."},
+             "mine": {"type": "string", "description": "Explicit mine; overrides taxon."},
+             "category": {"type": "string",
+                          "description": "One category from the counts, e.g. 'Gene', "
+                                         "'Protein', 'GeneFamily', 'QTL'."},
+             "organism": {"type": "string",
+                          "description": "One organism as the counts name it, e.g. "
+                                         "'A. hypogaea'."},
+             "max_results": {"type": "integer",
+                             "description": f"Results per page, 1-{SEARCH_PAGE_MAX} "
+                                            f"(default {MAX_ROWS})."},
+             "offset": {"type": "integer",
+                        "description": "Results to skip, to continue a list the reply "
+                                       "cut short (it names the offset to use)."}},
+            _keyword_search, required=("query",)),
         _mk("lis_trait_qtls",
             "QTLs mapped for a trait: QTL, linkage group, LOD, marker R2, study. Needs "
             "taxon: QTL data lives only in genus mines.",
