@@ -45,7 +45,7 @@ import re
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
-from .results import fail
+from .results import count_phrase, fail
 from .tool import Tool
 from .tools_catalog import catalog_stamp, catalog_unavailable, controller, resolve_taxon
 from .tools_native import MAX_CHARS, _cap, _get_bytes, _validate_url
@@ -161,8 +161,64 @@ def _find(args) -> str:
     return f"{note}\n{out}" if note else out
 
 
+def _collection_lines(record, with_taxon=False):
+    """One collection as lis_find lists it."""
+    lines = [f"\n  {record['id']}", f"    path: {record['path']}"]
+    if with_taxon:
+        lines.append(f"    type: {record['type']}   taxon: {record['genus']} "
+                     f"{record['species']}")
+    if record.get("synopsis"):
+        lines.append(f"    synopsis: {record['synopsis']}")
+    genotype = record.get("genotype")
+    if genotype:
+        joined = (", ".join(map(str, genotype))
+                  if isinstance(genotype, list) else genotype)
+        lines.append(f"    genotype: {joined}")
+    if record.get("expression_unit"):
+        lines.append(f"    expression_unit: {record['expression_unit']}")
+    if record.get("publication_doi"):
+        lines.append(f"    publication_doi: {record['publication_doi']}"
+                     "   -> openalex_by_doi / read_paper")
+    if record.get("source"):
+        lines.append(f"    source: {record['source']}")
+    return lines
+
+
+def _search(ctl, genus, species, ctype, query, limit) -> str:
+    """Collections whose id contains `query`, in whatever scope was given: the whole
+    catalog when no taxon was. A query used to be read only after a taxon and a type, so
+    a bare collection id came back as the list of genera, and an agent holding a full
+    id hunted through species for it."""
+    stamp = catalog_stamp(ctl)
+    scope = [c for c in ctl.collections
+             if (not genus or c["genus"] == genus)
+             and (not species or c["species"] == species)
+             and (not ctype or c["type"] == ctype)]
+    where = ("/".join(p for p in (genus, species, ctype) if p)
+             or "the whole catalog")
+    hits = [c for c in scope if query in c["id"].lower()]
+    if not hits:
+        return (f"no collection id contains {query!r} in {where} (ids matched as a "
+                f"case-insensitive substring). {stamp}")
+    hits.sort(key=lambda c: (c["id"].lower() != query, c["path"]))
+    shown = hits[:limit]
+    lines = [f"{count_phrase(len(shown), len(hits), 'collection(s)')} whose id contains "
+             f"{query!r}, in {where}:"]
+    for record in shown:
+        lines += _collection_lines(record, with_taxon=not (genus and species and ctype))
+    if len(hits) > len(shown):
+        lines.append(f"\nRaise 'max_results' (up to 25) or narrow with 'taxon'/'type' to "
+                     "see the rest.")
+    lines.append("\nPass a 'path' above to lis_files for the collection's full record and "
+                 "files.")
+    lines.append(stamp)
+    return _cap("\n".join(lines))
+
+
 def _find_resolved(ctl, genus, species, ctype, query, limit) -> str:
     stamp = catalog_stamp(ctl)
+    if query:
+        return _search(ctl, genus, species, ctype, query, limit)
 
     if not genus:
         genera = sorted({c["genus"] for c in ctl.collections})
@@ -202,31 +258,12 @@ def _find_resolved(ctl, genus, species, ctype, query, limit) -> str:
         types = sorted({c["type"] for c in scoped})
         return (f"no collections under {base}. Available types for {genus} {species}: "
                 + ", ".join(types) + f"\n{stamp}")
-    if query:
-        colls = [c for c in colls if query in c["id"].lower()]
-        if not colls:
-            return f"no collection under {base} matching {query!r}. {stamp}"
     total = len(colls)
     shown = sorted(colls, key=lambda c: c["id"])[:limit]
 
-    lines = [f"{total} collection(s) under {base}"
-             + (f" matching {query!r}" if query else "")
-             + (f"; showing {len(shown)}" if total > len(shown) else "") + ":"]
+    lines = [f"{count_phrase(len(shown), total, 'collection(s)')} under {base}:"]
     for record in shown:
-        lines.append(f"\n  {record['id']}")
-        lines.append(f"    path: {record['path']}")
-        if record.get("synopsis"):
-            lines.append(f"    synopsis: {record['synopsis']}")
-        genotype = record.get("genotype")
-        if genotype:
-            joined = (", ".join(map(str, genotype))
-                      if isinstance(genotype, list) else genotype)
-            lines.append(f"    genotype: {joined}")
-        if record.get("publication_doi"):
-            lines.append(f"    publication_doi: {record['publication_doi']}"
-                         "   -> openalex_by_doi / read_paper")
-        if record.get("source"):
-            lines.append(f"    source: {record['source']}")
+        lines += _collection_lines(record)
     lines.append("\nPass a 'path' above to lis_files to see what is randomly accessible.")
     lines.append(stamp)
     return _cap("\n".join(lines))
@@ -1048,9 +1085,11 @@ def lis_tools() -> list:
             "Discover data in the LIS Data Store (legume genomes/annotations/diversity/"
             "GWAS/…) from a resident catalog — no network. Drills down: no args lists "
             "genera; {taxon} lists that species' data types; {taxon, type} lists "
-            "collections with their synopsis, genotype and publication DOI. Use this "
-            "first — collection names end in an arbitrary 4-character key "
-            "('Wm82.gnm4.ann1.T8TQ') that cannot be guessed. "
+            "collections with their synopsis, genotype and publication DOI. {query} "
+            "searches collection ids at any level, the whole catalog when no taxon is "
+            "given: use it when you hold an id or part of one. Collection names end in "
+            "an arbitrary 4-character key ('Wm82.gnm4.ann1.T8TQ') that cannot be "
+            "guessed. "
             "Args: {taxon?, genus?, species?, type?, query?, max_results?}.",
             {"type": "object",
              "properties": {
@@ -1066,7 +1105,9 @@ def lis_tools() -> list:
                           "description": "Data type: genomes, annotations, diversity, "
                                          "gwas, expression, markers, qtl, synteny, …"},
                  "query": {"type": "string",
-                           "description": "Substring filter on collection names."},
+                           "description": "Case-insensitive substring of a collection "
+                                          "id; searches the whole catalog unless "
+                                          "taxon/type narrow it."},
                  "max_results": {"type": "integer",
                                  "description": "Collections to detail, 1–25 "
                                                 "(default 10)."}},

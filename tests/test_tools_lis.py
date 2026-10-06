@@ -233,6 +233,24 @@ def test_find_query_filters_collections(catalog):
     assert "no collection" in _find(taxon="Glycine max", type="annotations", query="zzz")
 
 
+def test_find_query_without_a_taxon_searches_the_whole_catalog(catalog):
+    """A bare id used to come back as the list of genera: the query was read only after
+    a taxon and a type, so an agent holding a full id searched species one by one."""
+    out = _find(query="g19833.gnm2")
+    assert "1 collection(s) whose id contains 'g19833.gnm2', in the whole catalog" in out
+    assert "G19833.gnm2.fC0g" in out and "taxon: Phaseolus vulgaris" in out
+    assert "genera in the LIS Data Store" not in out
+    out = _find(query="nonesuch")
+    assert "no collection id contains 'nonesuch' in the whole catalog" in out
+
+
+def test_find_query_puts_an_exact_id_first_and_honours_type(catalog):
+    out = _find(query="wm82.gnm2", type="annotations")
+    assert "Wm82.gnm2.ann1.RVB6" in out and "Wm82.gnm2.div.X_2020" not in out
+    out = _find(query="wm82.gnm4.ann1.t8tq")
+    assert out.index("Wm82.gnm4.ann1.T8TQ") < out.index("path:")
+
+
 def test_find_unknown_type_lists_the_real_ones(catalog):
     out = _find(taxon="Glycine max", type="nonesuch")
     assert "no collections" in out and "annotations" in out
