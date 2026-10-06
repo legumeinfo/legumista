@@ -651,6 +651,27 @@ def _translate(genes, source, target_spec, sel):
     return [], None
 
 
+def _ambiguous_region(genome, candidates):
+    """The refusal for a region on an assembly with several annotations.
+
+    Picking one would answer about gene models the caller never chose, and a default
+    such as "the newest" would change what an old selector means once LIS adds another.
+    So the caller chooses, and the reply gives what the catalog knows to choose with."""
+    lines = [f"error: pass 'collection' with a region selector — {len(candidates)} "
+             f"annotations sit on {genome}, and their genes differ (IDs and models):"]
+    for record in candidates:
+        synopsis = (record.get("synopsis") or "").strip() or "no synopsis recorded"
+        if len(synopsis) > 100:
+            synopsis = synopsis[:99] + "…"
+        released = record.get("dataset_release_date") or "release date not recorded"
+        lines.append(f"  {record['id']}  ({released})  {synopsis}")
+    lines.append("Choose the one whose gene IDs your other sources use: a fully qualified "
+                 "ID names its annotation (e.g. '<abbrev>.<strain>.gnmN.ann1.<gene>' is "
+                 "ann1). A selection made in one can be moved to another with "
+                 "'translate_to'.")
+    return "\n".join(lines)
+
+
 def resolve(selector) -> Selection:
     """Resolve a selector. Returns a Selection; `error` is set when nothing resolved."""
     sel = Selection()
@@ -678,11 +699,12 @@ def resolve(selector) -> Selection:
     if form == "region" and not collection:
         match = _GENOME_PREFIX_RE.match(str(selector["region"]))
         candidates = _annotations_for_genome(match.group(1)) if match else []
-        if len(candidates) != 1:
-            sel.error = ("error: pass 'collection' with a region selector — "
-                         + (f"{len(candidates)} annotations sit on that genome: "
-                            + ", ".join(c["id"] for c in candidates) if candidates else
-                            "the region's contig names no genome in the catalog") + ".")
+        if not candidates:
+            sel.error = ("error: pass 'collection' with a region selector — the region's "
+                         "contig names no genome in the catalog.")
+            return sel
+        if len(candidates) > 1:
+            sel.error = _ambiguous_region(match.group(1), candidates)
             return sel
         collection = candidates[0]["path"]
     hint = next((str(i) for i in (ids if form == "ids" else None) or []

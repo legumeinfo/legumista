@@ -264,6 +264,30 @@ def test_region_selector_infers_the_annotation_and_keeps_genome_order(world):
     assert G.resolve({"region": f"{GM12}:1-1450"}).genes == sel.genes   # deterministic
 
 
+def test_a_region_on_an_assembly_with_two_annotations_asks_which(world):
+    """Two annotations of one assembly name different genes for the same region (peanut
+    Tifrunner gnm2 has ann1 and ann2). The tool must not choose for the caller, and
+    must give what the catalog knows to choose with."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    ann1 = next(c for c in doc["collections"] if c["id"] == "Wm82.gnm4.ann1.T8TQ")
+    ann1.update(synopsis="Glycine max Williams 82 annotation; JGI name Wm82.a4.v1",
+                dataset_release_date="2021-01-15")
+    doc["collections"].append(_ann("Wm82.gnm4.ann2.ZZ9Q", "glyma",
+                                   f"{DS}/Glycine/max/annotations/Wm82.gnm4.ann2.ZZ9Q",
+                                   [{"n": f"{P4B}.ZZ9Q.gene_models_main.bed.gz"}]))
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    err = G.resolve({"region": f"{GM12}:1-1450"}).error
+    assert err.startswith("error: pass 'collection' with a region selector — 2 "
+                          "annotations sit on glyma.Wm82.gnm4, and their genes differ")
+    assert ("  Wm82.gnm4.ann1.T8TQ  (2021-01-15)  Glycine max Williams 82 annotation; "
+            "JGI name Wm82.a4.v1") in err
+    assert ("  Wm82.gnm4.ann2.ZZ9Q  (release date not recorded)  no synopsis "
+            "recorded") in err
+    assert "'translate_to'" in err
+    assert not world["fetched"], "nothing is read before the caller has chosen"
+
+
 def test_offset_pages_a_selection(world, monkeypatch):
     monkeypatch.setattr(G, "MAX_GENES", 2)
     first = G.resolve({"region": f"{GM12}:1-2000"})
