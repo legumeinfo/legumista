@@ -85,6 +85,8 @@ class Selection:
         head = f"selection: {span} in {self.record['id']}"
         if self.incomplete:
             head += " — INCOMPLETE (a route was NOT CHECKED; see below)"
+        if offset + shown < self.total:
+            head += f"; pass offset={offset + shown} for the next page"
         lines = [head]
         if self.direct:
             lines.append(f"  {self.direct} input(s) matched a gene or model ID directly")
@@ -524,12 +526,9 @@ def resolve(selector) -> Selection:
     except (TypeError, ValueError):
         sel.error = "error: 'offset' must be a whole number."
         return sel
+    # summary() names the page and the next offset from what is finally shown, so a
+    # caller that shows fewer genes (lis_gene, to fit its reply) stays accurate.
     sel.genes = genes[offset:offset + MAX_GENES]
-    if sel.total > len(sel.genes):
-        nxt = offset + len(sel.genes)
-        sel.lines.append(f"showing genes {offset + 1}–{nxt} of {sel.total} (cap "
-                         f"{MAX_GENES})" + (f"; pass offset={nxt} for the next page"
-                                            if nxt < sel.total else ""))
     if not sel.genes and not sel.error:
         sel.lines.append("no genes resolved")
     sel.lines.append(catalog_stamp(controller()))

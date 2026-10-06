@@ -191,8 +191,9 @@ def catalog(tmp_path, monkeypatch):
     # The gene span is one indexed GFF3 read in an htslib worker; real files exercise it
     # in test_gene_tools. Here it answers as the real Wm82.gnm4 NARK record does.
     monkeypatch.setattr(L, "_gene_span", lambda record, gff, contig, lo, hi, gene_id: (
-        ((2875521, 2879322, "-"), [(f"{gene_id}.1", 2875521, 2879322)], "")
-        if gene_id.endswith("Glyma.12G040000") else (None, [], "")))
+        ((2875521, 2879322, "-"), [(f"{gene_id}.1", 2875521, 2879322)],
+         "Leucine-rich receptor-like protein kinase family protein", "")
+        if gene_id.endswith("Glyma.12G040000") else (None, [], "", "")))
     yield fetched
     C.reset()
 
@@ -697,7 +698,7 @@ def test_the_gene_span_comes_from_the_gff3_and_sets_the_region(catalog):
 
 
 def test_an_unreadable_gff3_leaves_the_span_not_checked(catalog, monkeypatch):
-    monkeypatch.setattr(L, "_gene_span", lambda *a: (None, [], "timed out"))
+    monkeypatch.setattr(L, "_gene_span", lambda *a: (None, [], "", "timed out"))
     out = L._gene({"gene": "Glyma.12G040000", "collection": ANN})
     assert "gene span:  NOT CHECKED — timed out" in out
     assert "(coding extent; widen it to take in the UTRs): " \

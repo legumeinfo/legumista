@@ -58,14 +58,16 @@ def sl(contig, lo, hi):
 
 
 GFF_ROWS = [
-    (GM12, "gene", 201, 500, "+", f"ID={A}"),
+    (GM12, "gene", 201, 500, "+", f"ID={A};Note=chalcone synthase [Glycine max]%3B "
+     "IPR011141 (Polyketide synthase%2C type III)"),
     (GM12, "mRNA", 201, 500, "+", f"ID={A}.1;Parent={A};longest=1"),
     (GM12, "five_prime_UTR", 201, 250, "+", f"ID={A}.1.utr5;Parent={A}.1"),
     (GM12, "CDS", 251, 460, "+", f"ID={A}.1.cds;Parent={A}.1"),
     (GM12, "three_prime_UTR", 461, 500, "+", f"ID={A}.1.utr3;Parent={A}.1"),
     (GM12, "mRNA", 251, 460, "+", f"ID={A}.2;Parent={A}"),
     (GM12, "CDS", 251, 460, "+", f"ID={A}.2.cds;Parent={A}.2"),
-    (GM12, "gene", 1001, 1300, "-", f"ID={Bg}"),
+    (GM12, "gene", 1001, 1300, "-", f"ID={Bg};Note=Leucine-rich repeat receptor-like "
+     "protein kinase"),
     (GM12, "mRNA", 1001, 1300, "-", f"ID={Bg}.1;Parent={Bg};longest=1"),
     (GM12, "three_prime_UTR", 1001, 1040, "-", f"ID={Bg}.1.utr3;Parent={Bg}.1"),
     (GM12, "CDS", 1041, 1250, "-", f"ID={Bg}.1.cds;Parent={Bg}.1"),
@@ -598,3 +600,55 @@ def test_the_dotplot_uses_the_placed_synteny_track(placed):
     spec = json.loads(_params(_links(out.text)[0])["session"][len("spec-"):])
     assert spec["views"][0]["tracks"] == ["deployed.synteny.track"]
     assert _links(out.text)[0].startswith(AG)
+
+
+# --- lis_gene over a selector -----------------------------------------------------------
+def test_lis_gene_lists_a_family_with_spans_and_descriptions(world):
+    """A family's members in one annotation, complete, with what each gene is described
+    as — so a description, not an ID's letters, is what an agent reads."""
+    out = L._gene({"genes": {"family": "Legume.fam3.00002",
+                             "collection": "Wm82.gnm4.ann1.T8TQ"}})
+    assert "selection: 2 gene(s) in Wm82.gnm4.ann1.T8TQ" in out
+    assert f"  {Bg} | {GM12}:1,001-1,300 (-) | Leucine-rich repeat receptor-like " \
+        "protein kinase" in out
+    assert f"  {Cg} | {GM12}:1,400-1,500 (+) | (the gene row has no Note)" in out
+    assert "cannot tell them apart" in out
+
+
+def test_lis_gene_list_shows_only_the_product_name(world):
+    out = L._gene({"genes": {"ids": [A], "collection": "Wm82.gnm4.ann1.T8TQ"}})
+    assert f"  {A} | {GM12}:201-500 (+) | chalcone synthase [Glycine max]\n" in out
+    assert "IPR011141" not in out
+
+
+def test_lis_gene_on_one_gene_gives_the_whole_note(world):
+    out = L._gene({"gene": A})
+    assert ("description: chalcone synthase [Glycine max]; IPR011141 (Polyketide "
+            "synthase, type III)") in out
+    assert "not a demonstrated function" in out
+
+
+def test_lis_gene_list_pages_when_its_rows_overrun_the_reply(world, monkeypatch):
+    """Rows past the reply cap are dropped whole, and the selection's own paging line
+    names the offset that continues it."""
+    sel = {"family": "Legume.fam3.00002", "collection": "Wm82.gnm4.ann1.T8TQ"}
+    full = L._gene({"genes": sel})
+    monkeypatch.setattr(L, "MAX_CHARS", len(full) - 60)
+    out = L._gene({"genes": sel})
+    assert "genes 1–1 of 2" in out and "pass offset=1 for the next page" in out
+    assert Bg in out and f"  {Cg} |" not in out
+    nxt = L._gene({"genes": {**sel, "offset": 1}})
+    assert "genes 2–2 of 2" in nxt and f"  {Cg} |" in nxt
+
+
+def test_lis_gene_list_marks_an_unread_gff3_not_checked(world, monkeypatch):
+    monkeypatch.setattr(L, "_read_gff", lambda *a: ([], "timeout"))
+    out = L._gene({"genes": {"ids": [Bg], "collection": "Wm82.gnm4.ann1.T8TQ"}})
+    assert f"  {Bg} | {GM12}:1,041-1,250 (-) [coding extent] | NOT CHECKED" in out
+    assert "gene spans and descriptions NOT CHECKED — timeout" in out
+
+
+def test_lis_gene_takes_one_gene_or_a_selector_not_both(world):
+    out = L._gene({"gene": A, "genes": {"ids": [A]}})
+    assert out.startswith("error:") and "not both" in out
+    assert "'genes', a selector" in L._gene({})

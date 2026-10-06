@@ -124,7 +124,7 @@ proxy caps what a connection may send far below any useful upload.
 | `lis_survey` | What exists across the whole store: genera, collection counts, types |
 | `lis_find` | Discover collections — genomes, annotations, diversity, GWAS, synteny |
 | `lis_files` | A collection's files, and which are randomly accessible over HTTP |
-| `lis_gene` | A gene's locus, plus ready-to-run calls for its protein/CDS and neighbourhood |
+| `lis_gene` | A gene's locus and description, plus ready-to-run calls for its protein/CDS and neighbourhood; or, given a selector, one row per gene for a whole selection |
 | `lis_synteny` | Syntenic blocks and whole-genome alignments between assemblies |
 | `lis_lineage` | What a collection was derived from, and every DOI the result depends on |
 

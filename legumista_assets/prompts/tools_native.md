@@ -194,7 +194,9 @@ then read.
    **superseded ID** (`Glyma01g00210`, where the collection publishes a synonym file); the
    reply says which route answered, and on a miss lists exactly which routes ran. An ID
    from a *different assembly* is not a synonym and will not resolve — use `lis_find` to
-   pick the matching collection.
+   pick the matching collection. The reply includes the gene's **description** (the
+   GFF3 `Note`). With `genes` (a selector, below) instead of `gene` it lists a whole
+   selection, such as a family's members in one annotation, one row per gene.
 4. **`lis_survey`** — coverage across the whole store: genera and counts, the data types
    a species has, or with `needs` which species hold several types **at once**. Reach for
    this when the question is about **coverage or absence** — "which species lack
@@ -229,9 +231,9 @@ without downloading the file.
 
 ---
 
-## Gene selections (`extract_features`, `browser_link`)
+## Gene selections (`lis_gene`, `extract_features`, `browser_link`)
 
-Both take `genes`, a **selector**: a short definition the server resolves on every call,
+All three take `genes`, a **selector**: a short definition the server resolves on every call,
 so it can be reused verbatim later. Exactly one of:
 
 - `{"ids": [...], "collection"?: "<annotation>"}` — up to 200 IDs, curated symbols or
@@ -246,6 +248,10 @@ species: by gene name or synonym file; across species: through shared gene famil
 one-to-many, so a match can be a paralog). Add `"offset": N` to page. The reply accounts
 for every input — resolved, via symbol, via superseded ID, not found, or refused (one
 annotation per selection) — so report a miss with the routes it names.
+
+A description is automated text transferred from a homolog: it says what a gene
+resembles. Close paralogs share one (peanut's stilbene synthases read "chalcone
+synthase"), so a description alone never settles which paralog a gene is.
 
 - **`extract_features`** — strand-correct sequence: `feature` = `protein`, `cds`, `mrna`
   (by model name, primary model by default; `isoforms:"all"` for every model), or `gene`,

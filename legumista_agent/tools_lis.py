@@ -26,8 +26,9 @@ metadata endpoints, and no catalog can carry them:
   2024), so they exclude the UTRs and must never be called the mRNA or gene span.
 * the annotation's synonym file -- superseded gene IDs, likewise a data file whose URL
   comes from the catalog.
-* ``gene_models_main.gff3.gz`` -- one indexed region, read through an htslib worker, for
-  the gene's true span: the BED's coding extent leaves out the UTRs.
+* ``gene_models_main.gff3.gz`` -- one indexed region per gene, read through an htslib
+  worker, for the gene's true span (the BED's coding extent leaves out the UTRs) and the
+  description in its ``Note``.
 
 Curated gene *symbols* used to be a third such read; they are now carried in the
 catalog itself, so ``GmNARK`` resolves without touching the network at all.
@@ -41,12 +42,13 @@ import gzip
 import io
 import os
 import re
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 from .results import fail
 from .tool import Tool
 from .tools_catalog import catalog_stamp, catalog_unavailable, controller, resolve_taxon
-from .tools_native import _cap, _get_bytes, _validate_url
+from .tools_native import MAX_CHARS, _cap, _get_bytes, _validate_url
 
 MAX_RESULTS = int(os.environ.get("LEGUMISTA_LIS_MAX_RESULTS", "10"))
 BED_MAX_BYTES = int(os.environ.get("LEGUMISTA_LIS_BED_MAX_BYTES", str(64_000_000)))
@@ -470,38 +472,152 @@ def _bed_hits(bed, gene):
     return hits
 
 
-def _gene_span(record, gff_name, contig, lo, hi, gene_id):
-    """The gene's span and its transcripts' spans from the GFF3, 1-based inclusive.
+def _indexed_gff(record):
+    """The annotation's gene_models_main.gff3.gz if it is region-queryable, else None."""
+    return next((f["n"] for f in record.get("files", [])
+                 if f["n"].endswith(".gene_models_main.gff3.gz")
+                 and {".tbi", ".csi"} & set(f.get("i") or [])), None)
 
-    Returns (gene, mrnas, error): gene is (start, end, strand) or None, mrnas is
-    [(id, start, end)], error is "" or why the GFF3 could not be read. One indexed region
-    covering the coding extent, read in a worker, so the egress proxy and timeout apply
-    and a CSI-only index is handled."""
+
+def _read_gff(record, gff_name, regions):
+    """GFF3 rows over each (contig, lo, hi) region, 1-based, all in one htslib worker, so
+    the egress proxy and timeout apply and a CSI-only index is handled.
+
+    Returns (results, error): one entry per region, a list of rows or the reason that
+    region could not be read; or ([], reason) when the worker itself failed."""
     from .tools_pysam import READ_FILE_BYTES, _run_worker
 
     res = _run_worker({"op": "batch", "items": [
         {"kind": "tabix", "path": _file_url(record, gff_name), "contig": contig,
-         "start": max(0, lo - 1), "end": hi, "limit": 5000}]}, READ_FILE_BYTES)
-    item = (res.get("items") or [{}])[0] if not res.get("error") else res
-    if item.get("error"):
-        return None, [], str(item.get("message") or item["error"])
-    gene, mrnas = None, []
-    for row in item.get("rows", []):
+         "start": max(0, lo - 1), "end": hi, "limit": 5000}
+        for contig, lo, hi in regions]}, READ_FILE_BYTES)
+    if res.get("error"):
+        return [], str(res.get("message") or res["error"])
+    return [str(item.get("message") or item["error"]) if item.get("error")
+            else item.get("rows", []) for item in res.get("items", [])], ""
+
+
+def _parse_gene(rows, gene_id):
+    """(gene, mrnas, description) for `gene_id` from GFF3 rows. gene is (start, end,
+    strand) or None, mrnas is [(id, start, end)], description the gene row's Note."""
+    gene, mrnas, note = None, [], ""
+    for row in rows:
         cols = row.split("\t")
         if len(cols) < 9:
             continue
         attrs = dict(p.split("=", 1) for p in cols[8].split(";") if "=" in p)
         if cols[2] == "gene" and attrs.get("ID") == gene_id:
             gene = (int(cols[3]), int(cols[4]), cols[6])
+            note = urllib.parse.unquote(attrs.get("Note", "")).strip()
         elif cols[2] == "mRNA" and attrs.get("Parent") == gene_id:
             mrnas.append((attrs.get("ID", "?"), int(cols[3]), int(cols[4])))
-    return gene, sorted(mrnas, key=lambda m: (m[1], m[0])), ""
+    return gene, sorted(mrnas, key=lambda m: (m[1], m[0])), note
+
+
+def _gene_span(record, gff_name, contig, lo, hi, gene_id):
+    """The gene's span, its transcripts' spans and its description, from the GFF3.
+
+    Returns (gene, mrnas, description, error), as _parse_gene plus error: "" or why the
+    GFF3 could not be read. One indexed region covering the coding extent."""
+    results, err = _read_gff(record, gff_name, [(contig, lo, hi)])
+    rows = results[0] if results else err or "no result"
+    if isinstance(rows, str):
+        return None, [], "", rows
+    return (*_parse_gene(rows, gene_id), "")
+
+
+# The description is AHRD-style text transferred from a homolog's annotation (often
+# ending "[Glycine max]"). It says what a gene resembles; close paralogs share it, so
+# peanut's stilbene synthases are described as "chalcone synthase" like its CHS genes.
+_DESCRIPTION_SOURCE = ("the gene row's Note in gene_models_main.gff3: an automated "
+                       "description, usually transferred from a homolog — what the gene "
+                       "resembles, not a demonstrated function")
+_DESCRIPTION_WIDTH = 100
+
+
+def _short_description(note):
+    """A Note's first clause (the product name), without its InterPro and GO lists."""
+    head = note.split("; ")[0].strip()
+    return head if len(head) <= _DESCRIPTION_WIDTH else head[:_DESCRIPTION_WIDTH - 1] + "…"
+
+
+def _gene_list(selector) -> str:
+    """lis_gene over a selector: one row per gene with its span and description."""
+    from . import genes as G
+
+    sel = G.resolve(selector)
+    if sel.error:
+        return sel.error
+    offset = int(selector.get("offset") or 0)
+    if not sel.genes:
+        return sel.summary(offset)
+    record = sel.record
+    gff = _indexed_gff(record)
+    found, unread, gff_err = {}, set(), ""
+    if not gff:
+        gff_err = "no indexed gene_models_main.gff3 is published"
+    else:
+        results, gff_err = _read_gff(record, gff, [(g.contig, g.start, g.end)
+                                                   for g in sel.genes])
+        for gene, rows in zip(sel.genes, results):
+            if isinstance(rows, str):
+                unread.add(gene.id)
+                continue
+            span, _mrnas, note = _parse_gene(rows, gene.id)
+            if span:
+                found[gene.id] = (span, note)
+
+    rows = []
+    for gene in sel.genes:
+        if gene.id in found:
+            (lo, hi, strand), note = found[gene.id]
+            rows.append(f"  {gene.id} | {gene.contig}:{lo:,}-{hi:,} ({strand}) | "
+                        + (_short_description(note) or "(the gene row has no Note)"))
+        else:
+            why = ("NOT CHECKED" if gff_err or gene.id in unread
+                   else "no gene row in the GFF3")
+            rows.append(f"  {gene.id} | {gene.contig}:{gene.start:,}-{gene.end:,} "
+                        f"({gene.strand}) [coding extent] | {why}")
+    assembly = _genome_of(f"{record.get('scientific_name_abbrev', '')}.{record['id']}")
+    notes = []
+    if gff_err:
+        notes.append(f"gene spans and descriptions NOT CHECKED — {gff_err}. Loci are "
+                     "coding extents (UTRs excluded); no description was read.")
+    elif unread:
+        notes.append(f"{len(unread)} gene(s) NOT CHECKED: their GFF3 region could not be "
+                     "read, so their loci are coding extents and they have no description.")
+    notes += [f"coordinates: assembly {assembly}; 1-based, inclusive. Locus = the gene "
+              "span from gene_models_main.gff3, UTRs included.",
+              f"description: the product name, first clause of {_DESCRIPTION_SOURCE}. "
+              "Close paralogs share it (peanut's stilbene synthases read 'chalcone "
+              "synthase'), so it cannot tell them apart. lis_gene on one gene gives the "
+              "whole Note.",
+              "sequence: extract_features with this same selector."]
+    columns = "  gene | locus | description"
+    fixed = sum(len(x) + 1 for x in notes) + len(columns) + 200
+    budget = MAX_CHARS - fixed - len(sel.summary(offset))
+    keep, used = 0, 0
+    for row in rows:
+        if keep and used + len(row) + 1 > budget:
+            break
+        keep, used = keep + 1, used + len(row) + 1
+    sel.genes = sel.genes[:keep]
+    return _cap("\n".join([sel.summary(offset), columns] + rows[:keep] + notes))
 
 
 def _gene(args) -> str:
     gene = (args.get("gene") or "").strip()
+    selector = args.get("genes")
+    if selector is not None:
+        if gene:
+            return "error: pass 'gene' (one gene) or 'genes' (a selector), not both."
+        if isinstance(selector, dict) and args.get("collection") and not selector.get(
+                "collection"):
+            selector = {**selector, "collection": args["collection"]}
+        return _gene_list(selector)
     if not gene:
-        return "error: missing 'gene' — a gene ID, mRNA ID, or curated symbol."
+        return ("error: missing 'gene' — a gene ID, mRNA ID, or curated symbol; or "
+                "'genes', a selector, to list several.")
     record, err = _annotation_for_gene(gene, (args.get("collection") or "").strip())
     if record is None:
         return err
@@ -543,10 +659,10 @@ def _gene(args) -> str:
 
     assembly = _genome_of(f"{record.get('scientific_name_abbrev', '')}.{record['id']}")
     gene_id = hits[0][5] or hits[0][4].rsplit(".", 1)[0]
-    gff = next((n for n in by_name if n.endswith(".gene_models_main.gff3.gz")
-                and {".tbi", ".csi"} & set(by_name[n].get("i") or [])), None)
-    span, mrnas, span_err = (_gene_span(record, gff, contig, start, end, gene_id) if gff
-                             else (None, [], "no indexed gene_models_main.gff3 is published"))
+    gff = _indexed_gff(record)
+    span, mrnas, note, span_err = (
+        _gene_span(record, gff, contig, start, end, gene_id) if gff
+        else (None, [], "", "no indexed gene_models_main.gff3 is published"))
     lines = [f"{label} in {record['id']}"
              + (f"\n  resolved from: {provenance}" if provenance else "")]
     if span:
@@ -555,6 +671,9 @@ def _gene(args) -> str:
         lines.append(f"  gene span:  {contig}:{span[0]:,}-{span[1]:,} ({span[2]})   "
                      f"[gene row in gene_models_main.gff3, UTRs included"
                      + (f"; mRNA {models}" if models else "") + "]")
+        lines.append(f"  description: {note}   [{_DESCRIPTION_SOURCE}]" if note else
+                     "  description: none — the gene row in gene_models_main.gff3 has "
+                     "no Note")
     else:
         region_lo, region_hi = start, end
         lines.append("  gene span:  NOT CHECKED — "
@@ -854,6 +973,12 @@ def _mk(name, description, params, sync_fn):
                 read_only=True, run=run)
 
 
+def genes_selector_schema() -> dict:
+    """genes.SELECTOR_SCHEMA, imported late: genes imports this module."""
+    from .genes import SELECTOR_SCHEMA
+    return SELECTOR_SCHEMA
+
+
 def lis_tools() -> list:
     """Read-only tools for the LIS Data Store, served from the resident catalog."""
     return [
@@ -898,23 +1023,27 @@ def lis_tools() -> list:
                                                           "id, or full datastore URL."}},
              "required": ["collection"], "additionalProperties": False}, _files),
         _mk("lis_gene",
-            "Look up a gene in a LIS annotation and return its locus plus ready-to-use "
-            "calls for its protein/CDS sequence and gene models. Bridges the gap that "
-            "tabix_query needs coordinates, not names. Accepts an exact ID "
-            "('Glyma.12G040000'), a curated gene symbol ('GmNARK', resolved from the "
-            "catalog), or a superseded ID ('Glyma01g00210', resolved from the "
+            "Look up a gene in a LIS annotation and return its locus, its description "
+            "and ready-to-use calls for its protein/CDS sequence and gene models. "
+            "Bridges the gap that tabix_query needs coordinates, not names. Accepts an "
+            "exact ID ('Glyma.12G040000'), a curated gene symbol ('GmNARK', resolved "
+            "from the catalog), or a superseded ID ('Glyma01g00210', resolved from the "
             "collection's synonym file where one is published); the reply says which "
             "route resolved it, and a miss lists every route and whether it ran. A name "
             "from a DIFFERENT assembly is not a synonym and will not resolve — use "
-            "lis_find to pick the right collection. Args: {gene, collection?}.",
+            "lis_find to pick the right collection. Pass 'genes' instead of 'gene' to "
+            "list a selection — e.g. every member of a family in one annotation — one "
+            "row per gene with locus and description, paged with the selector's "
+            "'offset'. Args: {gene, collection?} or {genes}.",
             {"type": "object",
              "properties": {"gene": {"type": "string",
                                      "description": "Gene ID, mRNA ID, or curated "
                                                     "symbol."},
+                            "genes": genes_selector_schema(),
                             "collection": {"type": "string",
                                            "description": "Annotation collection path "
                                                           "or id."}},
-             "required": ["gene"], "additionalProperties": False}, _gene),
+             "required": [], "additionalProperties": False}, _gene),
         _mk("lis_synteny",
             "Syntenic blocks and whole-genome alignments between legume assemblies. With "
             "just {genome} or {gene}, lists every partner that assembly is paired with — "
