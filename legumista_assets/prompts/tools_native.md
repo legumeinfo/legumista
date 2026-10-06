@@ -196,7 +196,8 @@ then read.
    from a *different assembly* is not a synonym and will not resolve — use `lis_find` to
    pick the matching collection. The reply includes the gene's **description** (the
    GFF3 `Note`). With `genes` (a selector, below) instead of `gene` it lists a whole
-   selection, such as a family's members in one annotation, one row per gene.
+   selection, such as a family's members in one annotation, one row per gene, with
+   protein length (a short one usually marks a partial model).
 4. **`lis_survey`** — coverage across the whole store: genera and counts, the data types
    a species has, or with `needs` which species hold several types **at once**. Reach for
    this when the question is about **coverage or absence** — "which species lack

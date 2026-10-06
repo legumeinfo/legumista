@@ -707,15 +707,16 @@ def test_lis_gene_lists_a_family_with_spans_and_descriptions(world):
     out = L._gene({"genes": {"family": "Legume.fam3.00002",
                              "collection": "Wm82.gnm4.ann1.T8TQ"}})
     assert "selection: 2 gene(s) in Wm82.gnm4.ann1.T8TQ" in out
-    assert f"  {Bg} | {GM12}:1,001-1,300 (-) | Leucine-rich repeat receptor-like " \
-        "protein kinase" in out
-    assert f"  {Cg} | {GM12}:1,400-1,500 (+) | (the gene row has no Note)" in out
+    assert f"  {Bg} | {GM12}:1,001-1,300 (-) | 10 aa | Leucine-rich repeat " \
+        "receptor-like protein kinase" in out
+    assert f"  {Cg} | {GM12}:1,400-1,500 (+) | 10 aa | (the gene row has no Note)" in out
+    assert "protein: the primary model's length in " in out
     assert "cannot tell them apart" in out
 
 
 def test_lis_gene_list_shows_only_the_product_name(world):
     out = L._gene({"genes": {"ids": [A], "collection": "Wm82.gnm4.ann1.T8TQ"}})
-    assert f"  {A} | {GM12}:201-500 (+) | chalcone synthase [Glycine max]\n" in out
+    assert f"  {A} | {GM12}:201-500 (+) | 10 aa | chalcone synthase [Glycine max]\n" in out
     assert "IPR011141" not in out
 
 
@@ -740,10 +741,31 @@ def test_lis_gene_list_pages_when_its_rows_overrun_the_reply(world, monkeypatch)
 
 
 def test_lis_gene_list_marks_an_unread_gff3_not_checked(world, monkeypatch):
-    monkeypatch.setattr(L, "_read_gff", lambda *a: ([], "timeout"))
+    monkeypatch.setattr(L, "_worker_batch", lambda items: ([], "timeout"))
     out = L._gene({"genes": {"ids": [Bg], "collection": "Wm82.gnm4.ann1.T8TQ"}})
-    assert f"  {Bg} | {GM12}:1,041-1,250 (-) [coding extent] | NOT CHECKED" in out
+    assert f"  {Bg} | {GM12}:1,041-1,250 (-) [coding extent] | NOT CHECKED | " \
+        "NOT CHECKED" in out
     assert "gene spans and descriptions NOT CHECKED — timeout" in out
+    assert "protein lengths NOT CHECKED — timeout" in out
+
+
+def test_lis_gene_list_takes_the_longest_model_without_a_primary_file(world, monkeypatch):
+    """Many annotations (Tifrunner gnm2 ann2 among them) publish only the full protein
+    FASTA; a gene's longest model then stands for it."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    ann = next(c for c in doc["collections"] if c["id"] == "Wm82.gnm4.ann1.T8TQ")
+    ann["files"] = [f for f in ann["files"] if "protein_primary" not in f["n"]]
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    out = L._gene({"genes": {"ids": [A], "collection": "Wm82.gnm4.ann1.T8TQ"}})
+    assert f"  {A} | {GM12}:201-500 (+) | 10 aa |" in out
+    assert "protein: the longest model's length in " in out
+    ann["files"] = [f for f in ann["files"] if ".faa." not in f["n"]]
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    out = L._gene({"genes": {"ids": [A], "collection": "Wm82.gnm4.ann1.T8TQ"}})
+    assert f"  {A} | {GM12}:201-500 (+) | — |" in out
+    assert "no indexed protein FASTA is published" in out
 
 
 def test_lis_gene_takes_one_gene_or_a_selector_not_both(world):

@@ -479,22 +479,50 @@ def _indexed_gff(record):
                  and {".tbi", ".csi"} & set(f.get("i") or [])), None)
 
 
+def _worker_batch(items):
+    """Run htslib batch items in one worker, so the egress proxy and timeout apply and a
+    CSI-only index is handled. Returns (results, error): one dict per item, or ([],
+    reason) when the worker itself failed."""
+    from .tools_pysam import READ_FILE_BYTES, _run_worker
+
+    res = _run_worker({"op": "batch", "items": items}, READ_FILE_BYTES)
+    if res.get("error"):
+        return [], str(res.get("message") or res["error"])
+    return res.get("items", []), ""
+
+
+def _tabix_items(record, gff_name, regions):
+    return [{"kind": "tabix", "path": _file_url(record, gff_name), "contig": contig,
+             "start": max(0, lo - 1), "end": hi, "limit": 5000}
+            for contig, lo, hi in regions]
+
+
+def _rows_or_reason(item):
+    """A tabix batch result: its rows, or why the region could not be read."""
+    return (str(item.get("message") or item["error"]) if item.get("error")
+            else item.get("rows", []))
+
+
 def _read_gff(record, gff_name, regions):
-    """GFF3 rows over each (contig, lo, hi) region, 1-based, all in one htslib worker, so
-    the egress proxy and timeout apply and a CSI-only index is handled.
+    """GFF3 rows over each (contig, lo, hi) region, 1-based, all in one htslib worker.
 
     Returns (results, error): one entry per region, a list of rows or the reason that
     region could not be read; or ([], reason) when the worker itself failed."""
-    from .tools_pysam import READ_FILE_BYTES, _run_worker
+    results, err = _worker_batch(_tabix_items(record, gff_name, regions))
+    return [_rows_or_reason(item) for item in results], err
 
-    res = _run_worker({"op": "batch", "items": [
-        {"kind": "tabix", "path": _file_url(record, gff_name), "contig": contig,
-         "start": max(0, lo - 1), "end": hi, "limit": 5000}
-        for contig, lo, hi in regions]}, READ_FILE_BYTES)
-    if res.get("error"):
-        return [], str(res.get("message") or res["error"])
-    return [str(item.get("message") or item["error"]) if item.get("error")
-            else item.get("rows", []) for item in res.get("items", [])], ""
+
+def _protein_fasta(record):
+    """(file, rule) for the annotation's indexed protein FASTA: the primary-model file,
+    whose one record per gene is taken as is, else the full file, whose longest model
+    stands for the gene. (None, "") when neither is indexed."""
+    for suffix, rule in ((".protein_primary.faa.gz", "present"),
+                         (".protein.faa.gz", "longest")):
+        name = next((f["n"] for f in record.get("files", []) if f["n"].endswith(suffix)
+                     and ".fai" in (f.get("i") or [])), None)
+        if name:
+            return name, rule
+    return None, ""
 
 
 def _parse_gene(rows, gene_id):
@@ -553,31 +581,50 @@ def _gene_list(selector) -> str:
         return sel.summary(offset)
     record = sel.record
     gff = _indexed_gff(record)
-    found, unread, gff_err = {}, set(), ""
-    if not gff:
-        gff_err = "no indexed gene_models_main.gff3 is published"
-    else:
-        results, gff_err = _read_gff(record, gff, [(g.contig, g.start, g.end)
-                                                   for g in sel.genes])
-        for gene, rows in zip(sel.genes, results):
-            if isinstance(rows, str):
-                unread.add(gene.id)
-                continue
-            span, _mrnas, note = _parse_gene(rows, gene.id)
-            if span:
-                found[gene.id] = (span, note)
+    protein, rule = _protein_fasta(record)
+    # One worker for the whole page: a GFF3 region per gene, then a protein lookup per
+    # gene. Each file is opened once.
+    items = (_tabix_items(record, gff, [(g.contig, g.start, g.end) for g in sel.genes])
+             if gff else [])
+    if protein:
+        items += [{"kind": "pick", "path": _file_url(record, protein), "names": g.models,
+                   "rule": rule} for g in sel.genes]
+    results, batch_err = _worker_batch(items) if items else ([], "")
+    gff_results = results[:len(sel.genes)] if gff else []
+    pick_results = results[len(gff_results):]
+    found, unread = {}, set()
+    gff_err = ("no indexed gene_models_main.gff3 is published" if not gff else batch_err)
+    for gene, item in zip(sel.genes, gff_results):
+        rows = _rows_or_reason(item)
+        if isinstance(rows, str):
+            unread.add(gene.id)
+            continue
+        span, _mrnas, note = _parse_gene(rows, gene.id)
+        if span:
+            found[gene.id] = (span, note)
+    lengths = {}
+    for gene, item in zip(sel.genes, pick_results):
+        lengths[gene.id] = ("NOT CHECKED" if item.get("error") else
+                            f"{item['length']} aa" if item.get("length") else
+                            "not in the FASTA")
+
+    def protein_cell(gene):
+        if not protein:
+            return "—"
+        return lengths.get(gene.id, "NOT CHECKED")
 
     rows = []
     for gene in sel.genes:
         if gene.id in found:
             (lo, hi, strand), note = found[gene.id]
             rows.append(f"  {gene.id} | {gene.contig}:{lo:,}-{hi:,} ({strand}) | "
+                        f"{protein_cell(gene)} | "
                         + (_short_description(note) or "(the gene row has no Note)"))
         else:
             why = ("NOT CHECKED" if gff_err or gene.id in unread
                    else "no gene row in the GFF3")
             rows.append(f"  {gene.id} | {gene.contig}:{gene.start:,}-{gene.end:,} "
-                        f"({gene.strand}) [coding extent] | {why}")
+                        f"({gene.strand}) [coding extent] | {protein_cell(gene)} | {why}")
     assembly = _genome_of(f"{record.get('scientific_name_abbrev', '')}.{record['id']}")
     notes = []
     if gff_err:
@@ -592,8 +639,15 @@ def _gene_list(selector) -> str:
               "Close paralogs share it (peanut's stilbene synthases read 'chalcone "
               "synthase'), so it cannot tell them apart. lis_gene on one gene gives the "
               "whole Note.",
+              ("protein: " + ("the primary model's length" if rule == "present" else
+                              "the longest model's length")
+               + f" in {protein}. One far below the rest of a family usually marks a "
+               "partial or broken model, not a different gene." if protein else
+               "protein: no indexed protein FASTA is published, so no length is given."),
               "sequence: extract_features with this same selector."]
-    columns = "  gene | locus | description"
+    if protein and batch_err:
+        notes.insert(0, f"protein lengths NOT CHECKED — {batch_err}.")
+    columns = "  gene | locus | protein | description"
     fixed = sum(len(x) + 1 for x in notes) + len(columns) + 200
     budget = MAX_CHARS - fixed - len(sel.summary(offset))
     keep, used = 0, 0
@@ -1041,7 +1095,8 @@ def lis_tools() -> list:
             "from a DIFFERENT assembly is not a synonym and will not resolve — use "
             "lis_find to pick the right collection. Pass 'genes' instead of 'gene' to "
             "list a selection — e.g. every member of a family in one annotation — one "
-            "row per gene with locus and description, paged with the selector's "
+            "row per gene with locus, protein length and description, paged with "
+            "the selector's "
             "'offset'. Args: {gene, collection?} or {genes}.",
             {"type": "object",
              "properties": {"gene": {"type": "string",
