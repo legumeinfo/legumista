@@ -769,8 +769,7 @@ def resolve(selector) -> Selection:
 
 SELECTOR_SCHEMA = {
     "type": "object",
-    "description": ("A gene selector: exactly one of ids, region, family or ncbi. "
-                    "guide('genes') has the rules."),
+    "description": "A gene selector: exactly one of ids, region, family or ncbi.",
     "properties": {
         "ids": {"type": "array", "items": {"type": "string"},
                 "description": "Up to 200 gene IDs, symbols or superseded IDs."},

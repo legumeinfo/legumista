@@ -45,11 +45,9 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
     by definition, resolved on every call; nothing is stored, so nothing needs a session.
   - `tools_extract.py` (`extract_features`), `tools_browser.py` (`browser_link`),
     `tools_report.py` (`report_data_issue`, served only with `--allow-report` and a
-    GitHub App; it authenticates only as that App), `tools_guide.py` (`guide`).
+    GitHub App; it authenticates only as that App).
 - `legumista_assets/prompts/tools_native.md` — the tool-use doctrine served as the MCP
   server's `instructions`. Package data; editing it changes what every client is told.
-- `legumista_assets/guide/*.md` — one topic per tool family, served on demand by `guide`.
-  Each opens with `# <topic> — <summary>`, which the topic index shows.
 - `compose.yaml` / `.env.example` — the deployment path: builds the image from the
   checkout and runs it as an HTTP server. `.env` is gitignored (it holds the webhook
   secret); the compose file is meant to be used unedited.
@@ -135,7 +133,7 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 ## Model-facing text
 
 A design decision, applying to everything a model reads: the served instructions, tool and
-parameter descriptions, guide topics, and tool output.
+parameter descriptions, and tool output.
 
 - **Purpose.** Legumista is an efficient means for AI models to help themselves, not a
   tutor. Assume a capable consumer that makes its own decisions. Supply what it cannot
@@ -145,15 +143,15 @@ parameter descriptions, guide topics, and tool output.
   copies examples, and generic ones distract. No explanations of general biology or
   bioinformatics, which a capable model already has.
 - **Each kind of text has one place.**
-  - `prompts/tools_native.md`, served as `instructions`: how to read a result, where to
-    start (a table naming every tool), and the LIS conventions a model cannot know,
-    under a size budget. It is sent once and held all session, and not every client
-    passes it on, so nothing essential lives only here.
+  - `prompts/tools_native.md`, served as `instructions`: where to start (a table naming
+    every tool), the LIS conventions a model cannot know, how to read a result, and the
+    per-family detail (argument forms, what a reply means), most consequential first,
+    under a size budget. It is sent once and held all session. Clients differ in how much
+    they pass on (Claude Code cuts it at 2,048 characters), which is why the order
+    matters and why nothing essential lives only here.
   - Tool descriptions, which reach the model in every client: what the tool returns,
     and the traps a capable model could not infer. No `Args:` lists the schema already
     carries, no internals, no promotion.
-  - `guide/` topics, served by `guide`: the per-family detail (argument forms, what a
-    reply means). They cost nothing until read.
   - Tool output: what the result means, its scope and its caveats, where they apply.
 - **Next-step hints.** The model decides what to do next. A tool's output gets a hint
   only when the hint carries something the model could not otherwise know, and has
@@ -162,10 +160,12 @@ parameter descriptions, guide topics, and tool output.
   routing table, and never guess a cause: a miss reports what was checked, not a theory
   of why. Every `lis_gene` miss once suggested the name might be from another assembly,
   and that guess sent an agent asking for "CHS" through collection after collection.
-- **Enforced by `tests/test_assets.py`**: the instructions name every served tool and
-  stay within their budget, each guide topic is packaged with its summary line, and the
-  guides name only served tools. A new tool needs a row in the instructions' table and
-  its detail in a guide topic.
+- **No case studies.** Examples illustrate a convention, never an answer: don't put
+  findings from a real investigation (a gene's identity, a count, which paralog is which)
+  in model-facing text, where they bias the next model asked the same question.
+- **Enforced by `tests/test_assets.py`**: the instructions name every served tool, name
+  no tool that isn't served, and stay within their budget. A new tool needs a row in the
+  instructions' table and its detail in the instructions' section for its family.
 
 ## Contributing
 
