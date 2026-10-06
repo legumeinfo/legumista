@@ -555,11 +555,11 @@ _DATASETS_READONLY = {"summary", "taxonomy", "version"}
 
 def _ncbi_datasets(args) -> str:
     """Thin wrapper over the NCBI `datasets` CLI (read-only subcommands only). Pass the
-    subcommand + flags as an argv list, e.g. ["summary","genome","taxon","Homo sapiens"]."""
+    subcommand + flags as an argv list, e.g. ["summary","genome","taxon","Glycine max"]."""
     argv = args.get("args")
     if not isinstance(argv, list) or not argv:
         return ('error: pass "args" as a list, e.g. '
-                '["summary","genome","taxon","Homo sapiens","--as-json-lines"]')
+                '["summary","genome","taxon","Glycine max","--as-json-lines"]')
     sub = str(argv[0]).strip().lower()
     if sub not in _DATASETS_READONLY:
         return (f"error: subcommand '{sub}' is not permitted (this tool is read-only). "
@@ -592,7 +592,7 @@ def _ncbi_assembly_status(args) -> str:
     level, contig N50, date, organism)."""
     taxon = (args.get("taxon") or "").strip()
     if not taxon:
-        return "error: missing 'taxon' (e.g. 'Homo sapiens' or a taxid)"
+        return "error: missing 'taxon' (e.g. 'Glycine max' or a taxid)"
     out, err = _cli_raw(["datasets", "summary", "genome", "taxon", taxon,
                          "--as-json-lines"])
     if err:
@@ -641,7 +641,7 @@ def _sra_runs(args) -> str:
     efetch runinfo (CSV) into rows (run, platform, model, spots, bases, layout)."""
     query = (args.get("query") or "").strip()
     if not query:
-        return "error: missing 'query' (e.g. 'Escherichia coli')"
+        return "error: missing 'query' (e.g. 'Vigna unguiculata')"
     retmax = min(int(args.get("retmax") or 20), 200)
     search = _cli_raw_bytes(["esearch", "-db", "sra", "-query", query], timeout=60)
     if isinstance(search, str):   # error message
@@ -947,7 +947,7 @@ def native_tools() -> list:
             _read_paper),
         _mk("ncbi_datasets", "Run the NCBI `datasets` CLI (genome/gene/taxonomy data). "
             "Args: {args: [string,...]} — the subcommand + flags, e.g. "
-            "[\"summary\",\"genome\",\"taxon\",\"Homo sapiens\",\"--as-json-lines\"]. "
+            "[\"summary\",\"genome\",\"taxon\",\"Glycine max\",\"--as-json-lines\"]. "
             "Requires the CLI to be installed locally.",
             {"type": "object",
              "properties": {"args": {"type": "array", "items": {"type": "string"},
@@ -977,7 +977,7 @@ def native_tools() -> list:
              "required": ["query"]}, _sra_runs),
         _mk("edirect", "Query NCBI Entrez via EDirect: esearch on a database piped to "
             "esummary/efetch. Args: {db, query, action?(esummary|efetch), format?, "
-            "retmax?}. e.g. {db:'assembly', query:'Homo sapiens[Organism]'}. "
+            "retmax?}. e.g. {db:'assembly', query:'Arachis hypogaea[Organism]'}. "
             "Requires EDirect installed locally.",
             {"type": "object",
              "properties": {"db": {"type": "string",

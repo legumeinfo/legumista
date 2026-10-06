@@ -314,7 +314,7 @@ _SPAN_RE = re.compile(r"^([\d,]+)(?:-([\d,]+))?$")
 def _parse_region(region: str):
     region = (region or "").strip()
     if not region:
-        return None, None, None, "error: missing 'region' (e.g. 'chr1:1000-2000')"
+        return None, None, None, "error: missing 'region' (e.g. 'glyma.Wm82.gnm4.Gm12:1000-2000')"
     contig, sep, span = region.rpartition(":")
     if not sep:
         return region, None, None, None
@@ -837,7 +837,7 @@ def _dispatch(module_name: str, readset, allow_write: bool, args) -> str:
     argv = args.get("args")
     if not isinstance(argv, list) or not argv:
         return (f'error: pass "args" as a non-empty list, e.g. '
-                f'["view","-c","reads.bam","chr1:1-1000"] for {module_name}.')
+                f'["view","-c","reads.bam","glyma.Wm82.gnm4.Gm12:1-1000"] for {module_name}.')
     argv = [str(a) for a in argv]
     sub = argv[0].strip().lower().replace("-", "_")
     # Resolve the subcommand first (no side effects) so an unknown one reports clearly
@@ -1002,7 +1002,7 @@ def bio_tools(allow_write: bool = False) -> list:
     args_arr = {"args": {"type": "array", "items": {"type": "string"},
                          "description": "argv for the CLI: the subcommand followed by its "
                                         "flags/arguments, e.g. [\"view\",\"-c\",\"reads.bam\","
-                                        "\"chr1:1-1000\"]. File paths are confined to the "
+                                        "\"glyma.Wm82.gnm4.Gm12:1-1000\"]. File paths are confined to the "
                                         "workspace; regions are samtools-style (1-based)."}}
     path = {"path": {"type": "string",
                      "description": "An indexed file: a workspace path or http(s) URL, with "
@@ -1016,7 +1016,7 @@ def bio_tools(allow_write: bool = False) -> list:
             "coverage, flagstat, idxstats, stats, faidx, markdup, consensus, …). Args: "
             "{args: [subcommand, ...]}. Read subcommands (view/flagstat/idxstats/stats/"
             "depth/coverage/…) work by default; writing ones (sort/index/markdup/…) need "
-            "--allow-write. Regions are 1-based (e.g. 'chr1:1000-2000').",
+            "--allow-write. Regions are 1-based (e.g. 'glyma.Wm82.gnm4.Gm12:1000-2000').",
             {"type": "object", "properties": {**args_arr}, "required": ["args"]},
             lambda a: _dispatch("samtools", _SAM_READ, allow_write, a),
             read_only=not allow_write, writes=_mk_writes(_SAM_READ)),
