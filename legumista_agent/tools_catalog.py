@@ -442,7 +442,6 @@ def _survey(args) -> str:
     lines.append(f"\n{scope}: {total} collections across {len(types)} data types")
     for name, count in types.items():
         lines.append(f"  {name:<20} {count:>5}")
-    lines.append("\nUse lis_find/lis_files for the collections themselves.")
     return _cap("\n".join(lines))
 
 

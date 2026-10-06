@@ -567,9 +567,8 @@ def _catalog_symbol(args) -> str:
     for hit in hits:
         lines.append("  " + " | ".join(str(hit.get(k) or "")
                                        for k in ("abbrev", "gene", "doi", "synopsis")))
-    lines.append("The gene id is fully qualified — pass it straight to lis_gene, "
-                 "legumemine_gene_families or fasta_fetch. For every publication behind "
-                 "the symbol rather than the primary DOI, re-run with an explicit 'mine'.")
+    lines.append("This is the catalog's primary DOI for the symbol; the mine lists every "
+                 "publication behind it: re-run with an explicit 'mine'.")
     return _cap("\n".join(lines))
 
 
@@ -763,9 +762,9 @@ def _gene_search(args) -> str:
         # Largest first: the broad family is usually the one wanted. The identifier
         # breaks ties so paging is stable.
         sort, col, scope = "GeneFamily.size desc GeneFamily.primaryIdentifier asc", 2, ""
-        nxt = ("Next: lis_gene(genes={'family': <id>, 'collection': <annotation>}) lists a "
-               "family's members in one annotation with loci and descriptions; "
-               "legumemine_gene_family_members lists them across species.")
+        nxt = ("A family's members in one annotation, with loci: lis_gene(genes="
+               "{'family': <id>, 'collection': <annotation>}); across species: "
+               "legumemine_gene_family_members.")
     else:
         target_cons, scope, terr = _target_constraints(args.get("target_taxon"))
         if terr:
@@ -774,9 +773,7 @@ def _gene_search(args) -> str:
                 "Gene.description"]
         constraints = [("Gene.description", "CONTAINS", query)] + target_cons
         sort, col = "Gene.primaryIdentifier asc", 3
-        nxt = ("Next: lis_gene(gene=<id>) for a gene's locus and full description; "
-               "legumemine_gene_families for its family. To list every member of a family "
-               "in one annotation, search='families' or lis_gene with a family selector.")
+        nxt = ""
     title = (f"Gene {'families' if kind == 'families' else 'search'} by description"
              + (f" in {scope}" if scope else ""))
 

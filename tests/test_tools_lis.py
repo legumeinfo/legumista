@@ -451,9 +451,16 @@ def test_miss_reports_which_sources_were_consulted(catalog):
     assert "curated symbols" in out and "synonym file" in out
 
 
-def test_miss_explains_that_cross_assembly_names_are_not_synonyms(catalog):
+def test_a_cross_assembly_name_misses_without_a_guessed_cause(catalog):
+    """A miss lists the routes that ran. It used to add, on every miss, that the name
+    might be from another assembly and to pick a collection with lis_find: a guess
+    that sent an agent asking for "CHS" through collection after collection. That a
+    name from another assembly does not resolve is stated in the tool's description."""
     out = L._gene({"gene": "MtrunA17_Chr1g0147651", "collection": ANN})
-    assert "different assembly" in out and "lis_find" in out
+    assert out.startswith("no match for 'MtrunA17_Chr1g0147651'")
+    assert "different assembly" not in out
+    tool = next(t for t in L.lis_tools() if t.name == "lis_gene")
+    assert "An ID from another assembly will not resolve" in tool.description
 
 
 def test_gene_requires_a_gene(catalog):

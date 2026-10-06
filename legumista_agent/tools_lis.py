@@ -209,8 +209,6 @@ def _search(ctl, genus, species, ctype, query, limit) -> str:
     if len(hits) > len(shown):
         lines.append(f"\nRaise 'max_results' (up to 25) or narrow with 'taxon'/'type' to "
                      "see the rest.")
-    lines.append("\nPass a 'path' above to lis_files for the collection's full record and "
-                 "files.")
     lines.append(stamp)
     return _cap("\n".join(lines))
 
@@ -264,7 +262,6 @@ def _find_resolved(ctl, genus, species, ctype, query, limit) -> str:
     lines = [f"{count_phrase(len(shown), total, 'collection(s)')} under {base}:"]
     for record in shown:
         lines += _collection_lines(record)
-    lines.append("\nPass a 'path' above to lis_files to see what is randomly accessible.")
     lines.append(stamp)
     return _cap("\n".join(lines))
 
@@ -735,8 +732,7 @@ def _gene_list(selector) -> str:
                               "the longest model's length")
                + f" in {protein}. One far below the rest of a family usually marks a "
                "partial or broken model, not a different gene." if protein else
-               "protein: no indexed protein FASTA is published, so no length is given."),
-              "sequence: extract_features with this same selector."]
+               "protein: no indexed protein FASTA is published, so no length is given.")]
     if protein and batch_err:
         notes.insert(0, f"protein lengths NOT CHECKED — {batch_err}.")
     columns = "  gene | locus | protein | description"
@@ -800,9 +796,6 @@ def _gene(args) -> str:
                          "use legumemine_gene_search with the full product name (e.g. "
                          "'chalcone synthase'), or legumemine_gene_symbol for a curated "
                          "symbol.")
-        lines.append("A name from a different assembly (e.g. an A17.gnm5 ID against a gnm4 "
-                     "annotation) is not a synonym and cannot be resolved here — use "
-                     "lis_find to pick the matching collection.")
         lines.append(catalog_stamp(ctl))
         return "\n".join(lines)
 
