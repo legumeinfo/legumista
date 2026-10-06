@@ -134,16 +134,48 @@ def verify_doi(doi: str, claimed_title: str = ""):
                      + (f' — registered title: "{title}"' if title else ""))
 
 
+def _genus_mine(gene_id: str) -> str:
+    """The species' own genus mine for a fully qualified gene ID, or "" when there is
+    none, it cannot be told, or it is the pan-legume mine itself."""
+    from .tools_lis import _QUALIFIED_GENE_RE
+    match = _QUALIFIED_GENE_RE.match(gene_id)
+    if not match:
+        return ""
+    mine, err = tools_mine._resolve_mine({"taxon": match.group("abbrev")})
+    return "" if err or not mine or mine == tools_mine.MINE else mine
+
+
 def verify_gene(gene_id: str):
-    ids, err = tools_mine._gene_presence(tools_mine.MINE, {"gene": gene_id})
+    """FOUND in the pan-legume mine, else in the species' genus mine.
+
+    The two can spell one gene differently: ArachisMine's
+    arahy.Tifrunner.gnm1.ann1.6J3HHE is legumemine's (and the Data Store's)
+    arahy.Tifrunner.gnm1.ann1.Arahy.6J3HHE. Checking legumemine alone reported real genes
+    NOT FOUND, beside guidance not to cite them."""
+    pan = tools_mine.MINE
+    ids, err = tools_mine._gene_presence(pan, {"gene": gene_id})
     if err:
         return "UNCHECKED", f"gene {gene_id} — UNCHECKED ({err})"
     if gene_id in (ids or []):
-        return "FOUND", f"gene {gene_id} — FOUND in {tools_mine.MINE}"
-    if ids:
-        return "NOT FOUND", (f"gene {gene_id} — NOT FOUND as written; {tools_mine.MINE} has "
-                             + ", ".join(ids[:3]))
-    return "NOT FOUND", f"gene {gene_id} — NOT FOUND in {tools_mine.MINE}"
+        return "FOUND", f"gene {gene_id} — FOUND in {pan}"
+    checked, near = [pan], [(pan, ids)] if ids else []
+    genus = _genus_mine(gene_id)
+    if genus:
+        gids, gerr = tools_mine._gene_presence(genus, {"gene": gene_id})
+        if gerr:
+            return "UNCHECKED", (f"gene {gene_id} — UNCHECKED: not in {pan} as written, and "
+                                 f"{genus} could not be checked ({gerr})")
+        if gene_id in (gids or []):
+            return "FOUND", (f"gene {gene_id} — FOUND in {genus}; {pan} does not know this "
+                             "form of the ID")
+        checked.append(genus)
+        if gids:
+            near.append((genus, gids))
+    if near:
+        return "NOT FOUND", (f"gene {gene_id} — NOT FOUND as written; "
+                             + "; ".join(f"{m} has {', '.join(found[:3])}"
+                                         for m, found in near))
+    return "NOT FOUND", f"gene {gene_id} — NOT FOUND in {' or '.join(checked)}"
 
 
 def verify_collection(cid: str):
@@ -201,8 +233,9 @@ def _verify(args):
     summary = ", ".join(f"{tally[v]} {v}" for v in order if v in tally)
     head = (f"verify_ids — {total} identifier(s): {summary}"
             + (f"; {flagged} flagged by a retraction/concern notice" if flagged else ""))
-    guidance = ("Do not cite anything NOT FOUND, MISMATCH or RETRACTED as support. Treat "
-                "UNCHECKED as unverified and say so.")
+    guidance = ("NOT FOUND means absent from the sources its line names. Do not cite "
+                "anything NOT FOUND, MISMATCH or RETRACTED as support. Treat UNCHECKED as "
+                "unverified and say so.")
     return _cap("\n".join([head] + [f"  {line}" for line in lines] + [guidance]))
 
 

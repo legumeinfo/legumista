@@ -77,3 +77,56 @@ def test_collection_ids_of_other_shapes_are_found_only_as_catalog_ids():
     found = V.extract_ids(text, known)["collections"]
     assert set(found) == known
     assert V.extract_ids(text)["collections"] == ["Wm82.gnm4.ann1.T8TQ"]   # no catalog
+
+
+# --- genes: the pan-legume mine, then the species' genus mine --------------------------
+def _mines(monkeypatch, answers, genus="arachismine"):
+    """answers: {mine: (ids, error)}; the gene's genus mine resolves to `genus`."""
+    calls = []
+
+    def presence(mine, args):
+        calls.append(mine)
+        return answers.get(mine, ([], None))
+    monkeypatch.setattr(tools_mine, "_gene_presence", presence)
+    monkeypatch.setattr(tools_mine, "_resolve_mine",
+                        lambda args, require_taxon=False: (genus, None))
+    return calls
+
+
+ARAHY = "arahy.Tifrunner.gnm1.ann1.6J3HHE"
+
+
+def test_a_gene_known_only_to_its_genus_mine_is_found(monkeypatch):
+    """ArachisMine spells peanut genes without the 'Arahy.' that legumemine and the Data
+    Store use; checking legumemine alone called real genes NOT FOUND."""
+    calls = _mines(monkeypatch, {"arachismine": ([ARAHY], None)})
+    verdict, line = V.verify_gene(ARAHY)
+    assert verdict == "FOUND"
+    assert line == (f"gene {ARAHY} — FOUND in arachismine; legumemine does not know this "
+                    "form of the ID")
+    assert calls == ["legumemine", "arachismine"]
+
+
+def test_not_found_names_every_mine_checked(monkeypatch):
+    _mines(monkeypatch, {})
+    assert V.verify_gene(ARAHY) == ("NOT FOUND",
+                                    f"gene {ARAHY} — NOT FOUND in legumemine or arachismine")
+
+
+def test_a_genus_mine_failure_leaves_the_gene_unchecked(monkeypatch):
+    _mines(monkeypatch, {"arachismine": (None, "error: arachismine request failed")})
+    verdict, line = V.verify_gene(ARAHY)
+    assert verdict == "UNCHECKED" and "arachismine could not be checked" in line
+
+
+def test_a_gene_found_in_legumemine_needs_no_second_mine(monkeypatch):
+    gene = "glyma.Wm82.gnm4.ann1.Glyma.12G040000"
+    calls = _mines(monkeypatch, {"legumemine": ([gene], None)}, genus="glycinemine")
+    assert V.verify_gene(gene)[0] == "FOUND" and calls == ["legumemine"]
+
+
+def test_a_bare_gene_name_is_checked_in_legumemine_only(monkeypatch):
+    calls = _mines(monkeypatch, {})
+    assert V.verify_gene("Glyma.12G040000") == (
+        "NOT FOUND", "gene Glyma.12G040000 — NOT FOUND in legumemine")
+    assert calls == ["legumemine"]
