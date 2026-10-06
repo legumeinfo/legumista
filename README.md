@@ -132,6 +132,7 @@ proxy caps what a connection may send far below any useful upload.
 
 | Tool | What it answers |
 | --- | --- |
+| `legumemine_gene_search` | Genes or gene families whose description contains a phrase — from a function to candidate genes |
 | `legumemine_gene_symbol` | Resolve a gene symbol to identifiers |
 | `legumemine_gene_proteins` | Protein records: identifier, length, molecular weight |
 | `legumemine_gene_families` | Gene-family assignments |

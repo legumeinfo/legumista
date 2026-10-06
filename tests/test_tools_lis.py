@@ -708,3 +708,13 @@ def test_an_unreadable_gff3_leaves_the_span_not_checked(catalog, monkeypatch):
 def test_a_gene_without_a_gff3_row_says_so(catalog):
     out = L._gene({"gene": "Glyma.12G0400001", "collection": ANN})
     assert "NOT CHECKED — no gene row with ID" in out
+
+
+def test_a_miss_on_a_function_name_points_to_the_description_search(catalog):
+    """'CHS' is a function, not a name. With nowhere to go, an agent grepped gene IDs
+    for its letters and reported Arahy.CHS32V, a dynamin, as a chalcone synthase."""
+    out = L._gene({"gene": "CHS", "collection": ANN})
+    assert "looks like a function or abbreviation" in out
+    assert "legumemine_gene_search" in out
+    assert "looks like a function" not in L._gene({"gene": "Glyma.12G0400001",
+                                                  "collection": ANN})

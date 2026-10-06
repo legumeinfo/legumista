@@ -288,6 +288,7 @@ def test_tools_are_read_only_and_well_formed():
         "legumemine_gene_proteins", "legumemine_gene_families",
         "legumemine_gene_ontology", "legumemine_gene_expression",
         "legumemine_gene_symbol", "legumemine_gene_family_members",
+        "legumemine_gene_search",
         "lis_trait_qtls", "lis_trait_gwas", "lis_marker_position"}
     for t in tools:
         assert t.read_only is True
@@ -297,6 +298,7 @@ def test_tools_are_read_only_and_well_formed():
             assert req in t.parameters["properties"], (t.name, req)
     by_name = {t.name: t for t in tools}
     assert by_name["legumemine_gene_symbol"].parameters["required"] == ["symbol"]
+    assert by_name["legumemine_gene_search"].parameters["required"] == ["query"]
     assert by_name["lis_trait_qtls"].parameters["required"] == ["trait"]
     assert by_name["lis_marker_position"].parameters["required"] == ["marker"]
     # family members takes gene OR family, so neither can be schema-required
@@ -897,3 +899,70 @@ def test_an_offset_past_the_end_reports_the_total(mine):
     mine["body"] = {"wasSuccessful": True, "columnHeaders": [], "results": []}
     out = M._gene_family_members({"family": "Legume.fam3.08725", "offset": 400})
     assert "no rows at offset=400; the query has 348 row(s) in all" in out
+
+
+# --- search by description ------------------------------------------------------------
+def _search_body(descriptions):
+    return {"wasSuccessful": True,
+            "columnHeaders": ["Gene > Primary Identifier", "Gene > Organism > Genus",
+                              "Gene > Organism > Species", "Gene > Description"],
+            "results": [[f"arahy.Tifrunner.gnm2.ann1.Arahy.G{i:05d}", "Arachis",
+                         "hypogaea", d] for i, d in enumerate(descriptions)]}
+
+
+def test_gene_search_matches_descriptions_within_a_taxon(mine, catalog):
+    mine["body"] = _search_body(["chalcone synthase [Glycine max]; IPR011141"])
+    out = M._gene_search({"query": "chalcone synthase", "target_taxon": "phavu"})
+    xml, _ = _parse(mine["urls"][0])
+    assert ('path="Gene.description" op="CONTAINS" value="chalcone synthase"') in xml
+    assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in xml
+    assert 'sortOrder="Gene.primaryIdentifier asc"' in xml
+    assert "Gene search by description in Phaseolus vulgaris" in out
+    assert "Arahy.G00000" in out and "chalcone synthase [Glycine max]" in out
+    # The caveat travels with every hit: a description is not a function.
+    assert "not that its function is shown" in out and "stilbene" in out
+
+
+def test_gene_search_flags_a_term_found_only_inside_a_longer_word(mine):
+    """CONTAINS matches substrings: 'CHS' finds 'TrichSKD4', which is not a CHS."""
+    mine["body"] = _search_body(["Gp32 n=1 Tax=Roseibium sp. TrichSKD4",
+                                 "putative CHS protein"])
+    out = M._gene_search({"query": "CHS"})
+    assert "1 of the 2 rows shown contain 'CHS' only inside a longer word" in out
+    assert "Arahy.G00000" in out.split("only inside a longer word")[1]
+
+
+def test_gene_search_finds_families_largest_first(mine):
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Identifier", "Size",
+                                                             "Description"],
+                    "results": [["Legume.fam3.08725", 2833, "chalcone synthase [Glycine max]"]]}
+    out = M._gene_search({"query": "chalcone synthase", "search": "families"})
+    xml, _ = _parse(mine["urls"][0])
+    assert 'path="GeneFamily.description" op="CONTAINS"' in xml
+    assert 'sortOrder="GeneFamily.size desc GeneFamily.primaryIdentifier asc"' in xml
+    assert "Legume.fam3.08725 | 2833" in out and "lis_gene(genes={'family'" in out
+
+
+def test_gene_search_refuses_what_it_cannot_answer(mine):
+    assert "at least 3 characters" in M._gene_search({"query": "CH"})
+    assert "'genes' or 'families'" in M._gene_search({"query": "kinase", "search": "x"})
+    out = M._gene_search({"query": "kinase", "search": "families",
+                          "target_taxon": "peanut"})
+    assert out.startswith("error:") and "legumemine_gene_family_members" in out
+    assert not mine["urls"]
+
+
+def test_gene_search_explains_an_empty_result(mine):
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": [], "results": []}
+    out = M._gene_search({"query": "zzqx"})
+    assert "no genes in legumemine with a description containing 'zzqx'" in out
+    assert "not 'CHS'" in out
+
+
+def test_gene_search_pages(mine):
+    mine["count"] = "436"
+    mine["body"] = _search_body(["chalcone synthase"] * 50)
+    out = M._gene_search({"query": "chalcone synthase", "offset": 50})
+    _xml, params = _parse(mine["urls"][0])
+    assert params["start"] == ["50"]
+    assert "showing 51–100 of 436 row(s) — continue with offset=100" in out

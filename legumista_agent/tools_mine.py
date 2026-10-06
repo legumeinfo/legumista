@@ -707,6 +707,86 @@ def _gene_family_members(args) -> str:
     return prefix + out + "\n\n" + _FAMILY_CAVEAT
 
 
+# --- search by description -------------------------------------------------------------
+_SEARCH_CAVEAT = (
+    "A description is automated text transferred from a homolog (often ending '[Glycine "
+    "max]'): a match means the gene resembles one, not that its function is shown. Close "
+    "paralogs share descriptions — peanut's stilbene synthases read 'chalcone synthase' "
+    "— so a description never settles which paralog a gene is. Only descriptions are "
+    "searched: letters inside a gene ID say nothing about function.")
+_SEARCH_MIN = 3
+
+
+def _whole_word_note(rows, query, col):
+    """Count rows where `query` occurs only inside a longer word. CONTAINS matches
+    substrings, so 'CHS' finds 'Roseibium sp. TrichSKD4'."""
+    word = re.compile(r"(?<![A-Za-z0-9])" + re.escape(query) + r"(?![A-Za-z0-9])", re.I)
+    partial = [r for r in rows if len(r) > col and r[col] and not word.search(str(r[col]))]
+    if not partial:
+        return ""
+    return (f"{len(partial)} of the {len(rows)} rows shown contain {query!r} only inside a "
+            f"longer word (e.g. {str(partial[0][0])}: {str(partial[0][col])[:80]!r}) — "
+            "they do not match the term. Prefer full product names.")
+
+
+def _gene_search(args) -> str:
+    """Genes or gene families whose description contains a phrase: the way in for "find
+    the chalcone synthases", which no identifier lookup can answer. Without it an agent
+    grepped gene IDs for 'CHS' and reported a dynamin."""
+    query = (args.get("query") or "").strip()
+    if len(query) < _SEARCH_MIN:
+        return (f"error: 'query' needs at least {_SEARCH_MIN} characters of description "
+                "text, e.g. 'chalcone synthase'.")
+    kind = (args.get("search") or "genes").strip().lower()
+    if kind not in ("genes", "families"):
+        return "error: 'search' must be 'genes' or 'families'."
+    mine = (args.get("mine") or "").strip() or MINE
+    if kind == "families":
+        if (args.get("target_taxon") or "").strip():
+            return ("error: a gene family spans species, so 'target_taxon' does not apply "
+                    "to search='families'. Find the family here, then list one species' "
+                    "members with legumemine_gene_family_members(target_taxon=...), or "
+                    "one annotation's with lis_gene(genes={'family': ..., 'collection': "
+                    "...}).")
+        view = ["GeneFamily.primaryIdentifier", "GeneFamily.size",
+                "GeneFamily.description"]
+        constraints = [("GeneFamily.description", "CONTAINS", query)]
+        # Largest first: the broad family is usually the one wanted. The identifier
+        # breaks ties so paging is stable.
+        sort, col, scope = "GeneFamily.size desc GeneFamily.primaryIdentifier asc", 2, ""
+        nxt = ("Next: lis_gene(genes={'family': <id>, 'collection': <annotation>}) lists a "
+               "family's members in one annotation with loci and descriptions; "
+               "legumemine_gene_family_members lists them across species.")
+    else:
+        target_cons, scope, terr = _target_constraints(args.get("target_taxon"))
+        if terr:
+            return terr
+        view = ["Gene.primaryIdentifier", "Gene.organism.genus", "Gene.organism.species",
+                "Gene.description"]
+        constraints = [("Gene.description", "CONTAINS", query)] + target_cons
+        sort, col = "Gene.primaryIdentifier asc", 3
+        nxt = ("Next: lis_gene(gene=<id>) for a gene's locus and full description; "
+               "legumemine_gene_families for its family. To list every member of a family "
+               "in one annotation, search='families' or lis_gene with a family selector.")
+    title = (f"Gene {'families' if kind == 'families' else 'search'} by description"
+             + (f" in {scope}" if scope else ""))
+
+    def empty(mine_name, subject):
+        return (f"{title}: no {kind} in {mine_name} with a description containing "
+                f"{subject!r}. Descriptions spell out product names ('chalcone synthase', "
+                "not 'CHS'): try the full name or a shorter phrase"
+                + (", or search='families'" if kind == "genes" else "") + ".")
+
+    def footer(rows):
+        return "\n".join(x for x in (_whole_word_note(rows, query, col), _SEARCH_CAVEAT,
+                                      nxt) if x)
+
+    return _execute({**args, "mine": mine}, title, view, constraints, sort=sort,
+                    assembly_col=None, subject_key="query",
+                    subject_hint="description text such as 'chalcone synthase'",
+                    footer=footer, on_empty=empty, pageable=True)
+
+
 def _trait_qtls(args) -> str:
     """Trait -> QTLs. Per-species mine only (see _resolve_mine)."""
     return _execute(
@@ -915,6 +995,31 @@ def mine_tools() -> list:
                             "description": "Only list members from this annotation "
                                            "version, e.g. 'ann1'."}},
             _gene_family_members, required=()),
+        _mk("legumemine_gene_search",
+            "Find genes, or gene families, by what their DESCRIPTION says — 'chalcone "
+            "synthase', 'nodulation receptor kinase' — the way in when you know a "
+            "function but no gene ID. Matches description text only, never IDs. "
+            "search='families' returns family IDs for a family selector or "
+            "legumemine_gene_family_members. Descriptions are automated and transferred "
+            "from homologs, so a hit is a candidate, not a function; close paralogs "
+            "share them. Queries the pan-legume mine.",
+            {"query": {"type": "string",
+                       "description": "Description text, matched case-insensitively as a "
+                                      "substring, e.g. 'chalcone synthase'. Use full "
+                                      "product names, not abbreviations."},
+             "search": {"type": "string", "enum": ["genes", "families"],
+                        "description": "'genes' (default) or 'families'."},
+             "target_taxon": {"type": "string",
+                              "description": "Genes only: this species or genus (Latin "
+                                             "name, abbreviation or common name)."},
+             "mine": {"type": "string",
+                      "description": f"Mine to query (default {MINE!r})."},
+             "max_results": {"type": "integer",
+                             "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
+             "offset": {"type": "integer",
+                        "description": "Rows to skip, to continue a list the reply cut "
+                                       "short (it names the offset to use)."}},
+            _gene_search, required=("query",)),
         _mk("lis_trait_qtls",
             "QTLs mapped for a trait: QTL name, linkage group, LOD, marker R2 and the "
             "study it came from. The breeder's entry point for 'what's known about the "

@@ -646,6 +646,14 @@ def _gene(args) -> str:
         if incomplete:
             lines.append("A match through the unchecked route cannot be ruled out: retry, "
                          "or report this ID as unverified rather than absent.")
+        if not re.search(r"\d", gene):
+            # 'CHS', 'chalcone synthase': a function, not a name. Searching IDs for its
+            # letters once turned up Arahy.CHS32V, a dynamin.
+            lines.append(f"{gene!r} looks like a function or abbreviation, not a gene ID. "
+                         "lis_gene resolves names only: to find genes by what they do, "
+                         "use legumemine_gene_search with the full product name (e.g. "
+                         "'chalcone synthase'), or legumemine_gene_symbol for a curated "
+                         "symbol.")
         lines.append("A name from a different assembly (e.g. an A17.gnm5 ID against a gnm4 "
                      "annotation) is not a synonym and cannot be resolved here — use "
                      "lis_find to pick the matching collection.")

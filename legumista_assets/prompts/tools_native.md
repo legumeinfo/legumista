@@ -281,6 +281,11 @@ Per-question queries over the LIS mines; every result names the mine that answer
   never mix assemblies in one claim.
 - **Empty results say which case applies**: "no gene matching X" (wrong ID, assembly or
   species) versus "X exists … but has no <kind> there" (a real absence for that gene).
+- `legumemine_gene_search` — genes (or with `search:"families"`, gene families) whose
+  **description** contains a phrase: the way in from a function ("chalcone synthase")
+  to genes. Use full product names; a hit is a candidate, not a function (see the
+  description caveat above). **Never infer function from an ID**: letters in it are
+  arbitrary (`Arahy.CHS32V` is a dynamin).
 - `legumemine_gene_symbol` — symbol → gene ID(s), synopsis and DOIs. Use it first for a symbol.
 - `legumemine_gene_proteins`, `legumemine_gene_families`, `legumemine_gene_ontology` —
   per-gene records.
