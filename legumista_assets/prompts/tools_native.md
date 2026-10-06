@@ -57,17 +57,17 @@ started to allow it. `guide(topic)` has the detail behind each tool family.
   as different loci (`Glyma.12G040000` in gnm2, gnm4 and gnm6), so name the assembly.
   Names need not survive re-annotation (peanut's Tifrunner gnm2 ann2 renamed every
   gene): move between annotations with a selector's `translate_to`. A genus mine may drop
-  the name's first token (ArachisMine's `arahy.Tifrunner.gnm1.ann1.6J3HHE` is
-  `...ann1.Arahy.6J3HHE` elsewhere); `lis_gene` and `verify_ids` accept both. The letters
-  of a name carry no meaning (`Arahy.CHS32V` is a dynamin).
+  the name's first token (ArachisMine's `arahy.Tifrunner.gnm2.ann1.GHMM2H` is
+  `...ann1.Arahy.GHMM2H` elsewhere); `lis_gene` and `verify_ids` accept both. The letters
+  of a name carry no meaning.
 - **Coordinates** are 1-based, inclusive, and belong to one assembly; contig names carry
   the assembly prefix (`glyma.Wm82.gnm4.Gm12`). Never compare them across assemblies.
   `gene_models_main.bed` holds coding extents; the GFF3's gene row adds the UTRs, and
   `lis_gene` reports both.
 - **Descriptions** (GFF3 `Note`, mine descriptions) are automated, transferred from
   homologs; a bracketed species (`[Glycine max]`) names that homolog's species, not the
-  gene's. Close paralogs share them: peanut's stilbene synthases read "chalcone
-  synthase". A description makes a candidate, never a function.
+  gene's. Close paralogs share them, so a description makes a candidate, never a
+  function.
 - **Gene families** (`legume.fam3`, `legfed_v1_0`) show homology, not orthology: they
   hold paralogs. Claim orthology only with synteny or phylogeny behind it.
 - **Expression** values carry one unit per study (`expression_unit` in the record), set

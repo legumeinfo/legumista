@@ -7,7 +7,7 @@ the same selector can be reused later. Exactly one of:
   superseded IDs. `collection` is needed unless an ID is fully qualified.
 - `{"region": "glyma.Wm82.gnm4.Gm12:2800000-3000000"}`: genes whose coding extent overlaps
   it. If the assembly has several annotations, the reply lists them for you to choose.
-- `{"family": "legume.fam3.08725", "collection": "<annotation>"}`: the family's members
+- `{"family": "legume.fam3.10524", "collection": "<annotation>"}`: the family's members
   in that annotation, read from its own assignment file, so the list is complete.
 - `{"ncbi": ["LOC112749796"], "collection": "<annotation>"}`: NCBI Gene IDs placed by
   locus where NCBI annotates the same assembly (matched by identical sequence length;

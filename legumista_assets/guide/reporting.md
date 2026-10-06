@@ -6,8 +6,8 @@ accessions. `citations` as `[{doi, title}]` also catches a real DOI attached to 
 paper. One verdict per ID: FOUND, NOT FOUND, MISMATCH, RETRACTED or UNCHECKED. FOUND means
 the identifier exists, not that it supports your claim. A gene ID is checked in
 legumemine, then in its species' genus mine, which can spell the same gene differently
-(ArachisMine's `arahy.Tifrunner.gnm1.ann1.6J3HHE` is legumemine's
-`arahy.Tifrunner.gnm1.ann1.Arahy.6J3HHE`); NOT FOUND names the mines checked.
+(ArachisMine's `arahy.Tifrunner.gnm2.ann1.GHMM2H` is legumemine's
+`arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H`); NOT FOUND names the mines checked.
 
 ## report_data_issue
 Served only where enabled. For defects a curator would fix in the Data Store or a mine: a

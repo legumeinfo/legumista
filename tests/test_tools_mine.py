@@ -929,7 +929,7 @@ def test_gene_search_matches_descriptions_within_a_taxon(mine, catalog):
     assert "Gene search by description in Phaseolus vulgaris" in out
     assert "Arahy.G00000" in out and "chalcone synthase [Glycine max]" in out
     # The caveat travels with every hit: a description is not a function.
-    assert "not that its function is shown" in out and "stilbene" in out
+    assert "not that its function is shown" in out and "which paralog" in out
 
 
 def test_gene_search_flags_a_term_found_only_inside_a_longer_word(mine):
@@ -965,7 +965,7 @@ def test_gene_search_explains_an_empty_result(mine):
     mine["body"] = {"wasSuccessful": True, "columnHeaders": [], "results": []}
     out = M._gene_search({"query": "zzqx"})
     assert "no genes in legumemine with a description containing 'zzqx'" in out
-    assert "not 'CHS'" in out
+    assert "not abbreviations" in out
 
 
 def test_gene_search_pages(mine):

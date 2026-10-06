@@ -723,8 +723,8 @@ _SEARCH_CAVEAT = (
     "A description is automated text transferred from a homolog: a bracketed species "
     "('[Glycine max]') names that homolog's species, not the gene's (the genus/species "
     "columns). A match means the gene resembles one, not that its function is shown. Close "
-    "paralogs share descriptions — peanut's stilbene synthases read 'chalcone synthase' "
-    "— so a description never settles which paralog a gene is. Only descriptions are "
+    "paralogs share descriptions, so a description never settles which paralog a gene "
+    "is. Only descriptions are "
     "searched: letters inside a gene ID say nothing about function.")
 _SEARCH_MIN = 3
 
@@ -748,7 +748,7 @@ def _gene_search(args) -> str:
     query = (args.get("query") or "").strip()
     if len(query) < _SEARCH_MIN:
         return (f"error: 'query' needs at least {_SEARCH_MIN} characters of description "
-                "text, e.g. 'chalcone synthase'.")
+                "text, e.g. 'receptor kinase'.")
     kind = (args.get("search") or "genes").strip().lower()
     if kind not in ("genes", "families"):
         return "error: 'search' must be 'genes' or 'families'."
@@ -785,8 +785,8 @@ def _gene_search(args) -> str:
 
     def empty(mine_name, subject):
         return (f"{title}: no {kind} in {mine_name} with a description containing "
-                f"{subject!r}. Descriptions spell out product names ('chalcone synthase', "
-                "not 'CHS'): try the full name or a shorter phrase"
+                f"{subject!r}. Descriptions spell out product names, not abbreviations: "
+                "try the full name or a shorter phrase"
                 + (", or search='families'" if kind == "genes" else "") + ".")
 
     def footer(rows):
@@ -795,7 +795,7 @@ def _gene_search(args) -> str:
 
     return _execute({**args, "mine": mine}, title, view, constraints, sort=sort,
                     assembly_col=None, subject_key="query",
-                    subject_hint="description text such as 'chalcone synthase'",
+                    subject_hint="description text such as 'receptor kinase'",
                     footer=footer, on_empty=empty, pageable=True)
 
 
@@ -882,7 +882,7 @@ def _keyword_search(args) -> str:
                   ["type", "identifier", "name", "organism", "version", "description"],
                   total, size, capped=len(hits) >= size, offset=offset, pageable=True,
                   size_max=SEARCH_PAGE_MAX)
-    footer = counts + ["Whole words in any indexed field: 'synthase-like' is another word, "
+    footer = counts + ["Whole words in any indexed field: 'kinase-like' is another word, "
                        "so this can count fewer than mine_gene_search's substring "
                        "match."]
     if any(_BRACKET_RE.search(d) for d in descriptions):
@@ -1100,13 +1100,13 @@ def mine_tools() -> list:
             _gene_family_members, required=()),
         _mk("mine_gene_search",
             "Genes, or with search='families' gene families, whose description "
-            "contains a phrase as a substring, so 'chalcone synthase' also takes "
-            "'chalcone synthase-like': the way from a function to genes. Descriptions "
+            "contains a phrase as a substring, so 'receptor kinase' also takes "
+            "'receptor kinase-like': the way from a function to genes. Descriptions "
             "only, never IDs. Descriptions are transferred from homologs, so a hit is "
             "a candidate, and close paralogs share them.",
             {"query": {"type": "string",
                        "description": "Description text, matched case-insensitively as a "
-                                      "substring, e.g. 'chalcone synthase'. Use full "
+                                      "substring, e.g. 'receptor kinase'. Use full "
                                       "product names, not abbreviations."},
              "search": {"type": "string", "enum": ["genes", "families"],
                         "description": "'genes' (default) or 'families'."},
@@ -1123,12 +1123,12 @@ def mine_tools() -> list:
         _mk("mine_search",
             "A mine's own keyword search, as its search box runs it: whole words in "
             "every indexed class and field (genes, proteins, families, QTL, ontology "
-            "terms…), so 'chalcone synthase' does not take 'chalcone synthase-like'. "
+            "terms…), so 'receptor kinase' does not take 'receptor kinase-like'. "
             "Gives the total and counts by category and organism, as the mine's results "
             "page does; category and organism narrow to one of them. Pages with offset.",
             {"query": {"type": "string",
                        "description": "Keywords: a quoted phrase, OR, AND NOT, or a "
-                                      "trailing * (\"chalcone synthase\")."},
+                                      "trailing * (\"receptor kinase\")."},
              **_MINE_ARGS,
              "category": {"type": "string",
                           "description": "One category from the counts, e.g. 'Gene', "

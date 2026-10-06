@@ -12,7 +12,7 @@ link: the tool is unavailable, not failing.
 - `ncbi_datasets {args}`: the raw `datasets` CLI, read-only subcommands only, e.g.
   `["summary","genome","taxon","Glycine max","--as-json-lines"]`.
 - `edirect {db, query, action?, format?, retmax?}`: `esearch` piped to `esummary`
-  (default) or `efetch`, e.g. `{db:"gene", query:"Arachis hypogaea[Organism] AND
-  chalcone synthase[Title]"}`.
+  (default) or `efetch`, e.g. `{db:"gene", query:"Phaseolus vulgaris[Organism] AND
+  receptor kinase[Title]"}`.
 - NCBI Gene IDs (`LOC…`) onto LIS genes: a selector's `ncbi` form (`guide("genes")`).
   RefSeq names can separate paralogs that LIS descriptions do not.

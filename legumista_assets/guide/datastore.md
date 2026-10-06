@@ -24,7 +24,7 @@ do not retrieve: they hand back URLs, sequence names and region strings for `fas
 
 ## lis_gene
 - `{gene, collection?}` accepts an exact ID, the same name without its first token as a
-  genus mine spells it (`6J3HHE` for `Arahy.6J3HHE`, resolved only when one gene
+  genus mine spells it (`GHMM2H` for `Arahy.GHMM2H`, resolved only when one gene
   matches), a curated symbol (`GmNARK`) or a superseded ID from the collection's synonym
   file (`Glyma01g00210`); the reply says which route
   resolved it, and a miss lists every route and whether it ran. An ID from another

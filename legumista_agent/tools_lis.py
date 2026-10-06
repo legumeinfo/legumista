@@ -755,8 +755,8 @@ def _gene_list(selector) -> str:
     notes += [f"coordinates: assembly {assembly}; 1-based, inclusive. Locus = the gene "
               "span from gene_models_main.gff3, UTRs included.",
               f"description: the product name, first clause of {_DESCRIPTION_SOURCE}. "
-              "Close paralogs share it (peanut's stilbene synthases read 'chalcone "
-              "synthase'), so it cannot tell them apart. lis_gene on one gene gives the "
+              "Close paralogs share it, so it cannot tell them apart. lis_gene on one "
+              "gene gives the "
               "whole Note.",
               ("protein: " + ("the primary model's length" if rule == "present" else
                               "the longest model's length")
@@ -823,8 +823,8 @@ def _gene(args) -> str:
             # letters once turned up Arahy.CHS32V, a dynamin.
             lines.append(f"{gene!r} looks like a function or abbreviation, not a gene ID. "
                          "lis_gene resolves names only: to find genes by what they do, "
-                         "use mine_gene_search with the full product name (e.g. "
-                         "'chalcone synthase'), or mine_gene_symbol for a curated "
+                         "use mine_gene_search with the full product name, or "
+                         "mine_gene_symbol for a curated "
                          "symbol.")
         lines.append(catalog_stamp(ctl))
         return "\n".join(lines)

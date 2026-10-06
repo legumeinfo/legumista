@@ -13,7 +13,7 @@ since it is cross-species by purpose. `target_taxon` filters rows; it never pick
 | Expression | yes | most; none in `lupinusmine`, `aeschynomenemine`, `lensmine` |
 | Curated symbols | yes | `glycinemine` only |
 | QTL, GWAS, markers | none | `arachismine`, `glycinemine`, `phaseolusmine`, `vignamine` only |
-| Gene ID spelling | the Data Store's | may differ: ArachisMine writes `…ann1.6J3HHE` for `…ann1.Arahy.6J3HHE` |
+| Gene ID spelling | the Data Store's | may differ: ArachisMine writes `…ann1.GHMM2H` for `…ann1.Arahy.GHMM2H` |
 
 Counts differ between mines for the same question, and a genus mine's counts are the
 ones its web pages show. Name the mine with any count you report.
@@ -27,17 +27,16 @@ ones its web pages show. Name the mine with any count you report.
 
 ## Tools
 - `mine_gene_search`: genes, or with `search:"families"` gene families, whose
-  description contains a phrase. Use full product names ("chalcone synthase", not
-  "CHS"): matching is by substring, and the reply flags rows where the phrase occurs only
+  description contains a phrase. Use full product names, not abbreviations: matching
+  is by substring, and the reply flags rows where the phrase occurs only
   inside a longer word. Genes take `target_taxon`; families span species, so they do not.
   Families come largest first.
 - `mine_search`: a mine's own keyword search, as its search box runs it: whole words in
   every indexed class and field (quoted phrases, OR, AND NOT, trailing `*`), with the
   total and counts by category and organism. `taxon` routes to the genus mine;
   `category` and `organism` narrow to one of the counts; pages of up to 100 with
-  `offset`. Counts differ from `mine_gene_search`'s substring match: in ArachisMine
-  "chalcone synthase" is 280 genes by keyword and 342 by substring, which also takes
-  "synthase-like" and "deoxychalcone".
+  `offset`. Its counts differ from `mine_gene_search`'s substring match, which also
+  takes longer words that contain the phrase.
 - `mine_gene_symbol`: symbol to gene IDs, with synopsis and DOIs. The catalog's
   curated symbols answer first; the mine is the fall-through.
 - `mine_gene_proteins`, `mine_gene_families`, `mine_gene_ontology`:
