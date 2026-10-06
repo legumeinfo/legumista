@@ -316,6 +316,19 @@ def _record_lines(record):
     return lines
 
 
+def _whole_file_reader(name, record):
+    """The tool that reads this unindexed file whole, if one does. Only two kinds are
+    read that way, and saying so matters: an agent told a family assignment file was
+    unreadable fetched it with curl and grepped its gene IDs."""
+    low = name.lower()
+    if low.endswith(".gfa.tsv.gz") and (".legume.fam3." in low or ".legfed_v1_0." in low):
+        return (f"a family selector: lis_gene(genes={{'family': <family id>, "
+                f"'collection': '{record['id']}'}})")
+    if low.endswith(_SYNONYM_SUFFIXES):
+        return "lis_gene, to resolve superseded gene IDs"
+    return ""
+
+
 def _files(args) -> str:
     record, err = _lookup(args.get("collection"))
     if record is None:
@@ -380,10 +393,13 @@ def _files(args) -> str:
         lines.append(f"      url {_file_url(record, name)}")
     lines.append("")
     lines.append(f"NOT INDEXED ({len(plain)}) — no .fai/.tbi published, so these cannot "
-                 "be region-queried or read through this toolset; they are whole-file "
-                 "downloads only:")
+                 "be region-queried; they are whole-file downloads, and none of these "
+                 "tools reads them except where a line says which does:")
     for name, _tool, _how, desc in plain:
         lines.append(f"  {name}" + (f"   — {desc}" if desc else ""))
+        reader = _whole_file_reader(name, record)
+        if reader:
+            lines.append(f"      read by {reader}")
     if unprobed:
         lines.append("")
         lines.append(f"INDEX STATUS UNKNOWN ({len(unprobed)}) — these filenames were "

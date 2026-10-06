@@ -303,6 +303,18 @@ def test_files_says_when_a_collection_records_no_publication(catalog):
         in out
 
 
+def test_files_names_the_tool_that_reads_an_unindexed_file_whole(catalog):
+    """Family assignment and synonym files are unindexed but read whole by the server;
+    calling them unreadable sent an agent to fetch one with curl and grep its IDs."""
+    out = L._files({"collection": ANN})
+    unindexed = out.split("NOT INDEXED")[1]
+    fam = unindexed.split("legume.fam3.VLMQ.gfa.tsv.gz")[1].splitlines()
+    assert fam[1].strip() == ("read by a family selector: lis_gene(genes={'family': "
+                              "<family id>, 'collection': 'Wm82.gnm4.ann1.T8TQ'})")
+    syn = unindexed.split("info_synonyms.txt.gz")[1].splitlines()
+    assert syn[1].strip() == "read by lis_gene, to resolve superseded gene IDs"
+
+
 def test_files_routes_an_indexed_vcf_to_bcftools(catalog):
     """A .tbi on a VCF means bcftools, not tabix_query — same index, different reader."""
     out = L._files({"collection": "Glycine/max/diversity/Wm82.gnm2.div.X_2020"})
