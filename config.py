@@ -6,13 +6,16 @@ the things the served tools actually need:
 
     WORKSPACE        the directory local file arguments are confined to
     contact_email()  the polite-pool mailto sent to OpenAlex/Crossref/Unpaywall
+    user_agent()     the User-Agent every outbound request sends, with the package version
     deployment()     'local' or 'public': how the tools are advertised to clients
     tools_spec()     the tool-use doctrine appended to the server's MCP instructions
 
 Everything is environment-driven; there is no config file to find, parse, or get wrong.
 """
 
+import functools
 import os
+from importlib import metadata
 
 PKG_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -54,6 +57,35 @@ def contact_email() -> str:
     # from a compose `environment:` block or an `EMAIL=` line) would otherwise be sent to
     # OpenAlex as the mailto, which is worse than the obviously-fake default.
     return os.environ.get("LEGUMISTA_CONTACT_EMAIL") or "you@example.org"
+
+
+@functools.lru_cache(maxsize=None)
+def version() -> str:
+    """The package version pyproject.toml sets, so a release bump reaches every request
+    without another edit.
+
+    In a source checkout pyproject.toml sits beside this file and is read directly: an
+    editable install's metadata keeps the version from its last `pip install`, so after
+    a bump it would be stale. Installed from a wheel or in the image, the file is absent
+    and the package metadata answers. "unknown" if neither does."""
+    pyproject = os.path.join(PKG_ROOT, "pyproject.toml")
+    if os.path.isfile(pyproject):
+        import tomllib
+        with open(pyproject, "rb") as handle:
+            found = (tomllib.load(handle).get("project") or {}).get("version")
+        if found:
+            return str(found)
+    try:
+        return metadata.version("legumista")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def user_agent(product: str = "legumista", mailto: bool = False) -> str:
+    """The User-Agent for an outbound request. `mailto` adds the polite-pool contact,
+    which the scholarly APIs read from the User-Agent."""
+    contact = f"; mailto:{contact_email()}" if mailto else ""
+    return f"{product}/{version()} (+https://github.com/legumeinfo/legumista{contact})"
 
 
 def deployment() -> str:

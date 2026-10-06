@@ -67,7 +67,6 @@ RAW = "https://raw.githubusercontent.com"
 DEFAULT_REPOS = ("datastore=matthewwiese/datastore-metadata#datastore-issue,"
                  "mine=matthewwiese/datastore-metadata#mine-issue")
 TOKEN_TTL = 600
-_UA = "legumista-report/1.0 (+https://github.com/legumeinfo/legumista)"
 _SECRET = os.urandom(32)              # per process: a restart invalidates open previews
 _FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$")
 _ALLOWED_LINK_HOSTS = ("legumeinfo.org", "lis.ncgr.org", "github.com", "doi.org",
@@ -432,7 +431,7 @@ def _request(method, path, body, bearer):
     _validate_url(url)
     req = urllib.request.Request(
         url, method=method, data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {bearer}", "User-Agent": _UA,
+        headers={"Authorization": f"Bearer {bearer}", "User-Agent": config.user_agent("legumista-report"),
                  "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28",
                  **({"Content-Type": "application/json"} if body is not None else {})})

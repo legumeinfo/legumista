@@ -42,6 +42,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import config
+
 from .tools_native import BlockedURLError
 
 # The published catalog. It is released from the datastore-metadata repository — the
@@ -62,7 +64,6 @@ DEFAULT_CATALOG_URL = (
 MAX_BYTES = 64 * 1024 * 1024
 
 FETCH_TIMEOUT = int(os.environ.get("LEGUMISTA_CATALOG_TIMEOUT", "60"))
-_UA = {"User-Agent": "legumista/1.0 (+https://github.com/legumeinfo/legumista)"}
 
 
 # Why this does NOT reuse tools_native's `_open_guarded`: that guard refuses private,
@@ -181,7 +182,7 @@ def fetch(*, force: bool = False, timeout: int = None) -> dict:
     # thread over a typo in an env var.
     try:
         _check_scheme(url)
-        request = urllib.request.Request(url, headers=dict(_UA))
+        request = urllib.request.Request(url, headers={"User-Agent": config.user_agent()})
     except (BlockedURLError, ValueError) as e:
         report["detail"] = f"unusable catalog URL: {e}"
         return report

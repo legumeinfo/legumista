@@ -78,3 +78,41 @@ def test_empty_contact_email_falls_back_to_the_default(tmp_path):
     quieter one."""
     out = _probe({"LEGUMISTA_CONTACT_EMAIL": ""}, cwd=tmp_path)
     assert out["contact_email"] == "you@example.org"
+
+
+# --- user agent -------------------------------------------------------------------------
+def test_the_user_agent_carries_the_package_version(monkeypatch):
+    """Five hard-coded agents had drifted to three different versions (0.2, 1.0, and the
+    package's 0.3.0). Every request now reads the one pyproject.toml sets."""
+    import tomllib
+    import config
+    monkeypatch.setenv("LEGUMISTA_CONTACT_EMAIL", "curator@example.org")
+    expected = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert config.version() == expected
+    assert config.user_agent() == (f"legumista/{expected} "
+                                   "(+https://github.com/legumeinfo/legumista)")
+    assert config.user_agent("legumista-report").startswith(f"legumista-report/{expected} ")
+    assert config.user_agent(mailto=True).endswith(
+        "legumista; mailto:curator@example.org)")
+
+
+def test_the_version_falls_back_to_package_metadata_when_installed(monkeypatch, tmp_path):
+    """Installed from a wheel, no pyproject.toml sits beside config.py."""
+    from importlib import metadata
+    import config
+    monkeypatch.setattr(config, "PKG_ROOT", str(tmp_path))
+    monkeypatch.setattr(metadata, "version", lambda name: "9.9.9")
+    config.version.cache_clear()
+    try:
+        assert config.version() == "9.9.9"
+    finally:
+        config.version.cache_clear()
+
+
+def test_no_module_hard_codes_a_version_in_its_user_agent():
+    import re
+    root = REPO_ROOT / "legumista_agent"
+    stale = [f"{p.name}:{n}" for p in root.glob("*.py")
+             for n, line in enumerate(p.read_text().splitlines(), 1)
+             if re.search(r"legumista(-report)?/\d", line)]
+    assert not stale, f"hard-coded User-Agent versions: {stale}"

@@ -160,8 +160,8 @@ def _sandbox_path(path: str):
 
 
 def _get(url: str, accept: str = "application/json"):
-    ua = f"legumista/0.2 (+https://github.com/legumeinfo/legumista; mailto:{config.contact_email()})"
-    req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": accept})
+    req = urllib.request.Request(url, headers={"User-Agent": config.user_agent(mailto=True),
+                                               "Accept": accept})
     with _open_guarded(req, HTTP_TIMEOUT) as resp:
         raw = resp.read(GET_MAX_BYTES).decode("utf-8", "replace")
     return json.loads(raw) if "json" in accept else raw
@@ -169,8 +169,8 @@ def _get(url: str, accept: str = "application/json"):
 
 def _get_bytes(url: str, limit: int = 40_000_000) -> bytes:
     """Fetch a URL as raw bytes (for PDFs), size-capped."""
-    ua = f"legumista/0.2 (+https://github.com/legumeinfo/legumista; mailto:{config.contact_email()})"
-    req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "*/*"})
+    req = urllib.request.Request(url, headers={"User-Agent": config.user_agent(mailto=True),
+                                               "Accept": "*/*"})
     with _open_guarded(req, HTTP_TIMEOUT) as resp:
         return resp.read(limit)
 

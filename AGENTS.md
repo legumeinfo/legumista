@@ -16,9 +16,10 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 ## Layout
 
 - `legumista_cli.py` — the `legumista` entry point. One command, `mcp`.
-- `config.py` — three things the server needs: `WORKSPACE` (the sandbox root for local
-  file arguments), `contact_email()` (the scholarly-API polite-pool mailto), and
-  `tools_spec()` (the served MCP `instructions`). All environment-driven; no config file.
+- `config.py` — what the server needs: `WORKSPACE` (the sandbox root for local file
+  arguments), `contact_email()` (the scholarly-API polite-pool mailto), `user_agent()`
+  (every outbound request's User-Agent, carrying the version `pyproject.toml` sets), and
+  `tools_spec()` (the served MCP `instructions`). Environment-driven; no config file.
 - `legumista_agent/` — the tools, one module per family:
   - `tool.py` — the `Tool` dataclass every tool is built from (name, description,
     JSON-schema parameters, `read_only`, async `run(args)` returning `str` or

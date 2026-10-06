@@ -9,12 +9,13 @@ import re
 import urllib.error
 import urllib.request
 
+import config
+
 from .tool import Tool
 from .tools_native import BlockedURLError, _open_guarded
 
 MAX_CHARS = int(os.environ.get("LEGUMISTA_TOOL_MAX_CHARS", "20000"))
 FETCH_TIMEOUT = int(os.environ.get("LEGUMISTA_TOOL_FETCH_TIMEOUT", "30"))
-_UA = {"User-Agent": "legumista/0.2 (+https://github.com/legumeinfo/legumista)"}
 
 
 def _cap(text: str) -> str:
@@ -34,7 +35,7 @@ async def _web_fetch(args) -> str:
     if not re.match(r"^https?://", url):
         return "error: 'url' must be an http(s) URL"
     try:
-        req = urllib.request.Request(url, headers=_UA)
+        req = urllib.request.Request(url, headers={"User-Agent": config.user_agent()})
         with _open_guarded(req, FETCH_TIMEOUT) as resp:   # SSRF-guarded (blocks private hosts)
             ctype = resp.headers.get_content_type()
             body = resp.read(MAX_CHARS * 8).decode("utf-8", "replace")
