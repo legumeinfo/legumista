@@ -5,6 +5,15 @@ indexed data files), the LIS InterMine mines, NCBI, the scholarly literature, an
 Every tool returns plain text. Nothing writes, files or spends unless the server was
 started to allow it.
 
+## LIS first
+
+Legumista is an LIS project. Search LIS before anything else: the Data Store (`lis_*`,
+`extract_features`, `browser_link`) and the LIS mines (`mine_*`), LegumeMine and the genus
+mines alike. Then turn readily to NCBI and the literature: to corroborate what LIS shows,
+to supply what it does not hold, or to judge which questions are worth pursuing next.
+Start from them only when LIS cannot answer, and say so. Where LIS and another source
+disagree, report both, each with its source.
+
 ## Where to start
 
 | Need | Tool |
@@ -21,9 +30,9 @@ started to allow it.
 | Synteny between assemblies | `lis_synteny` |
 | Traits, QTL, GWAS, marker positions | `mine_trait_qtls`, `mine_trait_gwas`, `mine_marker_position` |
 | Reads, variants or sequence in an indexed file | `samtools`, `bcftools`, `fasta_fetch`, `tabix_query`; `tabix_index` writes |
-| Literature | `paper_search`, then `openalex_by_doi`, `read_paper`; `europepmc_search` for field queries |
-| NCBI genomes, runs, records | `ncbi_assembly_status`, `sra_runs`; raw: `ncbi_datasets`, `edirect` |
-| Anything else on the web | `web_search`, `web_fetch` |
+| Literature, after LIS | `paper_search`, then `openalex_by_doi`, `read_paper`; `europepmc_search` for field queries |
+| NCBI genomes, runs, records, after LIS | `ncbi_assembly_status`, `sra_runs`; raw: `ncbi_datasets`, `edirect` |
+| Anything else on the web, after LIS | `web_search`, `web_fetch` |
 | A defect in LIS data | `report_data_issue`, where the server offers it |
 
 ## LIS conventions
