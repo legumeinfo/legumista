@@ -147,15 +147,21 @@ def bed_index(record):
         else:
             gene.start, gene.end = min(gene.start, start), max(gene.end, end)
             gene.models.append(model)
-    alias, by_contig = {}, {}
+    alias, by_contig, short = {}, {}, {}
     for gene in genes.values():
-        for key_name in [gene.id, gene.name] + gene.models + [
-                tools_lis._GENE_PREFIX_RE.sub("", m) for m in gene.models]:
+        bare_models = [tools_lis._GENE_PREFIX_RE.sub("", m) for m in gene.models]
+        for key_name in [gene.id, gene.name] + gene.models + bare_models:
             alias.setdefault(key_name.lower(), gene.id)
+        # The genus mines can drop the name's leading 'Prefix.' token (ArachisMine's
+        # 6J3HHE is Arahy.6J3HHE). Kept only where unambiguous.
+        for name in [gene.name] + bare_models:
+            if "." in name:
+                short.setdefault(name.split(".", 1)[1].lower(), set()).add(gene.id)
         by_contig.setdefault(gene.contig, []).append(gene)
     for contig_genes in by_contig.values():
         contig_genes.sort(key=lambda g: (g.start, g.end, g.id))
-    index = {"genes": genes, "alias": alias, "by_contig": by_contig}
+    index = {"genes": genes, "alias": alias, "by_contig": by_contig,
+             "unprefixed": {k: next(iter(v)) for k, v in short.items() if len(v) == 1}}
     with _BED_LOCK:
         _BED_CACHE[key] = index
         while len(_BED_CACHE) > _BED_CACHE_ENTRIES:
@@ -313,6 +319,12 @@ def _resolve_ids(ids, record, index, sel):
         if gene_id:
             found.setdefault(gene_id, name)
             sel.direct += 1
+            continue
+        gene_id = index["unprefixed"].get(tools_lis._GENE_PREFIX_RE.sub("", name).lower())
+        if gene_id:
+            found.setdefault(gene_id, name)
+            sel.lines.append(f"resolved {name} -> {gene_id} (the name without its "
+                             "prefix, as the genus mines spell it)")
             continue
         symbol_hits = [e for e in (ctl.resolve_symbol(name, record.get(
             "scientific_name_abbrev", "")) if ctl else [])

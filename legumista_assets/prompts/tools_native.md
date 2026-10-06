@@ -55,8 +55,10 @@ started to allow it. `guide(topic)` has the detail behind each tool family.
   (`glyma.Wm82.gnm4.ann1.Glyma.12G040000`). A bare name can exist in several assemblies
   as different loci (`Glyma.12G040000` in gnm2, gnm4 and gnm6), so name the assembly.
   Names need not survive re-annotation (peanut's Tifrunner gnm2 ann2 renamed every
-  gene): move between annotations with a selector's `translate_to`. The letters of a
-  name carry no meaning (`Arahy.CHS32V` is a dynamin).
+  gene): move between annotations with a selector's `translate_to`. A genus mine may drop
+  the name's first token (ArachisMine's `arahy.Tifrunner.gnm1.ann1.6J3HHE` is
+  `...ann1.Arahy.6J3HHE` elsewhere); `lis_gene` and `verify_ids` accept both. The letters
+  of a name carry no meaning (`Arahy.CHS32V` is a dynamin).
 - **Coordinates** are 1-based, inclusive, and belong to one assembly; contig names carry
   the assembly prefix (`glyma.Wm82.gnm4.Gm12`). Never compare them across assemblies.
   `gene_models_main.bed` holds coding extents; the GFF3's gene row adds the UTRs, and

@@ -510,6 +510,18 @@ def _resolve_in_annotation(gene, record, bed):
         return hits, gene, "", routes, False
     routes.append(("checked", "exact gene/mRNA ID in the gene models BED", "no match"))
 
+    bare = _GENE_PREFIX_RE.sub("", gene)
+    matches = _unprefixed_matches(bed, bare)
+    if len(matches) == 1:
+        found = _bed_hits(bed, matches[0])
+        return (found, matches[0], f"{gene!r} is {matches[0]} without its "
+                f"'{matches[0].split('.', 1)[0]}.' prefix, as the genus mines spell it",
+                routes, False)
+    routes.append(("checked", "the name without a prefix such as 'Arahy.' (the genus "
+                   "mines' spelling)",
+                   f"ambiguous: {len(matches)} genes, {', '.join(matches[:3])}"
+                   if matches else "no match"))
+
     ctl = controller()
     entries = ctl.resolve_symbol(gene, record.get("scientific_name_abbrev", "")) if ctl else []
     if not entries:
@@ -542,6 +554,23 @@ def _resolve_in_annotation(gene, record, bed):
     else:
         routes.append(("checked", f"superseded IDs (synonym file {name})", "no match"))
     return [], gene, "", routes, False
+
+
+def _unprefixed_matches(bed, bare):
+    """BED names that are `bare` plus a leading 'Prefix.' token, as gene or mRNA names.
+
+    The genus mines can drop that token: ArachisMine's 6J3HHE is the Data Store's
+    Arahy.6J3HHE. Returns the distinct names matched (the caller resolves only one)."""
+    found = []
+    for line in bed.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 6:
+            continue
+        for name in (fields[3], fields[6] if len(fields) > 6 else ""):
+            short = _GENE_PREFIX_RE.sub("", name)
+            if "." in short and short.split(".", 1)[1] == bare and short not in found:
+                found.append(short)
+    return found
 
 
 def _bed_hits(bed, gene):

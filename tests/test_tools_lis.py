@@ -451,6 +451,31 @@ def test_miss_reports_which_sources_were_consulted(catalog):
     assert "curated symbols" in out and "synonym file" in out
 
 
+def test_a_name_without_its_prefix_resolves_to_the_one_gene_it_names(catalog):
+    """The genus mines can drop a name's leading token: ArachisMine's
+    arahy.Tifrunner.gnm1.ann1.6J3HHE is the Data Store's ...ann1.Arahy.6J3HHE. That form
+    missed, though the gene was in the collection."""
+    out = L._gene({"gene": "glyma.Wm82.gnm4.ann1.12G040000", "collection": ANN})
+    assert out.startswith("Glyma.12G040000 in Wm82.gnm4.ann1.T8TQ")
+    assert ("resolved from: 'glyma.Wm82.gnm4.ann1.12G040000' is Glyma.12G040000 without "
+            "its 'Glyma.' prefix, as the genus mines spell it") in out
+
+
+def test_an_ambiguous_unprefixed_name_resolves_to_nothing():
+    bed = "".join(f"c\t1\t2\t{n}.1\t0\t+\t{n}\n"
+                  for n in ("abcd.Y.gnm1.ann1.Aaa.G1", "abcd.Y.gnm1.ann1.Bbb.G1",
+                            "abcd.Y.gnm1.ann1.Aaa.G2"))
+    assert L._unprefixed_matches(bed, "G1") == ["Aaa.G1", "Bbb.G1"]
+    assert L._unprefixed_matches(bed, "G2.1") == ["Aaa.G2.1"]
+    assert L._unprefixed_matches(bed, "G3") == []
+
+
+def test_a_miss_lists_the_unprefixed_route(catalog):
+    out = L._gene({"gene": "Glyma.99G999999", "collection": ANN})
+    assert "the name without a prefix such as 'Arahy.' (the genus mines' spelling): " \
+        "no match" in out
+
+
 def test_a_cross_assembly_name_misses_without_a_guessed_cause(catalog):
     """A miss lists the routes that ran. It used to add, on every miss, that the name
     might be from another assembly and to pick a collection with lis_find: a guess

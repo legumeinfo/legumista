@@ -257,6 +257,14 @@ def test_an_unreadable_synonym_file_is_not_checked_not_absent(world, monkeypatch
     assert sel.incomplete and "NOT CHECKED Glyma99g99999" in sel.summary()
 
 
+def test_a_selector_resolves_a_name_without_its_prefix(world):
+    """As lis_gene does: the genus mines spell Arahy.6J3HHE as 6J3HHE."""
+    sel = G.resolve({"ids": [f"{P4}.12G010000"], "collection": "Wm82.gnm4.ann1.T8TQ"})
+    assert [g.id for g in sel.genes] == [A]
+    assert (f"resolved {P4}.12G010000 -> {A} (the name without its prefix, as the genus "
+            "mines spell it)") in sel.summary()
+
+
 def test_region_selector_infers_the_annotation_and_keeps_genome_order(world):
     sel = G.resolve({"region": f"{GM12}:1-1450"})
     assert sel.record["id"] == "Wm82.gnm4.ann1.T8TQ"
