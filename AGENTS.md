@@ -101,12 +101,7 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
 - **Never present a cap as a total.** Any list that can be truncated is described with
   `results.count_phrase`.
 - **Names go through `resolve_taxon`.** No tool splits a taxon string by hand.
-- **The instructions name every tool; the guide holds the detail.** `tools_native.md`
-  keeps only how to read a result, where to start (a table naming every tool) and the
-  LIS conventions a model cannot know, within a size budget. A new tool needs a row
-  there and its detail in a `legumista_assets/guide/` topic. `tests/test_assets.py`
-  enforces coverage, the budget, and that guides name only served tools. Write for a
-  capable model: legume examples, no generic biology, no tutorials.
+- **Model-facing text follows one standard**: see [Model-facing text](#model-facing-text).
 - **Producers derive, consumers are dumb.** Anything that can be computed once at
   catalog-build time belongs in LIS-autocontent, not here — LIS-autocontent's output feeds
   other projects too, so deriving it here would duplicate the logic in the wrong place.
@@ -126,6 +121,41 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   additionally bakes in the NCBI CLIs and DSCensor, and `compose.yaml` runs it.
   `tests/test_distribution.py` keeps these in sync — notably `server.json`'s version must track `pyproject.toml`, so bump
   both on a release.
+
+## Model-facing text
+
+A design decision, applying to everything a model reads: the served instructions, tool and
+parameter descriptions, guide topics, and tool output.
+
+- **Purpose.** Legumista is an efficient means for AI models to help themselves, not a
+  tutor. Assume a capable consumer that makes its own decisions. Supply what it cannot
+  know (LIS's data, conventions and traps) and leave the reasoning to it.
+- **Style.** Clear and terse. Examples are legume examples (`Glycine max`,
+  `glyma.Wm82.gnm4.Gm12`), never generic ones (Homo sapiens, E. coli, `chr1`): a model
+  copies examples, and generic ones distract. No explanations of general biology or
+  bioinformatics, which a capable model already has.
+- **Each kind of text has one place.**
+  - `prompts/tools_native.md`, served as `instructions`: how to read a result, where to
+    start (a table naming every tool), and the LIS conventions a model cannot know,
+    under a size budget. It is sent once and held all session, and not every client
+    passes it on, so nothing essential lives only here.
+  - Tool descriptions, which reach the model in every client: what the tool returns,
+    and the traps a capable model could not infer. No `Args:` lists the schema already
+    carries, no internals, no promotion.
+  - `guide/` topics, served by `guide`: the per-family detail (argument forms, what a
+    reply means). They cost nothing until read.
+  - Tool output: what the result means, its scope and its caveats, where they apply.
+- **Next-step hints.** The model decides what to do next. A tool's output gets a hint
+  only when the hint carries something the model could not otherwise know, and has
+  little potential to mislead; a hint that is only marginally useful is left out. State
+  a fact (which tool reads this file) rather than direct a step. Never repeat the
+  routing table, and never guess a cause: a miss reports what was checked, not a theory
+  of why. Every `lis_gene` miss once suggested the name might be from another assembly,
+  and that guess sent an agent asking for "CHS" through collection after collection.
+- **Enforced by `tests/test_assets.py`**: the instructions name every served tool and
+  stay within their budget, each guide topic is packaged with its summary line, and the
+  guides name only served tools. A new tool needs a row in the instructions' table and
+  its detail in a guide topic.
 
 ## Contributing
 
