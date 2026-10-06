@@ -1100,7 +1100,8 @@ def mine_tools() -> list:
             _gene_family_members, required=()),
         _mk("mine_gene_search",
             "Genes, or with search='families' gene families, whose description "
-            "contains a phrase: the way from a function to genes. Matches descriptions "
+            "contains a phrase as a substring, so 'chalcone synthase' also takes "
+            "'chalcone synthase-like': the way from a function to genes. Descriptions "
             "only, never IDs. Descriptions are transferred from homologs, so a hit is "
             "a candidate, and close paralogs share them.",
             {"query": {"type": "string",
@@ -1120,10 +1121,11 @@ def mine_tools() -> list:
                                        "short (it names the offset to use)."}},
             _gene_search, required=("query",)),
         _mk("mine_search",
-            "An LIS mine's own keyword search, as its search box runs it: whole words in "
-            "every indexed class and field, with the total and counts by category and "
-            "organism. taxon routes to that genus's mine (default legumemine); category "
-            "and organism narrow to one of the counts shown. Pages with offset.",
+            "A mine's own keyword search, as its search box runs it: whole words in "
+            "every indexed class and field (genes, proteins, families, QTL, ontology "
+            "terms…), so 'chalcone synthase' does not take 'chalcone synthase-like'. "
+            "Gives the total and counts by category and organism, as the mine's results "
+            "page does; category and organism narrow to one of them. Pages with offset.",
             {"query": {"type": "string",
                        "description": "Keywords: a quoted phrase, OR, AND NOT, or a "
                                       "trailing * (\"chalcone synthase\")."},
