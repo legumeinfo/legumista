@@ -817,12 +817,10 @@ def _members_body(n, start=0):
                          "Arachis", "hypogaea", "gnm2"] for i in range(n)]}
 
 
-def test_family_members_applies_assembly_to_the_members(mine):
-    """'assembly' was only applied to the gene->family step, so with 'family' given it
-    was dropped without a word and the whole family came back as the 'gnm2' list."""
+def test_family_members_narrows_the_members_by_member_assembly(mine):
     mine["body"] = _members_body(3)
-    out = M._gene_family_members({"family": "Legume.fam3.08725", "assembly": "gnm2",
-                                  "annotation": "ann1"})
+    out = M._gene_family_members({"family": "Legume.fam3.08725",
+                                  "member_assembly": "gnm2", "member_annotation": "ann1"})
     xml, _ = _parse(mine["urls"][0])
     assert 'path="Gene.assemblyVersion" op="=" value="gnm2"' in xml
     assert 'path="Gene.annotationVersion" op="=" value="ann1"' in xml
@@ -831,15 +829,23 @@ def test_family_members_applies_assembly_to_the_members(mine):
 
 def test_family_members_title_names_the_species_and_the_assembly(mine, catalog):
     mine["body"] = _members_body(3)
-    out = M._gene_family_members({"family": "Legume.fam3.08725", "assembly": "gnm2",
+    out = M._gene_family_members({"family": "Legume.fam3.08725", "member_assembly": "gnm2",
                                   "target_taxon": "Phaseolus vulgaris"})
     assert "in Phaseolus vulgaris, assembly gnm2" in out
 
 
-def test_family_members_does_not_narrow_the_gene_by_the_members_assembly(mine,
-                                                                        monkeypatch):
-    """A soybean gene's peanut homologs on gnm2: 'gnm2' names the peanut genome, so it
-    must not be applied to the soybean gene lookup."""
+def test_family_members_refuses_assembly_with_a_family(mine):
+    """With 'family' given no gene is looked up, so 'assembly' had nothing to narrow and
+    was dropped without a word: the whole family read as the gnm2 list."""
+    out = M._gene_family_members({"family": "Legume.fam3.08725", "assembly": "gnm2"})
+    assert out.startswith("error:") and "'member_assembly'" in out
+    assert not mine["urls"]
+
+
+def test_assembly_picks_the_genes_copy_not_the_members(mine, catalog, monkeypatch):
+    """The mine tools' shared rule is 'pass assembly to pick the gene's copy'. Applied to
+    the members instead, a soybean gene's bean homologs on 'gnm4' came back as a real
+    zero, since no bean genome is called gnm4."""
     calls = {"n": 0}
 
     def fake(url, accept="application/json"):
@@ -847,15 +853,18 @@ def test_family_members_does_not_narrow_the_gene_by_the_members_assembly(mine,
         calls["n"] += 1
         if calls["n"] == 1:
             return {"wasSuccessful": True, "columnHeaders": ["id", "fam"],
-                    "results": [["glyma.Wm82.gnm4.ann1.Glyma.11G011500",
-                                 "Legume.fam3.08725"]]}
+                    "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000",
+                                 "Legume.fam3.10524"]]}
         return _members_body(2)
     monkeypatch.setattr(M, "_get", fake)
-    M._gene_family_members({"gene": "Glyma.11G011500", "assembly": "gnm2"})
+    out = M._gene_family_members({"gene": "Glyma.12G040000", "assembly": "gnm4",
+                                  "target_taxon": "phavu"})
     gene_xml, _ = _parse(mine["urls"][0])
     members_xml, _ = _parse(mine["urls"][1])
-    assert "assemblyVersion" not in gene_xml
-    assert 'path="Gene.assemblyVersion" op="=" value="gnm2"' in members_xml
+    assert 'path="Gene.assemblyVersion" op="=" value="gnm4"' in gene_xml
+    assert 'path="Gene.assemblyVersion"' not in members_xml
+    assert 'value="Phaseolus"' in members_xml
+    assert "in Phaseolus vulgaris —" in out and "real zero" not in out
 
 
 def test_family_members_pages_with_a_complete_sort(mine):

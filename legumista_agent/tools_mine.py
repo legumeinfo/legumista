@@ -633,21 +633,31 @@ def _gene_family_members(args) -> str:
     there (Legume.fam3.10524 has 347 members) but genus-scoped in a per-genus mine (195
     in glycinemine), where another genus's gene is simply absent.
 
-    'assembly' and 'annotation' narrow the MEMBERS listed, not the gene: they once
-    narrowed only the gene->family step, so with 'family' given they were dropped
-    without a word and the agent read the whole family as the narrowed list."""
+    'assembly'/'annotation' pick the gene's copy, as in every other gene tool;
+    'member_assembly'/'member_annotation' narrow the members listed. They are separate
+    because they mean different genomes: a soybean gene's bean homologs need 'gnm4' for
+    the gene and nothing at all for the bean. 'assembly' with 'family' has no gene to
+    narrow, so it is refused rather than dropped without a word, as it once was."""
     mine = (args.get("mine") or "").strip() or MINE
     family = (args.get("family") or "").strip()
     gene = (args.get("gene") or "").strip()
     target_cons, target_label, terr = _target_constraints(args.get("target_taxon"))
     if terr:
         return terr
-    version_cons = [(f"Gene.{field}Version", "=", args[key].strip())
-                    for key, field in (("assembly", "assembly"), ("annotation", "annotation"))
-                    if (args.get(key) or "").strip()]
+    gene_narrowing = [k for k in ("assembly", "annotation") if (args.get(k) or "").strip()]
+    if family and gene_narrowing:
+        return (f"error: {' and '.join(map(repr, gene_narrowing))} "
+                f"{'pick' if len(gene_narrowing) > 1 else 'picks'} which copy of "
+                "'gene' to look up, and with 'family' given no gene is looked up. To list "
+                "only one genome's members, use 'member_assembly'/'member_annotation' "
+                "(with 'target_taxon').")
+    version_cons = [(f"Gene.{field}Version", "=", args[f"member_{field}"].strip())
+                    for field in ("assembly", "annotation")
+                    if (args.get(f"member_{field}") or "").strip()]
     scope = ", ".join(([target_label] if target_label else [])
-                      + [f"{key} {args[key].strip()}" for key in ("assembly", "annotation")
-                         if (args.get(key) or "").strip()])
+                      + [f"{field} {args[f'member_{field}'].strip()}"
+                         for field in ("assembly", "annotation")
+                         if (args.get(f"member_{field}") or "").strip()])
     title = ("Gene family members (homologs; not an orthology call)"
              + (f" in {scope}" if scope else ""))
     if not family:
@@ -657,7 +667,7 @@ def _gene_family_members(args) -> str:
         # Step 1: gene -> family, per assembly (a bare name can match several).
         xml = _pathquery(["Gene.primaryIdentifier",
                           "Gene.geneFamilyAssignments.geneFamily.primaryIdentifier"],
-                         _gene_constraints({"gene": gene}))
+                         _gene_constraints(args))
         rows, _cols, err = _run(mine, xml, 20)
         if err:
             return err
@@ -665,8 +675,7 @@ def _gene_family_members(args) -> str:
         for gene_id, fam in (r for r in rows or [] if len(r) > 1 and r[1]):
             by_family.setdefault(fam, []).append(gene_id)
         if not by_family:
-            return (_render_empty(title, mine, {"gene": gene}, gene,
-                                  "gene family assignment")
+            return (_render_empty(title, mine, args, gene, "gene family assignment")
                     + "\n\n" + _FAMILY_CAVEAT)
         family = sorted(by_family, key=lambda f: (-len(by_family[f]), f))[0]
         others = [f for f in sorted(by_family) if f != family]
@@ -690,7 +699,7 @@ def _gene_family_members(args) -> str:
             return (f"{title}: no members of {fam} from {scope} in {mine_name}; "
                     "the family's overall size could not be checked, so confirm the "
                     "family identifier before treating this as a real zero.")
-        hint = (" Assembly and annotation versions are matched exactly ('gnm2', 'ann1'); "
+        hint = (" member_assembly/member_annotation are matched exactly ('gnm2', 'ann1'); "
                 "drop them to see which versions the family has."
                 if version_cons else "")
         return (f"{title}: family {fam} exists in {mine_name} with {overall:,} members, "
@@ -967,8 +976,9 @@ def mine_tools() -> list:
             "Members of a gene's family across legume species — the homologs of a gene, "
             "for 'does my crop have a counterpart of this gene?'. Give 'gene' (its family "
             "is looked up first) or 'family'; add 'target_taxon' (e.g. 'Cicer arietinum' "
-            "or 'chickpea') to list only that species' members, and 'assembly'/"
-            "'annotation' to list only one genome's. A long list is paged: the reply "
+            "or 'chickpea') to list only that species' members, and 'member_assembly'/"
+            "'member_annotation' to list only one genome's ('assembly'/'annotation' pick "
+            "the gene's copy, as elsewhere). A long list is paged: the reply "
             "names the 'offset' that continues it. Family membership is evidence of "
             "homology, NOT orthology: families include paralogs. Queries the pan-legume "
             "mine, where families span genera.",
@@ -987,13 +997,15 @@ def mine_tools() -> list:
              "offset": {"type": "integer",
                         "description": "Rows to skip, to continue a list the reply cut "
                                        "short (it names the offset to use)."},
-             "assembly": {"type": "string",
-                          "description": "Only list members on this assembly version, "
-                                         "e.g. 'gnm2'. Versions repeat across species, so "
-                                         "pair it with 'target_taxon'."},
-             "annotation": {"type": "string",
-                            "description": "Only list members from this annotation "
-                                           "version, e.g. 'ann1'."}},
+             "member_assembly": {"type": "string",
+                                 "description": "Only list members on this assembly "
+                                                "version, e.g. 'gnm2'. Versions repeat "
+                                                "across species, so pair it with "
+                                                "'target_taxon'."},
+             "member_annotation": {"type": "string",
+                                   "description": "Only list members from this "
+                                                  "annotation version, e.g. 'ann1'."},
+             **_ASSEMBLY_ARGS},
             _gene_family_members, required=()),
         _mk("legumemine_gene_search",
             "Find genes, or gene families, by what their DESCRIPTION says — 'chalcone "
