@@ -1037,3 +1037,32 @@ def test_mine_search_offset_past_the_end_reports_the_total(mine, monkeypatch):
                                                           "totalHits": 280, "results": []})
     out = M._keyword_search({"query": "z", "offset": 300})
     assert "no results at offset=300; the search has 280 in all" in out
+
+
+# --- one rule for choosing a mine ---------------------------------------------------------
+def test_every_mine_tool_chooses_its_mine_the_same_way():
+    """taxon picks a genus mine and mine names one, on every mine tool; family members
+    alone has no routing taxon (it is cross-species by purpose)."""
+    for tool in M.mine_tools():
+        props = tool.parameters["properties"]
+        assert "mine" in props, tool.name
+        if tool.name == "legumemine_gene_family_members":
+            assert "taxon" not in props and "target_taxon" in props
+        else:
+            assert "taxon" in props, tool.name
+
+
+def test_a_gene_tool_routes_taxon_to_the_genus_mine(mine, catalog):
+    M._gene_proteins({"gene": "Glyma.12G040000", "taxon": "soybean"})
+    assert "/glycinemine/service/" in mine["urls"][-1]
+    M._gene_proteins({"gene": "Glyma.12G040000"})
+    assert f"/{M.MINE}/service/" in mine["urls"][-1]
+
+
+def test_gene_search_routes_taxon_and_filters_with_target_taxon(mine, catalog):
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["id", "g", "s", "d"],
+                    "results": [["phavu.X", "Phaseolus", "vulgaris", "kinase"]]}
+    M._gene_search({"query": "kinase", "taxon": "phavu", "target_taxon": "phavu"})
+    xml, _ = _parse(mine["urls"][-1])
+    assert "/phaseolusmine/service/" in mine["urls"][-1]
+    assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in xml

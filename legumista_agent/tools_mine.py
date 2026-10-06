@@ -638,7 +638,9 @@ def _gene_family_members(args) -> str:
     because they mean different genomes: a soybean gene's bean homologs need 'gnm4' for
     the gene and nothing at all for the bean. 'assembly' with 'family' has no gene to
     narrow, so it is refused rather than dropped without a word, as it once was."""
-    mine = (args.get("mine") or "").strip() or MINE
+    mine, mine_err = _resolve_mine(args)
+    if mine_err:
+        return mine_err
     family = (args.get("family") or "").strip()
     gene = (args.get("gene") or "").strip()
     target_cons, target_label, terr = _target_constraints(args.get("target_taxon"))
@@ -750,7 +752,9 @@ def _gene_search(args) -> str:
     kind = (args.get("search") or "genes").strip().lower()
     if kind not in ("genes", "families"):
         return "error: 'search' must be 'genes' or 'families'."
-    mine = (args.get("mine") or "").strip() or MINE
+    mine, mine_err = _resolve_mine(args)
+    if mine_err:
+        return mine_err
     if kind == "families":
         if (args.get("target_taxon") or "").strip():
             return ("error: a gene family spans species, so 'target_taxon' does not apply "
@@ -980,12 +984,25 @@ def _marker_position(args) -> str:
 
 
 # --- registry -------------------------------------------------------------------------
+# One rule for choosing a mine, on every mine tool: 'taxon' picks that genus's mine,
+# 'mine' names one, and with neither the pan-legume mine answers (the breeding tools,
+# whose data lives only in genus mines, require 'taxon'). 'target_taxon', where a tool
+# has it, filters rows and never picks the mine. The one exception is
+# legumemine_gene_family_members, which takes no routing 'taxon': it is cross-species
+# by purpose, and a 'taxon' that routed to a genus mine once dropped every other genus's
+# members without a word.
+_MINE_ARGS = {
+    "taxon": {"type": "string",
+              "description": f"Query this species' or genus's own mine instead of "
+                             f"{MINE!r}: Latin name, common name or abbreviation "
+                             "('Arachis hypogaea', 'peanut', 'arahy')."},
+    "mine": {"type": "string",
+             "description": "A mine by name ('arachismine'); overrides taxon."},
+}
 _GENE_ARG = {
     "gene": {"type": "string",
              "description": "Gene ID, bare ('Glyma.12G040000') or fully qualified."},
-    "mine": {"type": "string",
-             "description": f"Mine to query (default {MINE!r}); a genus mine such as "
-                            "'glycinemine' holds only its genus."},
+    **_MINE_ARGS,
     "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
 }
 _ASSEMBLY_ARGS = {
@@ -1001,7 +1018,8 @@ _TAXON_ARG = {
     "taxon": {"type": "string",
               "description": "Species or genus whose mine to query: Latin name, common "
                              "name or abbreviation ('Glycine max', 'soybean', 'glyma')."},
-    "mine": {"type": "string", "description": "Explicit mine name; overrides 'taxon'."},
+    "mine": {"type": "string",
+             "description": "A mine by name ('glycinemine'); overrides taxon."},
     "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
 }
 
@@ -1045,7 +1063,10 @@ def mine_tools() -> list:
             "identifiers, not symbols.",
             {"symbol": {"type": "string",
                         "description": "Gene symbol, e.g. 'GmNARK'. Case-insensitive, exact."},
-             **_TAXON_ARG}, _gene_symbol, required=("symbol",)),
+             **_MINE_ARGS,
+             "max_results": {"type": "integer",
+                             "description": f"Row cap, 1-500 (default {MAX_ROWS})."}},
+            _gene_symbol, required=("symbol",)),
         _mk("legumemine_gene_family_members",
             "A gene family's members across legumes, given a gene or a family. "
             "target_taxon keeps one species, member_assembly/member_annotation one "
@@ -1060,8 +1081,8 @@ def mine_tools() -> list:
                               "description": "Only list members from this species or genus "
                                              "(Latin name, abbreviation or common name)."},
              "mine": {"type": "string",
-                      "description": f"Mine to query (default {MINE!r}). A per-genus mine "
-                                     "only holds its own genus's genes."},
+                      "description": f"A mine by name (default {MINE!r}, where families "
+                                     "span genera); a genus mine holds only its genus."},
              "max_results": {"type": "integer",
                              "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
              "offset": {"type": "integer",
@@ -1091,8 +1112,7 @@ def mine_tools() -> list:
              "target_taxon": {"type": "string",
                               "description": "Genes only: this species or genus (Latin "
                                              "name, abbreviation or common name)."},
-             "mine": {"type": "string",
-                      "description": f"Mine to query (default {MINE!r})."},
+             **_MINE_ARGS,
              "max_results": {"type": "integer",
                              "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
              "offset": {"type": "integer",
@@ -1107,10 +1127,7 @@ def mine_tools() -> list:
             {"query": {"type": "string",
                        "description": "Keywords: a quoted phrase, OR, AND NOT, or a "
                                       "trailing * (\"chalcone synthase\")."},
-             "taxon": {"type": "string",
-                       "description": "Species or genus whose mine to search: Latin name, "
-                                      "common name or abbreviation."},
-             "mine": {"type": "string", "description": "Explicit mine; overrides taxon."},
+             **_MINE_ARGS,
              "category": {"type": "string",
                           "description": "One category from the counts, e.g. 'Gene', "
                                          "'Protein', 'GeneFamily', 'QTL'."},
