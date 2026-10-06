@@ -43,6 +43,13 @@ def test_count_phrase_never_presents_a_cap_as_a_total():
     assert count_phrase(7, None, "rows") == "7 rows"
 
 
+def test_count_phrase_names_the_span_of_a_later_page():
+    """The last page of a list is still only part of it: '48 rows' would read as all."""
+    assert count_phrase(48, 348, "rows", start=300) == "showing 301–348 of 348 rows"
+    capped = count_phrase(50, None, "rows", capped=True, start=50)
+    assert capped.startswith("showing 51–100 rows") and "total is unavailable" in capped
+
+
 def test_source_summary_labels_partial_and_total_failure():
     s = SourceSummary()
     s.add(SourceReport("OpenAlex", hits=8))

@@ -48,7 +48,7 @@ from xml.sax.saxutils import quoteattr
 from . import tools_catalog
 from .results import count_phrase
 from .tool import Tool
-from .tools_native import _cap, _get, _validate_url
+from .tools_native import MAX_CHARS, _cap, _get, _validate_url
 
 MINES_BASE = os.environ.get("LEGUMISTA_LIS_MINES_BASE",
                             "https://mines.legumeinfo.org").rstrip("/")
@@ -56,6 +56,10 @@ MINE = os.environ.get("LEGUMISTA_LIS_MINE", "legumemine")
 MAX_ROWS = int(os.environ.get("LEGUMISTA_MINE_MAX_ROWS", "50"))
 # Pre-flight counts cost a round trip; skip them for queries that cannot run away.
 COUNT_THRESHOLD = int(os.environ.get("LEGUMISTA_MINE_COUNT_THRESHOLD", "200"))
+# Characters of rows per reply. The rest of MAX_CHARS is left for what callers append (a
+# footer, the family caveat), so rows are dropped whole here and never cut mid-row by
+# _cap -- a list cut mid-row has no honest "continue from" point.
+ROW_BUDGET = MAX_CHARS - 2500
 
 
 def _service(mine: str) -> str:
@@ -76,10 +80,12 @@ def _pathquery(view, constraints, sort=None) -> str:
     return "".join(parts)
 
 
-def _url(mine: str, xml: str, fmt: str, size: int = None) -> str:
+def _url(mine: str, xml: str, fmt: str, size: int = None, start: int = 0) -> str:
     params = {"query": xml, "format": fmt}
     if size is not None:
         params["size"] = str(size)
+    if start:
+        params["start"] = str(start)
     return f"{_service(mine)}/query/results?" + urllib.parse.urlencode(params)
 
 
@@ -136,24 +142,25 @@ def _count(mine: str, xml: str):
     return _cached(("count", mine, xml), compute)
 
 
-def _run(mine: str, xml: str, size: int):
+def _run(mine: str, xml: str, size: int, start: int = 0):
     """Execute a PathQuery. Returns (rows, columns, error_text).
 
     The whole point: InterMine reports failure inside a 200 body, so `wasSuccessful` is
-    checked before `results` is trusted."""
-    return _cached(("run", mine, xml, size), lambda: _run_uncached(mine, xml, size))
+    checked before `results` is trusted. `start` skips that many rows, for paging."""
+    return _cached(("run", mine, xml, size, start),
+                   lambda: _run_uncached(mine, xml, size, start))
 
 
-def _run_uncached(mine: str, xml: str, size: int):
+def _run_uncached(mine: str, xml: str, size: int, start: int = 0):
     """One PathQuery round trip. Returns ((rows, columns, error), cacheable) — an error is
     never cacheable, so a retry after an outage really retries."""
-    result = _fetch(mine, xml, size)
+    result = _fetch(mine, xml, size, start)
     return result, result[2] is None
 
 
-def _fetch(mine: str, xml: str, size: int):
+def _fetch(mine: str, xml: str, size: int, start: int = 0):
     try:
-        url = _url(mine, xml, "json", size)
+        url = _url(mine, xml, "json", size, start)
         _validate_url(url)
         doc = _get(url, accept="application/json")
     except Exception as e:  # noqa: BLE001
@@ -193,18 +200,37 @@ def _gene_constraints(args, root="Gene"):
     return cons
 
 
-def _render(title, mine, gene, rows, cols, total, size, note="", capped=False):
+def _render(title, mine, gene, rows, cols, total, size, note="", capped=False, offset=0,
+            pageable=False):
+    """Rows as a table. Rows past ROW_BUDGET are dropped whole and counted, and a
+    `pageable` tool's reply names the offset that continues the list."""
     if not rows:
         return (f"{title}: no matches for {gene!r} in {mine}. The query was valid and "
                 "returned zero rows — check the identifier, or widen 'assembly'/"
                 "'annotation'.")
     head = f"{title} — {gene} [mine: {mine}]"
-    shown = count_phrase(len(rows), total, "row(s)", capped=capped)
-    if len(rows) < (total or 0) or (capped and total is None):
-        shown += f" — capped at {size}; raise 'max_results' (up to 500) to see more"
-    lines = [head, shown + (f"  {note}" if note else ""), "  " + " | ".join(cols)]
+    header = "  " + " | ".join(cols)
+    body, used = [], len(head) + len(header) + len(note) + 300
     for r in rows:
-        lines.append("  " + " | ".join("" if v is None else str(v) for v in r))
+        line = "  " + " | ".join("" if v is None else str(v) for v in r)
+        if body and used + len(line) + 1 > ROW_BUDGET:
+            break
+        body.append(line)
+        used += len(line) + 1
+    cut = len(body) < len(rows)
+    shown = count_phrase(len(body), total, "row(s)", capped=capped or cut, start=offset)
+    end = offset + len(body)
+    if (total is not None and end < total) or (total is None and (capped or cut)):
+        if pageable:
+            shown += f" — continue with offset={end}"
+            if not cut:
+                shown += " (or raise 'max_results', up to 500)"
+        elif cut:
+            shown += (f" — the reply's size limit stopped the list at {len(body)} of the "
+                      f"{len(rows)} rows fetched; narrow the query to see the rest")
+        else:
+            shown += f" — capped at {size}; raise 'max_results' (up to 500) to see more"
+    lines = [head, shown + (f"  {note}" if note else ""), header] + body
     return _cap("\n".join(lines))
 
 
@@ -392,7 +418,9 @@ _TITLES = {"protein records": "Proteins", "gene family assignments": "Gene famil
 
 def _execute(args, title, view, constraints, sort=None, assembly_col=1,
              subject_key="gene", subject_hint="a gene identifier such as 'Glyma.12G040000'",
-             require_taxon=False, footer=None, on_empty=None):
+             require_taxon=False, footer=None, on_empty=None, pageable=False):
+    """Run one PathQuery and render it. A `pageable` tool honours args['offset'], so
+    `sort` must then order the rows completely: a tie lets a row move between pages."""
     mine, mine_err = _resolve_mine(args, require_taxon)
     if mine_err:
         return mine_err
@@ -400,17 +428,25 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
     if not subject:
         return f"error: missing {subject_key!r} — {subject_hint}."
     size = max(1, min(int(args.get("max_results") or MAX_ROWS), 500))
+    offset = max(0, int(args.get("offset") or 0)) if pageable else 0
     xml = _pathquery(view, constraints, sort)
-    rows, cols, err = _run(mine, xml, size)
+    rows, cols, err = _run(mine, xml, size, offset)
     if err:
         return err
+    if not rows and offset:
+        total = _count(mine, xml)
+        return (f"{title} — {subject} [mine: {mine}]: no rows at offset={offset}; "
+                + (f"the query has {total:,} row(s) in all." if total is not None else
+                   "the query's total could not be checked."))
     if not rows and on_empty is not None:
         # The caller explains its own zero (see _render_empty) instead of the generic text.
         return on_empty(mine, subject)
     capped = len(rows) >= size
-    total = _count(mine, xml) if len(rows) >= min(size, COUNT_THRESHOLD) else len(rows)
+    total = (_count(mine, xml) if len(rows) >= min(size, COUNT_THRESHOLD)
+             else offset + len(rows))
     note = _assembly_note(rows, assembly_col) if assembly_col is not None else ""
-    out = _render(title, mine, subject, rows, cols, total, size, note, capped=capped)
+    out = _render(title, mine, subject, rows, cols, total, size, note, capped=capped,
+                  offset=offset, pageable=pageable)
     # A footer names the next tool the rows unlock. It goes in the OUTPUT rather than a
     # docstring because the hand-off is only discoverable once you are holding the values.
     if footer and rows:
@@ -595,15 +631,25 @@ def _gene_family_members(args) -> str:
     Accepts a gene (whose family is resolved first) or a family identifier directly.
     Always queries the pan-legume mine unless 'mine' is given: families are cross-species
     there (Legume.fam3.10524 has 347 members) but genus-scoped in a per-genus mine (195
-    in glycinemine), where another genus's gene is simply absent."""
+    in glycinemine), where another genus's gene is simply absent.
+
+    'assembly' and 'annotation' narrow the MEMBERS listed, not the gene: they once
+    narrowed only the gene->family step, so with 'family' given they were dropped
+    without a word and the agent read the whole family as the narrowed list."""
     mine = (args.get("mine") or "").strip() or MINE
     family = (args.get("family") or "").strip()
     gene = (args.get("gene") or "").strip()
     target_cons, target_label, terr = _target_constraints(args.get("target_taxon"))
     if terr:
         return terr
+    version_cons = [(f"Gene.{field}Version", "=", args[key].strip())
+                    for key, field in (("assembly", "assembly"), ("annotation", "annotation"))
+                    if (args.get(key) or "").strip()]
+    scope = ", ".join(([target_label] if target_label else [])
+                      + [f"{key} {args[key].strip()}" for key in ("assembly", "annotation")
+                         if (args.get(key) or "").strip()])
     title = ("Gene family members (homologs; not an orthology call)"
-             + (f" in {target_label}" if target_label else ""))
+             + (f" in {scope}" if scope else ""))
     if not family:
         if not gene:
             return ("error: provide 'gene' (e.g. 'Glyma.12G040000') or 'family' "
@@ -611,7 +657,7 @@ def _gene_family_members(args) -> str:
         # Step 1: gene -> family, per assembly (a bare name can match several).
         xml = _pathquery(["Gene.primaryIdentifier",
                           "Gene.geneFamilyAssignments.geneFamily.primaryIdentifier"],
-                         _gene_constraints(args))
+                         _gene_constraints({"gene": gene}))
         rows, _cols, err = _run(mine, xml, 20)
         if err:
             return err
@@ -619,7 +665,8 @@ def _gene_family_members(args) -> str:
         for gene_id, fam in (r for r in rows or [] if len(r) > 1 and r[1]):
             by_family.setdefault(fam, []).append(gene_id)
         if not by_family:
-            return (_render_empty(title, mine, args, gene, "gene family assignment")
+            return (_render_empty(title, mine, {"gene": gene}, gene,
+                                  "gene family assignment")
                     + "\n\n" + _FAMILY_CAVEAT)
         family = sorted(by_family, key=lambda f: (-len(by_family[f]), f))[0]
         others = [f for f in sorted(by_family) if f != family]
@@ -631,29 +678,32 @@ def _gene_family_members(args) -> str:
     else:
         prefix = ""
     constraints = ([("Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "=", family)]
-                   + target_cons)
+                   + target_cons + version_cons)
     def explain(mine_name, fam):
         overall = _count(mine_name, _pathquery(
             ["Gene.primaryIdentifier"],
             [("Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "=", fam)]))
-        if overall == 0 or (overall is None and not target_label):
+        if overall == 0 or (overall is None and not scope):
             return (f"{title}: family {fam!r} has no members in {mine_name} — check the "
                     "family identifier.")
         if overall is None:
-            return (f"{title}: no members of {fam} from {target_label} in {mine_name}; "
+            return (f"{title}: no members of {fam} from {scope} in {mine_name}; "
                     "the family's overall size could not be checked, so confirm the "
                     "family identifier before treating this as a real zero.")
+        hint = (" Assembly and annotation versions are matched exactly ('gnm2', 'ann1'); "
+                "drop them to see which versions the family has."
+                if version_cons else "")
         return (f"{title}: family {fam} exists in {mine_name} with {overall:,} members, "
-                f"none of them from {target_label}. That is a real zero for this family "
-                "in this mine, not a failed lookup.")
+                f"none of them from {scope}. That is a real zero for this family "
+                f"in this mine, not a failed lookup.{hint}")
     out = _execute(
         {**args, "family": family, "mine": mine}, title,
         ["Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "Gene.primaryIdentifier",
          "Gene.organism.genus", "Gene.organism.species", "Gene.assemblyVersion"],
-        constraints, sort="Gene.organism.genus asc", assembly_col=None,
-        subject_key="family",
+        constraints, sort="Gene.organism.genus asc Gene.primaryIdentifier asc",
+        assembly_col=None, subject_key="family",
         subject_hint="a gene family identifier such as 'Legume.fam3.10524'",
-        on_empty=explain)
+        on_empty=explain, pageable=True)
     return prefix + out + "\n\n" + _FAMILY_CAVEAT
 
 
@@ -837,9 +887,11 @@ def mine_tools() -> list:
             "Members of a gene's family across legume species — the homologs of a gene, "
             "for 'does my crop have a counterpart of this gene?'. Give 'gene' (its family "
             "is looked up first) or 'family'; add 'target_taxon' (e.g. 'Cicer arietinum' "
-            "or 'chickpea') to list only that species' members. Family membership is "
-            "evidence of homology, NOT orthology: families include paralogs. Queries the "
-            "pan-legume mine, where families span genera.",
+            "or 'chickpea') to list only that species' members, and 'assembly'/"
+            "'annotation' to list only one genome's. A long list is paged: the reply "
+            "names the 'offset' that continues it. Family membership is evidence of "
+            "homology, NOT orthology: families include paralogs. Queries the pan-legume "
+            "mine, where families span genera.",
             {"gene": {"type": "string", "description": "Gene identifier, e.g. 'Glyma.12G040000'."},
              "family": {"type": "string",
                         "description": "Gene family identifier, e.g. 'Legume.fam3.10524'. "
@@ -852,7 +904,17 @@ def mine_tools() -> list:
                                      "only holds its own genus's genes."},
              "max_results": {"type": "integer",
                              "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
-             **_ASSEMBLY_ARGS}, _gene_family_members, required=()),
+             "offset": {"type": "integer",
+                        "description": "Rows to skip, to continue a list the reply cut "
+                                       "short (it names the offset to use)."},
+             "assembly": {"type": "string",
+                          "description": "Only list members on this assembly version, "
+                                         "e.g. 'gnm2'. Versions repeat across species, so "
+                                         "pair it with 'target_taxon'."},
+             "annotation": {"type": "string",
+                            "description": "Only list members from this annotation "
+                                           "version, e.g. 'ann1'."}},
+            _gene_family_members, required=()),
         _mk("lis_trait_qtls",
             "QTLs mapped for a trait: QTL name, linkage group, LOD, marker R2 and the "
             "study it came from. The breeder's entry point for 'what's known about the "

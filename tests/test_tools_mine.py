@@ -803,3 +803,97 @@ def test_an_ambiguous_name_within_one_genus_routes_to_that_genus(mine, catalog, 
     monkeypatch.setattr(C, "_TAXON_INDEX", {})
     mine["live"].add("arachismine")
     assert M._resolve_mine({"taxon": "wild peanut"}) == ("arachismine", None)
+
+
+# --- family members: narrowing and paging -------------------------------------------
+def _members_body(n, start=0):
+    return {"wasSuccessful": True,
+            "columnHeaders": ["Identifier", "Primary Identifier", "Genus", "Species",
+                              "Assembly Version"],
+            "results": [["Legume.fam3.08725",
+                         f"arahy.Tifrunner.gnm2.ann1.Arahy.G{start + i:05d}",
+                         "Arachis", "hypogaea", "gnm2"] for i in range(n)]}
+
+
+def test_family_members_applies_assembly_to_the_members(mine):
+    """'assembly' was only applied to the gene->family step, so with 'family' given it
+    was dropped without a word and the whole family came back as the 'gnm2' list."""
+    mine["body"] = _members_body(3)
+    out = M._gene_family_members({"family": "Legume.fam3.08725", "assembly": "gnm2",
+                                  "annotation": "ann1"})
+    xml, _ = _parse(mine["urls"][0])
+    assert 'path="Gene.assemblyVersion" op="=" value="gnm2"' in xml
+    assert 'path="Gene.annotationVersion" op="=" value="ann1"' in xml
+    assert "in assembly gnm2, annotation ann1" in out
+
+
+def test_family_members_title_names_the_species_and_the_assembly(mine, catalog):
+    mine["body"] = _members_body(3)
+    out = M._gene_family_members({"family": "Legume.fam3.08725", "assembly": "gnm2",
+                                  "target_taxon": "Phaseolus vulgaris"})
+    assert "in Phaseolus vulgaris, assembly gnm2" in out
+
+
+def test_family_members_does_not_narrow_the_gene_by_the_members_assembly(mine,
+                                                                        monkeypatch):
+    """A soybean gene's peanut homologs on gnm2: 'gnm2' names the peanut genome, so it
+    must not be applied to the soybean gene lookup."""
+    calls = {"n": 0}
+
+    def fake(url, accept="application/json"):
+        mine["urls"].append(url)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"wasSuccessful": True, "columnHeaders": ["id", "fam"],
+                    "results": [["glyma.Wm82.gnm4.ann1.Glyma.11G011500",
+                                 "Legume.fam3.08725"]]}
+        return _members_body(2)
+    monkeypatch.setattr(M, "_get", fake)
+    M._gene_family_members({"gene": "Glyma.11G011500", "assembly": "gnm2"})
+    gene_xml, _ = _parse(mine["urls"][0])
+    members_xml, _ = _parse(mine["urls"][1])
+    assert "assemblyVersion" not in gene_xml
+    assert 'path="Gene.assemblyVersion" op="=" value="gnm2"' in members_xml
+
+
+def test_family_members_pages_with_a_complete_sort(mine):
+    mine["count"] = "348"
+    mine["body"] = _members_body(48, start=300)
+    out = M._gene_family_members({"family": "Legume.fam3.08725", "offset": 300,
+                                  "max_results": 100})
+    xml, params = _parse(mine["urls"][0])
+    assert params["start"] == ["300"]
+    # A tie in the sort lets a row move between pages, so the identifier breaks it.
+    assert 'sortOrder="Gene.organism.genus asc Gene.primaryIdentifier asc"' in xml
+    assert "showing 301–348 of 348 row(s)" in out
+    assert "continue with offset" not in out
+
+
+def test_a_long_member_list_is_cut_at_a_whole_row_with_the_offset_to_continue(mine):
+    """348 rows overran the reply cap and were cut mid-list, with no way to fetch the
+    rest: the agent never saw the genes past the cut."""
+    mine["count"] = "348"
+    mine["body"] = _members_body(348)
+    out = M._gene_family_members({"family": "Legume.fam3.08725", "max_results": 500})
+    assert "truncated to" not in out
+    shown = sum(1 for line in out.splitlines() if "Arahy.G" in line)
+    assert 0 < shown < 348
+    assert f"showing {shown} of 348 row(s) — continue with offset={shown}" in out
+    assert out.rstrip().endswith(M._FAMILY_CAVEAT)
+
+
+def test_a_tool_without_offset_says_its_list_was_cut_by_size(mine):
+    mine["count"] = "500"
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["V"],
+                    "results": [["x" * 200] for _ in range(500)]}
+    out = M._gene_expression({"gene": "G", "max_results": 500})
+    assert "truncated to" not in out
+    assert "size limit stopped the list at" in out and "of the 500 rows fetched" in out
+    assert "offset" not in out
+
+
+def test_an_offset_past_the_end_reports_the_total(mine):
+    mine["count"] = "348"
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": [], "results": []}
+    out = M._gene_family_members({"family": "Legume.fam3.08725", "offset": 400})
+    assert "no rows at offset=400; the query has 348 row(s) in all" in out

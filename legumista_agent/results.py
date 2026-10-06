@@ -47,14 +47,26 @@ def coerce(result) -> ToolOutput:
     return ToolOutput(text=text, is_error=bool(_LEGACY_ERROR.match(text)))
 
 
-def count_phrase(shown: int, total: Optional[int], noun: str, *, capped: bool = False) -> str:
+def count_phrase(shown: int, total: Optional[int], noun: str, *, capped: bool = False,
+                 start: int = 0) -> str:
     """How to describe a list that may have been cut short.
 
     count_phrase(12, 12, "genes")            -> "12 genes"
     count_phrase(40, 46, "species")          -> "showing 40 of 46 species"
     count_phrase(50, None, "rows", capped=True)
         -> "showing the first 50 rows (the result hit its cap; the total is unavailable)"
+    count_phrase(48, 348, "rows", start=300) -> "showing 301–348 of 348 rows"
+
+    `start` is how many items earlier pages already showed: a page that ends the list is
+    still only part of it.
     """
+    if start:
+        span = f"{start + 1:,}–{start + shown:,}"
+        if total is not None:
+            return f"showing {span} of {total:,} {noun}"
+        if capped:
+            return f"showing {span} {noun} (the result hit its cap; the total is unavailable)"
+        return f"showing {span} {noun}"
     if total is not None:
         if shown >= total:
             return f"{total:,} {noun}"

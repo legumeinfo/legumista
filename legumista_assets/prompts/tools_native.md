@@ -281,7 +281,8 @@ Per-question queries over the LIS mines; every result names the mine that answer
 - `legumemine_gene_expression` — values per sample with each study's **unit**; compare
   only within one study (`source`), never across units.
 - `legumemine_gene_family_members` — a gene's homologs via its family; `target_taxon`
-  lists one species. **Family membership is homology, not orthology** (families contain
+  lists one species, `assembly`/`annotation` one genome. A long list ends with the
+  `offset` that continues it: page rather than reason from the part you saw. **Family membership is homology, not orthology** (families contain
   paralogs): say "homolog" unless phylogeny or synteny (`lis_synteny`) supports orthology.
 - `lis_trait_qtls`, `lis_trait_gwas`, `lis_marker_position` — **require `taxon`**: this
   data lives only in per-genus mines. A species with no mine is reported as such; its
