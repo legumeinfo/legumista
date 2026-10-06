@@ -62,3 +62,8 @@ packages = ["legumista_assets", "legumista_agent"]
 
 [tool.setuptools.package-data]
 legumista_assets = ["prompts/*.md", "legumista.png"]
+
+[tool.pytest.ini_options]
+# CI checks DSCensor out inside the tree (_deps/microservices); without this, pytest would
+# collect DSCensor's own tests, whose imports are not installed here.
+testpaths = ["tests"]
