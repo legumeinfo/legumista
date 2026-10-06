@@ -89,10 +89,19 @@ exactly one consumer, the MCP server. If you find a reference to `legumista rese
   reuses a cached index by filename alone. **Never open a remote file with pysam in the server process:** libcurl
   follows redirects and resolves hosts itself, so only the egress proxy, which the
   workers' environment names, can keep it off private addresses.
-- **No metadata HTTP to data.legumeinfo.org.** The `lis_*` tools answer from
-  `catalog.json`, not by crawling the store. The two remaining reads there are *data*
-  (a gene-models BED, a synonym file), not metadata. Keep it that way: a metadata question
-  the catalog cannot answer is a catalog bug, to be fixed in LIS-autocontent.
+- **No metadata HTTP to data.legumeinfo.org.** The `lis_*` tools answer metadata
+  questions from `catalog.json`, never by crawling the store. What the server still reads
+  there is *data*, each at a URL the catalog supplies:
+  - whole files: an annotation's gene-models BED and synonym file (`lis_gene`, selectors),
+    its gene family assignment files (`family` selectors, cross-species `translate_to`),
+    synteny block files (`lis_synteny`), and a genome's `.fai` (the `ncbi` selector's
+    sequence-length check);
+  - indexed regions, through the htslib workers: GFF3 gene rows (gene span and
+    description), protein FASTA indexes (protein length), and whatever `fasta_fetch`,
+    `tabix_query`, `samtools`, `bcftools` and `extract_features` are asked to read.
+
+  Keep it that way: a metadata question the catalog cannot answer is a catalog bug, to be
+  fixed in LIS-autocontent.
 - **A failure is not a finding.** Return `results.fail(...)` when a tool could not
   answer. Never catch an exception and fall through to an empty or "none found" answer.
   `grep -rn -A1 --include='*.py' -E '^\s*except\b.*:' legumista_agent/ | grep -E
