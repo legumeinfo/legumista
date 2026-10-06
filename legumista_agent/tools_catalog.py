@@ -472,10 +472,19 @@ def _lineage(args) -> str:
             lines.append(f"      {entry['publication_title']}")
         if entry.get("publication_doi"):
             lines.append(f"      doi: {entry['publication_doi']}")
+        else:
+            lines.append("      doi: none recorded for this collection")
         if entry.get("license"):
             lines.append(f"      license: {entry['license']}")
     if result["dois"]:
         from . import pubstatus  # lazy: keeps the catalog import-light
+        # The requested collection's own DOI, or the lack of one, is stated before the
+        # bundle: an agent asked for an annotation's publication once cited its parent
+        # assembly's, the only DOI listed.
+        own = result["chain"][0] if result["chain"] else {}
+        if not own.get("publication_doi"):
+            lines.append(f"\n{identifier} records NO publication of its own; every DOI "
+                         "below belongs to a collection it was derived from.")
         lines.append(
             f"\nciting this result means citing {len(result['dois'])} publication(s):"
         )

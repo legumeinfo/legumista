@@ -278,6 +278,18 @@ def test_lineage_accepts_a_full_path(catalog):
     assert by_path == by_id
 
 
+def test_lineage_says_when_the_collection_has_no_publication_of_its_own(catalog):
+    """Its parent's DOI was the only one listed, and was cited as the collection's."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    child = next(c for c in doc["collections"] if c.get("derived_from"))
+    child.pop("publication_doi", None)
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    out = C._lineage({"collection": child["id"]})
+    assert "doi: none recorded for this collection" in out
+    assert f"{child['id']} records NO publication of its own" in out
+
+
 def test_lineage_miss_and_missing_argument_are_distinct(catalog):
     assert "missing 'collection'" in C._lineage({"collection": ""})
     assert "no collection with id" in C._lineage({"collection": "NoSuchThing"})
