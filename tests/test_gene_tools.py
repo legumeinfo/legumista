@@ -313,6 +313,72 @@ def test_translate_within_an_assembly_by_locus(world):
         in text
 
 
+def _fake_ncbi(world, monkeypatch, fail=False):
+    """NCBI esummary for three genes: one on the fixture's Gm12 (the minus-strand span
+    1,001-1,300, i.e. B), one on a sequence of another assembly, one with no location.
+    The genome's .fai is the fixture's real one."""
+    calls = []
+
+    def esummary(db, ids):
+        calls.append((db, list(ids)))
+        if fail:
+            raise TimeoutError("timed out")
+        if db == "gene":
+            return {"100": {"description": "leucine-rich repeat receptor kinase",
+                            "genomicinfo": [{"chraccver": "NC_000012.1", "chrstart": 1299,
+                                             "chrstop": 1000}]},
+                    "200": {"description": "elsewhere",
+                            "genomicinfo": [{"chraccver": "NC_999999.1", "chrstart": 5,
+                                             "chrstop": 50}]},
+                    "300": {"description": "unplaced", "genomicinfo": []}}
+        return {"1": {"accessionversion": "NC_000012.1", "slen": len(CONTIG12),
+                      "title": "Glycine max chromosome 12, glyma.Wm82.gnm4.4PTR"},
+                "2": {"accessionversion": "NC_999999.1", "slen": 1234, "title": "other"}}
+    monkeypatch.setattr(G, "_esummary", esummary)
+    monkeypatch.setattr(G, "_validate_url", lambda url: None)
+    monkeypatch.setattr(G, "_get_bytes", lambda url, limit=0: open(url, "rb").read())
+    return calls
+
+
+def test_ncbi_genes_are_placed_by_locus_on_the_same_assembly(world, monkeypatch):
+    """NCBI annotates many LIS assemblies itself, and its names separate paralogs that
+    the LIS descriptions do not (peanut CHS from STS). They carry over by overlap, on a
+    sequence checked to be the same one."""
+    calls = _fake_ncbi(world, monkeypatch)
+    sel = G.resolve({"ncbi": ["LOC100", "200", "GeneID:300", "CHS"],
+                     "collection": "Wm82.gnm4.ann1.T8TQ"})
+    assert [g.id for g in sel.genes] == [Bg]
+    text = sel.summary()
+    assert "NCBI placement (1 source gene(s)):" in text
+    assert (f"LOC100 [NCBI: leucine-rich repeat receptor kinase] {GM12}:1,001-1,300 (-) "
+            f"-> {Bg}   [70% overlap; NC_000012.1 is {GM12}: identical length, 2,000 bp, "
+            "and NCBI's title names Wm82.gnm4.4PTR]") in text
+    assert ("not placed 200 [NCBI: elsewhere]: NCBI's sequence for it is not this "
+            "assembly — NC_999999.1 (1,234 bp) is no contig of Wm82.gnm4.4PTR") in text
+    assert "not found GeneID:300: NCBI gives no genomic location for it" in text
+    assert "not found CHS: not an NCBI Gene ID" in text
+    # One request per database, whatever the number of genes.
+    assert calls == [("gene", ["100", "200", "300"]), ("nuccore", ["NC_000012.1",
+                                                                   "NC_999999.1"])]
+
+
+def test_an_ncbi_outage_is_an_error_not_a_miss(world, monkeypatch):
+    _fake_ncbi(world, monkeypatch, fail=True)
+    sel = G.resolve({"ncbi": ["LOC100"], "collection": "Wm82.gnm4.ann1.T8TQ"})
+    assert sel.error.startswith("error: NCBI esummary (gene) failed")
+    assert "Nothing was checked" in sel.error
+
+
+def test_esummary_asks_ncbi_politely(monkeypatch):
+    urls = []
+    monkeypatch.setattr(G, "_validate_url", lambda url: None)
+    monkeypatch.setattr(G, "_get", lambda url: urls.append(url) or {
+        "result": {"uids": ["7"], "7": {"name": "x"}}})
+    assert G._esummary("gene", ["7", "8"]) == {"7": {"name": "x"}}
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
+    assert q["db"] == ["gene"] and q["id"] == ["7,8"] and q["tool"] == ["legumista"]
+
+
 def test_translate_across_species_is_one_to_many_through_families(world):
     sel = G.resolve({"ids": [Bg], "collection": "Wm82.gnm4.ann1.T8TQ",
                      "translate_to": "G19833.gnm2.ann1.pScz"})

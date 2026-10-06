@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Gene selectors: a list of genes named by a short, reproducible definition.
 
-Tools that take genes (`extract_features`, `browser_link`) accept one argument, a
-selector, in one of three forms:
+Tools that take genes (`lis_gene`, `extract_features`, `browser_link`) accept one
+argument, a selector, in one of four forms:
 
     {"ids": ["GmNARK", "Glyma.12G040000"], "collection": "Wm82.gnm4.ann1.T8TQ"}
     {"region": "glyma.Wm82.gnm4.Gm12:2800000-3000000"}
     {"family": "legume.fam3.12584", "collection": "Wm82.gnm4.ann1.T8TQ"}
+    {"ncbi": ["LOC112749796"], "collection": "Tifrunner.gnm2.ann2.PVFB"}
 
 plus, on any form, `"translate_to": "<annotation>"` and `"offset": N`.
 
@@ -32,12 +33,16 @@ import os
 import re
 import sqlite3
 import threading
+import urllib.parse
 from collections import OrderedDict
 from dataclasses import dataclass, field
+
+import config
 
 from . import tools_lis
 from .results import count_phrase
 from .tools_catalog import catalog_stamp, catalog_unavailable, controller
+from .tools_native import _get, _get_bytes, _validate_url
 
 MAX_GENES = int(os.environ.get("LEGUMISTA_SELECTOR_MAX", "200"))
 FAMILY_CACHE_FILES = int(os.environ.get("LEGUMISTA_FAMILY_CACHE_MAX", "64"))
@@ -74,6 +79,7 @@ class Selection:
     error: str = ""                 # set when nothing could be resolved at all
     incomplete: bool = False        # a route that could have matched did not run
     mapping: list = field(default_factory=list)  # translation rows
+    mapping_title: str = "translation"
     direct: int = 0                 # inputs that matched a gene or model ID outright
 
     def summary(self, offset: int = 0, max_mapping: int = 50) -> str:
@@ -92,7 +98,7 @@ class Selection:
             lines.append(f"  {self.direct} input(s) matched a gene or model ID directly")
         lines += [f"  {line}" for line in self.lines]
         if self.mapping:
-            lines.append(f"  translation ({count_phrase(min(len(self.mapping), max_mapping), len(self.mapping), 'source gene(s)')}):")
+            lines.append(f"  {self.mapping_title} ({count_phrase(min(len(self.mapping), max_mapping), len(self.mapping), 'source gene(s)')}):")
             lines += [f"    {src} -> {dst or '(none)'}   [{route}]"
                       for src, dst, route in self.mapping[:max_mapping]]
         return "\n".join(lines)
@@ -381,6 +387,157 @@ def _resolve_family(family, record, index, sel):
     return genes
 
 
+# --- NCBI genes, placed by locus ------------------------------------------------------
+# NCBI Gene names a gene's location on its own RefSeq/GenBank sequence. Where that
+# sequence IS the LIS assembly (NCBI annotates many LIS genomes directly: its NC_092050.1
+# is titled "... arahy.Tifrunner.gnm2.J5K5"), the coordinates are directly comparable,
+# and NCBI's names (which tell chalcone from stilbene synthase where the LIS description
+# does not) carry over by overlap. Sameness is checked, never assumed: a sequence maps
+# to the LIS contig of identical length, and to nothing otherwise.
+EUTILS = os.environ.get("LEGUMISTA_EUTILS_URL",
+                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils").rstrip("/")
+_NCBI_ID_RE = re.compile(r"^(?:LOC|GeneID:)?(\d+)$", re.IGNORECASE)
+
+
+def _esummary(db, ids):
+    """NCBI esummary JSON for `ids` in `db`: {uid: record}. Raises on failure."""
+    url = f"{EUTILS}/esummary.fcgi?" + urllib.parse.urlencode(
+        {"db": db, "id": ",".join(ids), "retmode": "json", "tool": "legumista",
+         "email": config.contact_email()})
+    _validate_url(url)
+    doc = _get(url)
+    result = (doc or {}).get("result") or {}
+    return {uid: result[uid] for uid in result.get("uids", []) if uid in result}
+
+
+def _contig_lengths(annotation):
+    """{contig: length} for the annotation's genome, from its genome_main .fai.
+    Returns (lengths, genome_record, error_text)."""
+    ctl = controller()
+    genome = next((r for gid in annotation.get("derived_from") or []
+                   for r in ctl.collections
+                   if r["id"] == gid and r.get("type") == "genomes"), None)
+    if genome is None:
+        return None, None, f"the catalog names no genome collection for {annotation['id']}"
+    name = next((f["n"] for f in genome.get("files", [])
+                 if f["n"].endswith(".genome_main.fna.gz") and ".fai" in (f.get("i") or [])),
+                None)
+    if not name:
+        return None, genome, f"{genome['id']} publishes no indexed genome_main FASTA"
+    url = tools_lis._file_url(genome, name) + ".fai"
+    try:
+        _validate_url(url)
+        text = _get_bytes(url, 50_000_000).decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        return None, genome, f"could not read {name}.fai: {type(e).__name__}: {e}"
+    lengths = {}
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[1].isdigit():
+            lengths[parts[0]] = int(parts[1])
+    return lengths, genome, ""
+
+
+def _resolve_ncbi(inputs, record, index, sel):
+    """NCBI Gene IDs -> the genes of `record` they overlap, on a verified-same sequence."""
+    wanted = {}
+    for raw in inputs:
+        name = str(raw or "").strip()
+        match = _NCBI_ID_RE.match(name)
+        if match:
+            wanted.setdefault(match.group(1), name)
+        elif name:
+            sel.lines.append(f"not found {name}: not an NCBI Gene ID (LOC112749796, "
+                             "112749796 or GeneID:112749796); edirect(db='gene') finds them")
+    if not wanted:
+        return []
+    try:
+        genes = _esummary("gene", list(wanted))
+    except Exception as e:  # noqa: BLE001
+        sel.error = (f"error: NCBI esummary (gene) failed: {type(e).__name__}: {e}. Nothing "
+                     "was checked; retry.")
+        return []
+    places = {}
+    for uid, name in wanted.items():
+        rec = genes.get(uid) or {}
+        locs = [g for g in rec.get("genomicinfo") or [] if g.get("chraccver")]
+        if rec.get("error") or not rec:
+            sel.lines.append(f"not found {name}: NCBI Gene has no record {uid}")
+        elif not locs:
+            sel.lines.append(f"not found {name}: NCBI gives no genomic location for it")
+        else:
+            places[uid] = (name, rec, locs)
+    accessions = sorted({g["chraccver"] for _n, _r, locs in places.values() for g in locs})
+    if not accessions:
+        return []
+    try:
+        seqs = _esummary("nuccore", accessions)
+    except Exception as e:  # noqa: BLE001
+        sel.error = (f"error: NCBI esummary (nuccore) failed: {type(e).__name__}: {e}. "
+                     "Nothing was checked; retry.")
+        return []
+    by_acc = {}
+    for seq in seqs.values():
+        for key in (seq.get("accessionversion"), seq.get("caption")):
+            if key:
+                by_acc[key] = seq
+    lengths, genome, err = _contig_lengths(record)
+    if err:
+        sel.error = f"error: cannot compare NCBI's coordinates with {record['id']}: {err}."
+        return []
+    by_length = {}
+    for contig, length in lengths.items():
+        by_length.setdefault(length, []).append(contig)
+
+    found = {}
+    for uid, (name, rec, locs) in places.items():
+        label = f"{name} [NCBI: {rec.get('description') or rec.get('name') or '?'}]"
+        tried = []
+        for loc in locs:
+            acc = loc["chraccver"]
+            seq = by_acc.get(acc) or by_acc.get(acc.split(".")[0]) or {}
+            slen = int(seq.get("slen") or 0)
+            contigs = [c for c in by_length.get(slen, []) if c in index["by_contig"]]
+            if len(contigs) != 1:
+                tried.append(f"{acc} ({slen:,} bp) " + (
+                    f"matches {len(contigs)} contigs by length" if contigs else
+                    f"is no contig of {genome['id']}"))
+                continue
+            contig = contigs[0]
+            start, stop = int(loc["chrstart"]), int(loc["chrstop"])
+            lo, hi, strand = min(start, stop) + 1, max(start, stop) + 1, \
+                "-" if start > stop else "+"
+            hits = []
+            for cand in index["by_contig"][contig]:
+                if cand.start > hi:
+                    break
+                if cand.end >= lo and cand.strand == strand:
+                    shared = min(hi, cand.end) - max(lo, cand.start) + 1
+                    hits.append((cand, round(100 * shared / max(hi - lo + 1,
+                                                                cand.end - cand.start + 1))))
+            for cand, _pct in hits:
+                found.setdefault(cand.id, None)
+            same = (f"{acc} is {contig}: identical length, {slen:,} bp"
+                    + (f", and NCBI's title names {genome['id']}"
+                       if genome["id"] in (seq.get("title") or "") else ""))
+            sel.mapping.append((
+                f"{label} {contig}:{lo:,}-{hi:,} ({strand})",
+                ", ".join(c.id for c, _ in hits),
+                "; ".join(f"{pct}% overlap" for _, pct in hits) + f"; {same}" if hits
+                else f"no gene of {record['id']} overlaps it on the same strand; {same}"))
+            break
+        else:
+            sel.lines.append(f"not placed {label}: NCBI's sequence for it is not this "
+                             f"assembly — {'; '.join(tried)}. Its coordinates cannot be "
+                             f"compared with {record['id']}.")
+    sel.mapping_title = "NCBI placement"
+    if places:
+        sel.lines.append("NCBI genes are placed by locus: each maps to every gene on the "
+                         "same strand that its NCBI span overlaps (the percentage is shared "
+                         "bases over the longer, and NCBI's span includes UTRs)")
+    return [index["genes"][g] for g in found]
+
+
 def _translate_by_locus(genes, tindex, genome, sel):
     """Map genes between two annotations of one assembly by where they are.
 
@@ -502,18 +659,18 @@ def resolve(selector) -> Selection:
         return sel
     if not isinstance(selector, dict):
         sel.error = ('error: "genes" must be a selector object: {"ids": [...]}, '
-                     '{"region": "contig:start-end"} or {"family": "...", "collection": '
-                     '"..."}.')
+                     '{"region": "contig:start-end"}, {"family": "...", "collection": '
+                     '"..."} or {"ncbi": ["LOC..."], "collection": "..."}.')
         return sel
-    forms = [k for k in ("ids", "region", "family") if selector.get(k)]
+    forms = [k for k in ("ids", "region", "family", "ncbi") if selector.get(k)]
     if len(forms) != 1:
-        sel.error = ("error: a selector takes exactly one of 'ids', 'region' or 'family'"
-                     f" (got {forms or 'none'}).")
+        sel.error = ("error: a selector takes exactly one of 'ids', 'region', 'family' or "
+                     f"'ncbi' (got {forms or 'none'}).")
         return sel
     form = forms[0]
-    ids = selector.get("ids") if form == "ids" else None
+    ids = selector.get(form) if form in ("ids", "ncbi") else None
     if ids is not None and (not isinstance(ids, list) or len(ids) > MAX_GENES):
-        sel.error = (f"error: 'ids' must be a list of at most {MAX_GENES} names; use a "
+        sel.error = (f"error: '{form}' must be a list of at most {MAX_GENES} names; use a "
                      "'region' or 'family' selector for more.")
         return sel
 
@@ -528,7 +685,8 @@ def resolve(selector) -> Selection:
                             "the region's contig names no genome in the catalog") + ".")
             return sel
         collection = candidates[0]["path"]
-    hint = next((str(i) for i in ids or [] if tools_lis._QUALIFIED_GENE_RE.match(str(i))), "")
+    hint = next((str(i) for i in (ids if form == "ids" else None) or []
+                 if tools_lis._QUALIFIED_GENE_RE.match(str(i))), "")
     record, err = _annotation(collection, hint)
     if record is None:
         sel.error = err if form != "ids" or collection or hint else (
@@ -546,6 +704,8 @@ def resolve(selector) -> Selection:
     sel.record = record
     if form == "ids":
         genes = _resolve_ids(ids, record, index, sel)
+    elif form == "ncbi":
+        genes = _resolve_ncbi(ids, record, index, sel)
     elif form == "region":
         genes = _resolve_region(str(selector["region"]), record, index, sel)
     else:
@@ -576,8 +736,10 @@ def resolve(selector) -> Selection:
 SELECTOR_SCHEMA = {
     "type": "object",
     "description": ("A gene selector — exactly one of 'ids' (up to 200 names: IDs, symbols "
-                    "or superseded IDs), 'region' ('contig:start-end', 1-based) or 'family' "
-                    "(a legume.fam3 or legfed_v1_0 family id, with 'collection'). Optional: "
+                    "or superseded IDs), 'region' ('contig:start-end', 1-based), 'family' "
+                    "(a legume.fam3 or legfed_v1_0 family id, with 'collection') or 'ncbi' "
+                    "(NCBI Gene IDs such as 'LOC112749796', with 'collection': placed by "
+                    "locus when NCBI annotates the same assembly). Optional: "
                     "'collection' (the annotation), 'translate_to' (another annotation: by "
                     "locus on the same assembly, by name within a species, by family "
                     "across species) and 'offset' (paging)."),
@@ -585,6 +747,7 @@ SELECTOR_SCHEMA = {
         "ids": {"type": "array", "items": {"type": "string"}},
         "region": {"type": "string"},
         "family": {"type": "string"},
+        "ncbi": {"type": "array", "items": {"type": "string"}},
         "collection": {"type": "string"},
         "translate_to": {"type": "string"},
         "offset": {"type": "integer"},

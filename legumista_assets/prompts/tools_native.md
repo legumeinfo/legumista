@@ -242,6 +242,10 @@ so it can be reused verbatim later. Exactly one of:
   overlaps it (1-based).
 - `{"family": "legume.fam3.12584", "collection": "<annotation>"}` — that family's members
   in one annotation.
+- `{"ncbi": ["LOC112749796"], "collection": "<annotation>"}` — NCBI Gene IDs placed by
+  locus, when NCBI annotates the same assembly (checked by identical sequence length;
+  otherwise "not placed"). Each row carries NCBI's name, which can separate paralogs
+  that LIS describes alike.
 
 Add `"translate_to": "<annotation>"` to move a selection to another annotation (same
 assembly: by locus overlap, so renamed genes still map; same species: by gene name or
