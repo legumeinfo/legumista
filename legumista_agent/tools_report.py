@@ -620,10 +620,8 @@ def report_tools(allow_report: bool = False) -> list:
     return [Tool(
         name="report_data_issue",
         description=(
-            "File a data defect in the LIS Data Store or an LIS mine as a GitHub issue: a "
-            "malformed or misnamed README, a wrong or inconsistent field, a mine record "
-            "that contradicts the store. The server re-reads the field you name and "
-            "refuses if it does not say what you observed; the user confirms before "
-            "anything is filed. Not for missing files, CDS quality notes or site "
-            "configuration."),
+            "File a defect a curator would fix in LIS Data Store or mine data as a "
+            "GitHub issue. The server re-reads the named field and refuses if it "
+            "differs from what you observed; the user confirms before anything is "
+            "filed. Not for missing files, CDS notes or site configuration."),
         parameters=params, read_only=False, run=_report)]

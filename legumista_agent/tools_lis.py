@@ -1121,15 +1121,12 @@ def lis_tools() -> list:
     """Read-only tools for the LIS Data Store, served from the resident catalog."""
     return [
         _mk("lis_find",
-            "Discover data in the LIS Data Store (legume genomes/annotations/diversity/"
-            "GWAS/…) from a resident catalog — no network. Drills down: no args lists "
-            "genera; {taxon} lists that species' data types; {taxon, type} lists "
-            "collections with their synopsis, genotype and publication DOI. {query} "
-            "searches collection ids at any level, the whole catalog when no taxon is "
-            "given: use it when you hold an id or part of one. Collection names end in "
-            "an arbitrary 4-character key ('Wm82.gnm4.ann1.T8TQ') that cannot be "
-            "guessed. "
-            "Args: {taxon?, genus?, species?, type?, query?, max_results?}.",
+            "Find LIS Data Store collections in the resident catalog. No arguments: "
+            "the genera. taxon: its data types. taxon and type: its collections, with "
+            "synopsis, genotype, expression unit and publication DOI. query matches "
+            "collection ids, across the whole catalog unless taxon or type narrow it. "
+            "Ids end in an arbitrary 4-character key (Wm82.gnm4.ann1.T8TQ): take them "
+            "from here.",
             {"type": "object",
              "properties": {
                  "taxon": {"type": "string",
@@ -1152,34 +1149,22 @@ def lis_tools() -> list:
                                                 "(default 10)."}},
              "additionalProperties": False}, _find),
         _mk("lis_files",
-            "A LIS collection's full catalog record (taxon, genotype, publication or "
-            "its explicit absence, expression unit, accessions, lineage pointer) and "
-            "its files, with which ones are "
-            "RANDOMLY ACCESSIBLE over HTTP, with the exact call to read them. Answers "
-            "from the resident catalog, so it is instant and complete. Reports files "
-            "that are NOT indexed and therefore unreadable through this toolset, and "
-            "distinguishes both from a collection whose index status is UNKNOWN because "
-            "it publishes no CHECKSUM. Args: {collection} — a path from lis_find, e.g. "
-            "'Glycine/max/annotations/Wm82.gnm4.ann1.T8TQ', or a bare collection id.",
+            "Everything the catalog records about one collection (taxon, genotype, "
+            "publication or its absence, expression unit, accessions, derived_from), "
+            "then its files: which are region-readable and the call that reads each, "
+            "which are NOT INDEXED, and how the file list was obtained.",
             {"type": "object",
              "properties": {"collection": {"type": "string",
                                            "description": "Datastore path, collection "
                                                           "id, or full datastore URL."}},
              "required": ["collection"], "additionalProperties": False}, _files),
         _mk("lis_gene",
-            "Look up a gene in a LIS annotation and return its locus, its description "
-            "and ready-to-use calls for its protein/CDS sequence and gene models. "
-            "Bridges the gap that tabix_query needs coordinates, not names. Accepts an "
-            "exact ID ('Glyma.12G040000'), a curated gene symbol ('GmNARK', resolved "
-            "from the catalog), or a superseded ID ('Glyma01g00210', resolved from the "
-            "collection's synonym file where one is published); the reply says which "
-            "route resolved it, and a miss lists every route and whether it ran. A name "
-            "from a DIFFERENT assembly is not a synonym and will not resolve — use "
-            "lis_find to pick the right collection. Pass 'genes' instead of 'gene' to "
-            "list a selection — e.g. every member of a family in one annotation — one "
-            "row per gene with locus, protein length and description, paged with "
-            "the selector's "
-            "'offset'. Args: {gene, collection?} or {genes}.",
+            "One gene in a LIS annotation: gene span and coding extent, description, "
+            "and ready calls for its protein, CDS and gene models. Takes an ID, a "
+            "curated symbol or a superseded ID; the reply names the route that "
+            "resolved it, and a miss lists every route checked. An ID from another "
+            "assembly will not resolve. With genes (a selector) in place of gene: one "
+            "row per gene, with locus, protein length and description.",
             {"type": "object",
              "properties": {"gene": {"type": "string",
                                      "description": "Gene ID, mRNA ID, or curated "
@@ -1190,17 +1175,11 @@ def lis_tools() -> list:
                                                           "or id."}},
              "required": [], "additionalProperties": False}, _gene),
         _mk("lis_synteny",
-            "Syntenic blocks and whole-genome alignments between legume assemblies. With "
-            "just {genome} or {gene}, lists every partner that assembly is paired with — "
-            "including pairs stored under the OTHER genome's collection, which a "
-            "directory listing would miss. Add {partner} and optionally {region} (on "
-            "the requested genome, samtools-style) for the blocks themselves, with score "
-            "and median_Ks. Without {partner} every partner is read and the reply says "
-            "how many; blocks always put the requested genome on the left. Synteny is "
-            "published for one, usually OLD, assembly per species (soybean: Wm82.gnm2, "
-            "not gnm4); if you ask about an assembly without it, the reply names the one "
-            "that has it. Args: {genome?, gene?, partner?, region?, max_blocks?, "
-            "max_partners?}.",
+            "Synteny between LIS assemblies. With genome or gene alone: every partner "
+            "assembly, including pairs stored under the partner's collection. With "
+            "partner, and optionally a region on the requested genome: blocks with "
+            "score and median_Ks, the requested genome on the left. Usually published "
+            "for one, often older, assembly per species; the reply names it.",
             {"type": "object",
              "properties": {
                  "genome": {"type": "string",

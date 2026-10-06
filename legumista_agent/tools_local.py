@@ -52,10 +52,9 @@ def local_read_tools() -> list:
     """The read-only local tools to add to the agent's tool surface."""
     return [
         Tool(name="web_fetch", read_only=True, run=_web_fetch,
-             description="Fetch an http(s) URL and return its readable text (HTML is "
-                         "stripped to text; output is size-capped). Use for arbitrary web "
-                         "pages; for a scholarly paper prefer read_paper, which resolves the "
-                         "open-access PDF.",
+             description="Fetch an http(s) URL as readable text (HTML stripped, "
+                         "size-capped). For a paper, read_paper finds the open-access "
+                         "PDF.",
              parameters={"type": "object",
                          "properties": {"url": {"type": "string",
                                                 "description": "The http(s) URL to fetch."}},

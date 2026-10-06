@@ -999,11 +999,11 @@ def bio_tools(allow_write: bool = False) -> list:
     anything — every write is refused — so they are read-only and say so: clients use
     `readOnlyHint` to decide whether to ask the user before each call, and a prompt for
     a tool that cannot write is noise. With it they can, and are advertised as such."""
-    args_arr = {"args": {"type": "array", "items": {"type": "string"},
-                         "description": "argv for the CLI: the subcommand followed by its "
-                                        "flags/arguments, e.g. [\"view\",\"-c\",\"reads.bam\","
-                                        "\"glyma.Wm82.gnm4.Gm12:1-1000\"]. File paths are confined to the "
-                                        "workspace; regions are samtools-style (1-based)."}}
+    def args_arr(example):
+        return {"args": {"type": "array", "items": {"type": "string"},
+                         "description": f"The subcommand, then its options and arguments, "
+                                        f"e.g. {example}. Paths are confined to the "
+                                        "workspace; regions are 1-based."}}
     path = {"path": {"type": "string",
                      "description": "An indexed file: a workspace path or http(s) URL, with "
                                     "its sibling index (.fai/.bai/.csi/.tbi) present."}}
@@ -1012,43 +1012,44 @@ def bio_tools(allow_write: bool = False) -> list:
                                         "'seqid:start', or 'seqid:start-end'."}}
     return [
         _mk("samtools",
-            "Run any samtools subcommand on SAM/BAM/CRAM/FASTA (view, sort, index, depth, "
-            "coverage, flagstat, idxstats, stats, faidx, markdup, consensus, …). Args: "
-            "{args: [subcommand, ...]}. Read subcommands (view/flagstat/idxstats/stats/"
-            "depth/coverage/…) work by default; writing ones (sort/index/markdup/…) need "
-            "--allow-write. Regions are 1-based (e.g. 'glyma.Wm82.gnm4.Gm12:1000-2000').",
-            {"type": "object", "properties": {**args_arr}, "required": ["args"]},
+            "Any samtools subcommand on SAM/BAM/CRAM/FASTA, as an argv list; stdout "
+            "comes back. Read subcommands work; anything that writes a file needs a "
+            "server started with write access.",
+            {"type": "object",
+             "properties": args_arr('["view","-c","reads.bam","glyma.Wm82.gnm4.Gm12:1-1000"]'),
+             "required": ["args"]},
             lambda a: _dispatch("samtools", _SAM_READ, allow_write, a),
             read_only=not allow_write, writes=_mk_writes(_SAM_READ)),
         _mk("bcftools",
-            "Run any bcftools subcommand on VCF/BCF (view, query, stats, call, norm, "
-            "annotate, merge, index, consensus, …). Args: {args: [subcommand, ...]}. "
-            "Read subcommands (view/query/stats/…) work by default; writing ones "
-            "(call/norm/index/…) need --allow-write. Regions are 1-based.",
-            {"type": "object", "properties": {**args_arr}, "required": ["args"]},
+            "Any bcftools subcommand on VCF/BCF, as an argv list; stdout comes back. "
+            "Read subcommands work; anything that writes a file needs a server started "
+            "with write access.",
+            {"type": "object",
+             "properties": args_arr('["view","-H","-r","glyma.Wm82.gnm4.Gm12:1-1000",'
+                                    '"variants.vcf.gz"]'),
+             "required": ["args"]},
             lambda a: _dispatch("bcftools", _BCF_READ, allow_write, a),
             read_only=not allow_write, writes=_mk_writes(_BCF_READ)),
         _mk("fasta_fetch",
-            "Extract a subsequence from an indexed FASTA (.fai) — a guaranteed read-only "
-            f"convenience over `samtools faidx`. Args: {{path, region}}. Capped at {MAX_SEQ:,} "
-            "bp per call.",
+            "A sequence, or part of one, from an indexed FASTA; read-only, at most "
+            f"{MAX_SEQ:,} bp per call.",
             {"type": "object", "properties": {**path, **region},
              "required": ["path", "region"]}, _fasta_fetch),
         _mk("tabix_query",
-            "Query a bgzip+tabix feature table (GFF/GTF/BED or any tabbed genomic file): "
-            "no 'region' lists indexed contigs, a region returns the feature lines. "
-            "Read-only. Args: {path, region?, max_records?}.",
+            "Lines of a bgzip+tabix file (GFF, BED, VCF, …) over a region; with no "
+            "region, its indexed contigs.",
             {"type": "object",
              "properties": {**path, **region,
                             "max_records": {"type": "integer",
                                             "description": f"Row cap (1–{MAX_RECORDS})."}},
              "required": ["path"]}, _tabix_query),
         _mk("tabix_index",
-            "Build a bgzip+tabix index for a GFF/BED/VCF/SAM file (bgzip-compresses in "
-            "place if needed), so it becomes region-queryable. A WRITE — needs "
-            "--allow-write. Args: {path, preset: gff|bed|vcf|sam|psltbl}.",
+            "bgzip and tabix-index a file so it becomes region-readable. Writes: needs "
+            "a server started with write access.",
             {"type": "object",
-             "properties": {**path,
+             "properties": {"path": {"type": "string",
+                                     "description": "The file to compress and index: a "
+                                                    "workspace path."},
                             "preset": {"type": "string",
                                        "enum": ["gff", "bed", "vcf", "sam", "psltbl"],
                                        "description": "Column layout of the file: gff, "

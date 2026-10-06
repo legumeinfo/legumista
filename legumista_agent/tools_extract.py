@@ -497,10 +497,9 @@ def extract_tools(allow_write: bool = False) -> list:
     return [Tool(
         name="extract_features",
         description=(
-            "Strand-correct sequence for a gene selection: protein, cds, mrna, gene, "
-            "upstream, downstream, utr5 or utr3. Takes a selector ({ids}, {region} or "
-            "{family}; up to 200 genes). Handles strand, coordinates and isoforms; headers "
-            "carry locus and source. Large output needs --allow-write (written to a "
-            "workspace FASTA + BED); otherwise the reply says how much it left out."),
+            "Strand-correct sequence for a gene selection (up to 200 genes): protein, "
+            "cds, mrna, gene, upstream, downstream, utr5 or utr3. Headers carry locus "
+            "and source. Large output needs write access, to land in workspace files; "
+            "otherwise the reply says what it left out."),
         parameters=params, read_only=not allow_write, run=run,
         writes=lambda a: allow_write and not a.get("dry_run"))]

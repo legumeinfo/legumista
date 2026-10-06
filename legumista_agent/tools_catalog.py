@@ -510,15 +510,9 @@ def catalog_tools() -> list:
     """Whole-store tools, available only when a catalog is configured."""
     return [
         _mk("lis_survey",
-            "Survey what exists across the WHOLE LIS Data Store from a resident "
-            "catalog: genera and their collection counts, the data types available "
-            "for a species, or — with 'needs' — which species hold several data "
-            "types at once. Use this for questions about coverage and absence "
-            "('which species have both diversity and expression data?'), which "
-            "lis_find cannot answer because crawling only finds what is present. "
-            "Names are resolved (Latin, common name or abbreviation), and an unknown "
-            "'needs' type is rejected rather than answered with a zero. "
-            "Args: {taxon?, needs?}.",
+            "Coverage across the whole Data Store: genera and their counts, a species' "
+            "data types, or with needs the species that hold every one of several "
+            "types. For questions of coverage and absence: a zero here is a finding.",
             {"type": "object",
              "properties": {
                  "taxon": {"type": "string",
@@ -530,12 +524,9 @@ def catalog_tools() -> list:
                                           "e.g. ['diversity','expression']."}},
              "additionalProperties": False}, _survey),
         _mk("lis_lineage",
-            "Trace a LIS collection back through what it was derived from, and "
-            "return every publication the result depends on. An annotation carries "
-            "its own DOI and its genome's; this walks the chain and de-duplicates, "
-            "so 'cite everything this rests on' is one call. Each DOI carries its "
-            "retraction status. "
-            "Args: {collection} — an id like 'Wm82.gnm4.ann1.T8TQ' or a full path.",
+            "A collection's derived_from chain and every publication the result rests "
+            "on, de-duplicated, with retraction status. Says when the collection has "
+            "no publication of its own.",
             {"type": "object",
              "properties": {"collection": {"type": "string",
                                            "description": "Collection id or path."}},

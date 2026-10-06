@@ -212,12 +212,10 @@ def verify_tools() -> list:
     return [Tool(
         name="verify_ids",
         description=(
-            "Check the identifiers in a draft answer before you send it: DOIs (exists? "
-            "retracted? does the claimed title match?), fully qualified LIS gene IDs, LIS "
-            "collection IDs, and NCBI GCA_/GCF_ assembly accessions. Pass the draft as "
-            "'text' (IDs are extracted) and/or explicit lists; pass 'citations' as "
-            "[{doi, title}] to catch a real DOI paired with the wrong paper. Returns one "
-            "verdict per ID: FOUND, NOT FOUND, MISMATCH, RETRACTED or UNCHECKED."),
+            "Check a draft's identifiers before answering: DOIs (exists, retracted, "
+            "title matches), fully qualified LIS gene IDs, LIS collection IDs, "
+            "GCA_/GCF_ accessions. One verdict each: FOUND, NOT FOUND, MISMATCH, "
+            "RETRACTED or UNCHECKED."),
         read_only=True, run=run,
         parameters={"type": "object", "additionalProperties": False, "properties": {
             "text": {"type": "string", "description": "Draft text to extract IDs from."},

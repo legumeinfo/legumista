@@ -896,37 +896,34 @@ def native_tools() -> list:
          "max_results": {"type": "integer",
                          "description": "Max hits to return, 1–25 (default 8)."}}
     return [
-        _mk("web_search", "Search the open web (DuckDuckGo, keyless) and return "
-            "title/URL/snippet per hit. Use for non-bibliographic context (a lab site, a "
-            "data portal, a news item). Never cite a paper from here — confirm it via "
-            "paper_search/openalex_by_doi to get a real DOI first.",
+        _mk("web_search", "Keyless web search (DuckDuckGo): title, URL and snippet per "
+                          "hit, for what the scholarly indexes miss (lab sites, "
+                          "portals, software). Never cite a paper from it; confirm it "
+                          "with paper_search or openalex_by_doi.",
             {"type": "object", "properties": q, "required": ["query"],
              "additionalProperties": False}, _web_search),
-        _mk("openalex_by_doi", "The verification path for one work, by DOI: its full "
-            "abstract, DOI/PMID/PMCID, work type, open-access status, citation counts, and "
-            "retraction status checked against both OpenAlex and Crossref. A DOI OpenAlex "
-            "lacks is checked at Crossref and doi.org, so 'this DOI does not exist' and "
-            "'not indexed here' stay distinct. Args: {doi}.",
+        _mk("openalex_by_doi", "One work by DOI: full abstract, DOI/PMID/PMCID, type, "
+                               "open-access status, citation count, and retraction "
+                               "status from OpenAlex and Crossref. A DOI OpenAlex "
+                               "lacks is checked at Crossref and doi.org, so 'does not "
+                               "exist' and 'not indexed' stay distinct.",
             {"type": "object",
              "properties": {"doi": {"type": "string",
                                     "description": "DOI, with or without the "
                                                    "https://doi.org/ prefix."}},
              "required": ["doi"]},
             _openalex_by_doi),
-        _mk("europepmc_search", "Search Europe PMC alone, with its own query syntax "
-            "(e.g. ORGANISM:, SRC:AGR for Agricola). paper_search already includes Europe "
-            "PMC — use this only for field queries. Preprints are included and flagged. "
-            "Args: {query, max_results?}.",
+        _mk("europepmc_search", "Europe PMC alone, in its own query syntax (ORGANISM:, "
+                                "SRC:AGR for Agricola). paper_search already covers "
+                                "Europe PMC: use this only for field queries. "
+                                "Preprints are included and flagged.",
             {"type": "object", "properties": q, "required": ["query"]}, _europepmc_search),
-        _mk("read_paper", "Download an open-access PDF (by DOI or direct URL) and "
-            "extract its text, labelled by page. Args: {doi?, url?, pattern?, "
-            "ignore_case?, max_pages?, start_page?, context?}. Provide one of doi/url. "
-            "With `pattern` (a regex) it returns only the matching lines, each with its "
-            "page ('p.N:') and `context` lines — e.g. pull an N50, '2n=', or an "
-            "accession without loading the whole paper; without it, the full text "
-            "(default 30 pages; a pattern search covers every page). A read that reaches "
-            "the size cap ends with 'continue with start_page=N'. Cite passages by page. "
-            "Image-only PDFs yield nothing.",
+        _mk("read_paper", "Open-access full text by DOI or PDF URL, labelled by page "
+                          "(cite passages as p. N). With pattern (a regex) only "
+                          "matching lines come back, with page and context, from every "
+                          "page; without it, up to 30 pages, and a capped read names "
+                          "the start_page to continue from. Image-only PDFs yield "
+                          "nothing.",
             {"type": "object",
              "properties": {"doi": {"type": "string",
                                     "description": "DOI of an open-access work."},
@@ -945,40 +942,36 @@ def native_tools() -> list:
                                         "description": "Lines of context around each pattern "
                                                        "hit, 0-5 (default 1)."}}},
             _read_paper),
-        _mk("ncbi_datasets", "Run the NCBI `datasets` CLI (genome/gene/taxonomy data). "
-            "Args: {args: [string,...]} — the subcommand + flags, e.g. "
-            "[\"summary\",\"genome\",\"taxon\",\"Glycine max\",\"--as-json-lines\"]. "
-            "Requires the CLI to be installed locally.",
+        _mk("ncbi_datasets", "The NCBI datasets CLI as an argv list, read-only "
+                             "subcommands only (summary, taxonomy, version). Needs the "
+                             "CLI installed.",
             {"type": "object",
              "properties": {"args": {"type": "array", "items": {"type": "string"},
                                      "description": "The datasets subcommand and flags, "
                                                     "e.g. ['summary', 'genome', 'taxon', "
                                                     "'Glycine max', '--as-json-lines']."}},
              "required": ["args"]}, _ncbi_datasets),
-        _mk("ncbi_assembly_status", "Does a reference genome exist for a taxon, and at "
-            "what quality? Returns a table (accession, assembly level, contig N50, "
-            "date, BioProject, organism), most complete first, at most 50 rows; the "
-            "header gives the total when there are more. Args: {taxon}. Requires the "
-            "NCBI `datasets` CLI.",
+        _mk("ncbi_assembly_status", "Public NCBI assemblies for a taxon, most complete "
+                                    "first: accession, assembly level, contig N50, "
+                                    "date, BioProject, organism. At most 50 rows, with "
+                                    "the total. Needs the datasets CLI.",
             {"type": "object",
              "properties": {"taxon": {"type": "string",
                                       "description": "Scientific name (e.g. 'Glycine "
                                                      "max') or NCBI taxid."}},
              "required": ["taxon"]}, _ncbi_assembly_status),
-        _mk("sra_runs", "Is there public sequencing data for X? Searches the NCBI SRA "
-            "and returns runs (accession, platform/model, spots, bases, layout, "
-            "organism); the header gives the search's total when more records matched "
-            "than are shown. Args: {query, retmax?}. Requires NCBI EDirect.",
+        _mk("sra_runs", "SRA runs for an Entrez term: accession, platform, spots, "
+                        "bases, layout, organism, with the total. A taxon term also "
+                        "finds runs of associated organisms (symbionts, pathogens): "
+                        "check the organism column. Needs EDirect.",
             {"type": "object",
              "properties": {"query": {"type": "string",
                                       "description": "Entrez search term, e.g. 'Glycine "
                                                      "max'."},
                             "retmax": {"type": "integer", "description": "1–200 (default 20)"}},
              "required": ["query"]}, _sra_runs),
-        _mk("edirect", "Query NCBI Entrez via EDirect: esearch on a database piped to "
-            "esummary/efetch. Args: {db, query, action?(esummary|efetch), format?, "
-            "retmax?}. e.g. {db:'assembly', query:'Arachis hypogaea[Organism]'}. "
-            "Requires EDirect installed locally.",
+        _mk("edirect", "Entrez through EDirect: esearch on one database, piped to "
+                       "esummary (default) or efetch. Needs EDirect.",
             {"type": "object",
              "properties": {"db": {"type": "string",
                                    "description": "Entrez database, e.g. 'sra', "
@@ -994,14 +987,11 @@ def native_tools() -> list:
                                                       "'runinfo', 'fasta', 'docsum'."},
                             "retmax": {"type": "integer", "description": "1–200 (default 20)"}},
              "required": ["db", "query"]}, _edirect),
-        _mk("paper_search", "Broad literature search across OpenAlex, Crossref and "
-            "Europe PMC, run in parallel and merged by reciprocal rank (deduplicated by "
-            "DOI/PMID). The main discovery tool. Each hit shows DOI/PMID/PMCID, flags "
-            "RETRACTED/EXPRESSION OF CONCERN from source metadata, and the footer says "
-            "which sources answered — a PARTIAL RESULTS header means one failed. "
-            "Args: {query, max_results?, from_year?, to_year?, include_preprints?}. "
-            "include_preprints also pulls bioRxiv/medRxiv posted-content (unreviewed; "
-            "off by default).",
+        _mk("paper_search", "Literature search over OpenAlex, Crossref and Europe PMC "
+                            "in parallel, merged and de-duplicated by DOI/PMID. Hits "
+                            "are flagged RETRACTED, EXPRESSION OF CONCERN or PREPRINT; "
+                            "a PARTIAL RESULTS header means a source failed. Preprints "
+                            "are excluded unless include_preprints.",
             {"type": "object",
              "properties": {**q,
                             "max_results": {"type": "integer",

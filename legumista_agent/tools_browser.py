@@ -423,8 +423,7 @@ def browser_tools() -> list:
     return [Tool(
         name="browser_link",
         description=(
-            "A link that opens genes or a region in an LIS JBrowse 2 instance, with the "
-            "gene models track and the genes highlighted (or as an inline track); or a "
-            "dotplot of two genomes. Takes a selector ({ids}, {region}, {family}) or a "
-            "'region'. Says when no instance serves the assembly. Builds a URL only."),
+            "A link that opens genes or a region in an LIS JBrowse 2 instance (gene "
+            "models, genes highlighted or as their own track), or a dotplot of two "
+            "genomes. Builds a URL only; says when no instance serves the assembly."),
         parameters=params, read_only=True, run=run)]

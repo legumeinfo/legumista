@@ -892,29 +892,25 @@ def _marker_position(args) -> str:
 # --- registry -------------------------------------------------------------------------
 _GENE_ARG = {
     "gene": {"type": "string",
-             "description": "Gene identifier, e.g. 'Glyma.12G040000' or the qualified "
-                            "'glyma.Wm82.gnm4.ann1.Glyma.12G040000'. Matched with "
-                            "InterMine LOOKUP, so either form works."},
+             "description": "Gene ID, bare ('Glyma.12G040000') or fully qualified."},
     "mine": {"type": "string",
-             "description": f"Mine to query (default {MINE!r}), e.g. 'glycinemine', "
-                            "'phaseolusmine', 'legumemine'."},
+             "description": f"Mine to query (default {MINE!r}); a genus mine such as "
+                            "'glycinemine' holds only its genus."},
     "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
 }
 _ASSEMBLY_ARGS = {
     "assembly": {"type": "string",
-                 "description": "Narrow to one assembly, e.g. 'gnm4'. A bare gene name "
-                                "matches every assembly (gnm2/gnm4/gnm6) — different loci."},
-    "annotation": {"type": "string", "description": "Narrow to one annotation, e.g. 'ann1'."},
+                 "description": "Only the gene's copy on this assembly, e.g. 'gnm4': a bare "
+                                "name matches every assembly that has it."},
+    "annotation": {"type": "string",
+                   "description": "Only the gene's copy in this annotation, e.g. 'ann1'."},
 }
 
 
 _TAXON_ARG = {
     "taxon": {"type": "string",
-              "description": "Species whose mine to query, e.g. 'Glycine max', "
-                             "'soybean' or 'phavu' (common names and abbreviations are "
-                             "resolved through the catalog). Routes to <genus>mine; a "
-                             "species whose genus has no mine is reported as such "
-                             "without a request."},
+              "description": "Species or genus whose mine to query: Latin name, common "
+                             "name or abbreviation ('Glycine max', 'soybean', 'glyma')."},
     "mine": {"type": "string", "description": "Explicit mine name; overrides 'taxon'."},
     "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
 }
@@ -932,56 +928,40 @@ def mine_tools() -> list:
     """Read-only, per-question tools over a LIS InterMine instance."""
     return [
         _mk("legumemine_gene_proteins",
-            "Protein records for a gene from the LIS mine: protein identifier, length "
-            "(aa) and molecular weight. Use when you need the protein a gene encodes, or "
-            "to confirm a sequence length. For the actual sequence, use lis_gene + "
-            "fasta_fetch against the Data Store instead.",
+            "A gene's protein records: identifier, length (aa), molecular weight. For "
+            "the sequence itself, use lis_gene's fasta_fetch call.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_proteins),
         _mk("legumemine_gene_families",
-            "Gene family assignments for a gene (e.g. 'Legume.fam3.10524'), with family "
-            "size and description. Families group homologs across species, paralogs "
-            "included, so membership is not an orthology call; list a family's members "
-            "with legumemine_gene_family_members. The Data Store ships family "
-            "assignments as an UNINDEXED .gfa.tsv.gz that no tool can read, so the mine "
-            "is the only way to get them.",
+            "A gene's family assignments (legume.fam3, legfed_v1_0), with family size "
+            "and description. Families hold paralogs: membership is homology, not "
+            "orthology.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_families),
         _mk("legumemine_gene_ontology",
-            "Ontology annotations for a gene — GO terms and other ontologies — as "
-            "identifier, term name and source ontology. Use for 'what does this gene do?' "
-            "when you want curated terms rather than a free-text description.",
+            "A gene's ontology annotations (GO and others): term ID, name, ontology.",
             {**_GENE_ARG, **_ASSEMBLY_ARGS}, _gene_ontology),
         _mk("legumemine_gene_expression",
-            "Expression values for a gene across samples, highest first, with the sample, "
-            "its description (tissue/treatment), the source study and that study's unit "
-            "(TPM, FPKM, ...). Values are comparable only within one study; pass 'source' "
-            "to restrict to one. One gene can have hundreds of values, so results are "
-            "capped and the total is reported.",
+            "A gene's expression values across samples, highest first: sample, its "
+            "description, the study, and that study's unit. Compare values only within "
+            "one study ('source' restricts to one). Capped, with the total.",
             {**_GENE_ARG,
              "source": {"type": "string",
                         "description": "Restrict to one expression study (the source "
                                        "identifier shown in a previous result)."}},
             _gene_expression),
         _mk("legumemine_gene_symbol",
-            "Resolve a gene SYMBOL (e.g. 'GmNARK', 'PvSYMRK') to its gene identifier, "
-            "full name, functional synopsis and the DOIs behind the claim. Answered from "
-            "the resident curated catalog when it knows the symbol (instant, offline, "
-            "fully-qualified id) and from the mine otherwise; the reply says which. Use "
-            "this FIRST when you have a symbol rather than an ID — lis_gene and the other "
-            "mine tools match identifiers only. Feed the DOIs to openalex_by_doi / "
-            "read_paper.",
+            "A gene symbol (GmNARK, PvSYMRK) to its gene IDs, full name, synopsis and "
+            "DOIs: from the catalog's curated symbols when it has the symbol, else "
+            "from the mine; the reply says which. The other gene tools match "
+            "identifiers, not symbols.",
             {"symbol": {"type": "string",
                         "description": "Gene symbol, e.g. 'GmNARK'. Case-insensitive, exact."},
              **_TAXON_ARG}, _gene_symbol, required=("symbol",)),
         _mk("legumemine_gene_family_members",
-            "Members of a gene's family across legume species — the homologs of a gene, "
-            "for 'does my crop have a counterpart of this gene?'. Give 'gene' (its family "
-            "is looked up first) or 'family'; add 'target_taxon' (e.g. 'Cicer arietinum' "
-            "or 'chickpea') to list only that species' members, and 'member_assembly'/"
-            "'member_annotation' to list only one genome's ('assembly'/'annotation' pick "
-            "the gene's copy, as elsewhere). A long list is paged: the reply "
-            "names the 'offset' that continues it. Family membership is evidence of "
-            "homology, NOT orthology: families include paralogs. Queries the pan-legume "
-            "mine, where families span genera.",
+            "A gene family's members across legumes, given a gene or a family. "
+            "target_taxon keeps one species, member_assembly/member_annotation one "
+            "genome; assembly/annotation pick the gene's own copy. Long lists page "
+            "with offset. Members are homologs, paralogs included: not an orthology "
+            "call.",
             {"gene": {"type": "string", "description": "Gene identifier, e.g. 'Glyma.12G040000'."},
              "family": {"type": "string",
                         "description": "Gene family identifier, e.g. 'Legume.fam3.10524'. "
@@ -1008,13 +988,10 @@ def mine_tools() -> list:
              **_ASSEMBLY_ARGS},
             _gene_family_members, required=()),
         _mk("legumemine_gene_search",
-            "Find genes, or gene families, by what their DESCRIPTION says — 'chalcone "
-            "synthase', 'nodulation receptor kinase' — the way in when you know a "
-            "function but no gene ID. Matches description text only, never IDs. "
-            "search='families' returns family IDs for a family selector or "
-            "legumemine_gene_family_members. Descriptions are automated and transferred "
-            "from homologs, so a hit is a candidate, not a function; close paralogs "
-            "share them. Queries the pan-legume mine.",
+            "Genes, or with search='families' gene families, whose description "
+            "contains a phrase: the way from a function to genes. Matches descriptions "
+            "only, never IDs. Descriptions are transferred from homologs, so a hit is "
+            "a candidate, and close paralogs share them.",
             {"query": {"type": "string",
                        "description": "Description text, matched case-insensitively as a "
                                       "substring, e.g. 'chalcone synthase'. Use full "
@@ -1033,27 +1010,22 @@ def mine_tools() -> list:
                                        "short (it names the offset to use)."}},
             _gene_search, required=("query",)),
         _mk("lis_trait_qtls",
-            "QTLs mapped for a trait: QTL name, linkage group, LOD, marker R2 and the "
-            "study it came from. The breeder's entry point for 'what's known about the "
-            "genetics of trait X?'. REQUIRES 'taxon' — QTL data exists only in the "
-            "per-species mines, not the pan-legume one.",
+            "QTLs mapped for a trait: QTL, linkage group, LOD, marker R2, study. Needs "
+            "taxon: QTL data lives only in genus mines.",
             {"trait": {"type": "string",
                        "description": "Trait name or fragment, e.g. 'seed protein', "
                                       "'days to maturity'. Substring match."},
              **_TAXON_ARG}, _trait_qtls, required=("trait",)),
         _mk("lis_trait_gwas",
-            "GWAS associations for a trait, most significant first: marker name, p-value "
-            "and source study. Use alongside lis_trait_qtls for association evidence. The "
-            "study identifiers match the Data Store's gwas/ collections, so lis_files can "
-            "fetch the underlying data. REQUIRES 'taxon'.",
+            "GWAS associations for a trait, most significant first: marker, p-value, "
+            "study. Study ids match Data Store gwas collections, which lis_files "
+            "reads. Needs taxon.",
             {"trait": {"type": "string",
                        "description": "Trait name or fragment, e.g. 'seed protein'."},
              **_TAXON_ARG}, _trait_gwas, required=("trait",)),
         _mk("lis_marker_position",
-            "Physical position of a genetic marker on each assembly that carries it — for "
-            "marker-assisted selection, where the coordinate must match the breeder's own "
-            "reference. One marker sits at different positions in gnm1/gnm2/gnm4. "
-            "REQUIRES 'taxon'.",
+            "A marker's physical position on each assembly that carries it; positions "
+            "differ between assemblies. Needs taxon.",
             {"marker": {"type": "string",
                         "description": "Marker name, e.g. 'ss715614263'."},
              **_TAXON_ARG}, _marker_position, required=("marker",)),

@@ -757,21 +757,21 @@ def resolve(selector) -> Selection:
 
 SELECTOR_SCHEMA = {
     "type": "object",
-    "description": ("A gene selector — exactly one of 'ids' (up to 200 names: IDs, symbols "
-                    "or superseded IDs), 'region' ('contig:start-end', 1-based), 'family' "
-                    "(a legume.fam3 or legfed_v1_0 family id, with 'collection') or 'ncbi' "
-                    "(NCBI Gene IDs such as 'LOC112749796', with 'collection': placed by "
-                    "locus when NCBI annotates the same assembly). Optional: "
-                    "'collection' (the annotation), 'translate_to' (another annotation: by "
-                    "locus on the same assembly, by name within a species, by family "
-                    "across species) and 'offset' (paging)."),
+    "description": ("A gene selector: exactly one of ids, region, family or ncbi. "
+                    "guide('genes') has the rules."),
     "properties": {
-        "ids": {"type": "array", "items": {"type": "string"}},
-        "region": {"type": "string"},
-        "family": {"type": "string"},
-        "ncbi": {"type": "array", "items": {"type": "string"}},
-        "collection": {"type": "string"},
-        "translate_to": {"type": "string"},
-        "offset": {"type": "integer"},
+        "ids": {"type": "array", "items": {"type": "string"},
+                "description": "Up to 200 gene IDs, symbols or superseded IDs."},
+        "region": {"type": "string",
+                   "description": "'contig:start-end', 1-based; genes overlapping it."},
+        "family": {"type": "string",
+                   "description": "A legume.fam3 or legfed_v1_0 family id; needs "
+                                  "collection."},
+        "ncbi": {"type": "array", "items": {"type": "string"},
+                 "description": "NCBI Gene IDs (LOC…), placed by locus; needs collection."},
+        "collection": {"type": "string", "description": "The annotation collection."},
+        "translate_to": {"type": "string",
+                         "description": "Another annotation to move the selection to."},
+        "offset": {"type": "integer", "description": "Genes to skip, for paging."},
     },
 }
