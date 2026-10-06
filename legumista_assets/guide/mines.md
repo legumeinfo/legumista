@@ -1,7 +1,24 @@
 # mines — the LIS InterMine tools, any mine: mine_search, mine_gene_*, mine_trait_*, mine_marker_position
 
-Every reply names the mine that answered.
+Every tool here queries any LIS mine and every reply names the mine that answered.
+`taxon` picks a species' or genus's own mine, `mine` names one, and with neither
+`legumemine` answers. `mine_gene_family_members` is the exception: no routing `taxon`,
+since it is cross-species by purpose. `target_taxon` filters rows; it never picks a mine.
 
+## Which mine
+
+| | `legumemine` | a genus mine (`arachismine`, `glycinemine`, …) |
+|---|---|---|
+| Genes, descriptions, families | every legume; the most annotations of each genus | its genus only, fewer annotations |
+| Expression | yes | most; none in `lupinusmine`, `aeschynomenemine`, `lensmine` |
+| Curated symbols | yes | `glycinemine` only |
+| QTL, GWAS, markers | none | `arachismine`, `glycinemine`, `phaseolusmine`, `vignamine` only |
+| Gene ID spelling | the Data Store's | may differ: ArachisMine writes `…ann1.6J3HHE` for `…ann1.Arahy.6J3HHE` |
+
+Counts differ between mines for the same question, and a genus mine's counts are the
+ones its web pages show. Name the mine with any count you report.
+
+## Reading a reply
 - **A bare gene name matches every assembly that has it** (`Glyma.12G040000` in gnm2,
   gnm4, gnm6). Read the assembly column and pass `assembly` to pick one.
 - **Empty results say which case applies**: "no gene matching X" (wrong ID, assembly or

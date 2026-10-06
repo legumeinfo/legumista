@@ -76,8 +76,9 @@ started to allow it. `guide(topic)` has the detail behind each tool family.
   A parent's DOI is the parent's, not the collection's.
 - **Synteny** is usually published for one, often older, assembly per species
   (soybean's is gnm2): `lis_synteny` names the assembly that has it.
-- **Mines**: `legumemine` spans all legumes and holds genes, families and expression.
-  QTL, GWAS and marker data live only in genus mines, so those tools need `taxon`.
+- **Mines**: every `mine_*` tool queries any LIS mine. `legumemine`, the default, spans
+  all legumes with the most annotations; `taxon` picks a genus mine, which adds QTL,
+  GWAS and markers and may spell IDs differently. `guide("mines")` says what each holds.
 - **NCBI** annotates some LIS assemblies directly; its RefSeq chromosomes then name the
   LIS assembly in their titles. A selector's `ncbi` form places NCBI Gene IDs onto LIS
   genes, after checking the sequences are the same.
