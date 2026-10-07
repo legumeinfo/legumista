@@ -418,11 +418,10 @@ _TITLES = {"protein records": "Proteins", "gene family assignments": "Gene famil
 
 
 # --- both mines -------------------------------------------------------------------------
-# legumemine holds every genus, but a genus's own mine is not a subset of it: glycinemine
-# holds ten Glycine expression studies to legumemine's eight, arachismine more Arachis
-# expression values, and every genus mine its own publications, breeding data and gene-ID
-# spellings. Agents asked about one species queried legumemine alone, so a reply about one
-# genus says where its other mine is.
+# A genus with its own mine is covered twice: by legumemine and by that mine, and neither
+# holds everything the other does. Agents asked about one species queried legumemine
+# alone, so every reply about one genus ends with a tip to make the same query in the
+# other mine, compare, and present both.
 _QUALIFIED = re.compile(r"^(?P<abbrev>[a-z]{4,6})\.(?P<stem>[A-Za-z0-9_-]+\.gnm\d+\.ann\d+)\."
                         r"(?P<name>.+)$")
 
@@ -463,25 +462,46 @@ def _subject_genus(args, rows=(), genus_col=None) -> str:
     return ""
 
 
-def _both_mines_note(args, mine, rows=(), genus_col=None) -> str:
-    """Name the other mine that holds this genus, when the query is about one genus and
-    that genus has a mine of its own."""
+def _has_class(mine: str, cls: str):
+    """Does this mine's data model have class `cls`? True, False, or None when the model
+    could not be read. Mines differ: legumemine has no QTL, GWASResult or GeneticMarker
+    class, and only legumemine and glycinemine have GeneFunction."""
+    def compute():
+        try:
+            url = f"{_service(mine)}/model?format=json"
+            _validate_url(url)
+            doc = _get(url, accept="application/json")
+            classes = set(((doc or {}).get("model") or {}).get("classes") or {})
+        except Exception:  # noqa: BLE001 - an unreadable model means "do not suggest"
+            return None, False
+        return (classes or None), bool(classes)
+    classes = _cached(("model", mine), compute)
+    return None if classes is None else cls in classes
+
+
+def _other_mine_tip(args, mine, root=None, rows=(), genus_col=None) -> str:
+    """The tip that ends a reply about one genus: the other mine that covers it can answer
+    the same query, so make it there too, compare, and present both. Only when that mine
+    exists and its data model has the class this query reads (`root`); never a guess."""
     genus = _subject_genus(args, rows, genus_col)
     if not genus or not genus[0].isupper() or genus.isupper():
         return ""
     genus_mine = genus.lower() + "mine"
-    known = _known_mines()
-    if known is None or (genus_mine not in known and not _mine_exists(genus_mine)):
-        return ""
     if mine == MINE:
-        return (f"{genus} also has its own mine, {genus_mine}. Its expression studies, "
-                f"publications, breeding data and gene-ID spellings can differ from "
-                f"{MINE}'s: query it too (mine='{genus_mine}') and report each result with "
-                "its mine.")
-    if mine == genus_mine:
-        return (f"{MINE} also holds {genus}, and can hold annotations {genus_mine} lacks: "
-                f"query it too (mine='{MINE}') and report each result with its mine.")
-    return ""
+        other = genus_mine
+    elif mine == genus_mine:
+        other = MINE
+    else:
+        return ""
+    known = _known_mines()
+    if known is None or (other not in known and not _mine_exists(other)):
+        return ""
+    if root and root != "Gene" and _has_class(other, root) is not True:
+        return ""
+    where = (f"{genus} also has its own mine, {other}" if other == genus_mine
+             else f"{other} also covers {genus}")
+    return (f"Tip: {where}. Make this same query there (mine='{other}'), then compare the "
+            "two results and present both to the user, each with its mine.")
 
 
 def _other_spellings(gene: str) -> list:
@@ -501,13 +521,13 @@ def _other_spellings(gene: str) -> list:
 def _execute(args, title, view, constraints, sort=None, assembly_col=1,
              subject_key="gene", subject_hint="a gene identifier such as 'Glyma.12G040000'",
              require_taxon=False, footer=None, on_empty=None, pageable=False,
-             both_mines=True, genus_col=None):
+             genus_col=None):
     """Run one PathQuery and render it. A `pageable` tool honours args['offset'], so
     `sort` must then order the rows completely: a tie lets a row move between pages.
 
-    `both_mines` adds the note naming the subject genus's other mine (not for the breeding
-    tools, whose data exists only in genus mines). A gene ID the mine does not know as
-    written is retried in its other spelling, and the reply says so."""
+    Every reply about one genus ends with the tip to make the same query in that genus's
+    other mine, when that mine can answer it (_other_mine_tip). A gene ID the mine does
+    not know as written is retried in its other spelling, and the reply says so."""
     mine, mine_err = _resolve_mine(args, require_taxon)
     if mine_err:
         return mine_err
@@ -532,7 +552,7 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
                 rows, cols, xml = alt_rows, alt_cols, alt_xml
                 respelled = f"{mine} spells {subject} as {alt}; these rows are for that ID."
                 break
-    both = both_mines and not require_taxon
+    root = view[0].split(".", 1)[0]
     if not rows and offset:
         total = _count(mine, xml)
         return (f"{title} — {subject} [mine: {mine}]: no rows at offset={offset}; "
@@ -541,8 +561,8 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
     if not rows and on_empty is not None:
         # The caller explains its own zero (see _render_empty) instead of the generic text.
         out = on_empty(mine, subject)
-        extra = _both_mines_note(args, mine) if both else ""
-        return out + ("\n\n" + extra if extra else "")
+        tip = _other_mine_tip(args, mine, root)
+        return out + ("\n\n" + tip if tip else "")
     capped = len(rows) >= size
     total = (_count(mine, xml) if len(rows) >= min(size, COUNT_THRESHOLD)
              else offset + len(rows))
@@ -553,10 +573,9 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
         out = out.replace("\n", f"\n{respelled}\n", 1)
     # A footer names the next tool the rows unlock. It goes in the OUTPUT rather than a
     # docstring because the hand-off is only discoverable once you are holding the values.
-    extras = [footer(rows) if footer and rows else ""]
-    if both:
-        complete = total is not None and offset + len(rows) >= total
-        extras.append(_both_mines_note(args, mine, rows if complete else (), genus_col))
+    complete = total is not None and offset + len(rows) >= total
+    extras = [footer(rows) if footer and rows else "",
+              _other_mine_tip(args, mine, root, rows if complete else (), genus_col)]
     extras = [x for x in extras if x]
     if extras:
         out = _cap(out + "\n\n" + "\n".join(extras))
@@ -697,7 +716,7 @@ def _gene_symbol(args) -> str:
          "GeneFunction.synopsis", "GeneFunction.publications.doi"],
         [("GeneFunction.symbol", "=", (args.get("symbol") or "").strip())],
         assembly_col=None, subject_key="symbol",
-        subject_hint="a gene symbol such as 'GmNARK' or 'PvSYMRK'", both_mines=False)
+        subject_hint="a gene symbol such as 'GmNARK' or 'PvSYMRK'")
 
 
 _FAMILY_CAVEAT = (
@@ -821,7 +840,8 @@ def _gene_family_members(args) -> str:
         assembly_col=None, subject_key="family",
         subject_hint="a gene family identifier such as 'Legume.fam3.10524'",
         on_empty=explain, pageable=True, genus_col=2)
-    return prefix + out + "\n\n" + _FAMILY_CAVEAT
+    body, tip_sep, tip = out.partition("\n\nTip: ")
+    return prefix + body + "\n\n" + _FAMILY_CAVEAT + (tip_sep + tip if tip_sep else "")
 
 
 # --- search by description -------------------------------------------------------------
@@ -994,10 +1014,10 @@ def _keyword_search(args) -> str:
                        "match."]
     if any(_BRACKET_RE.search(d) for d in descriptions):
         footer.append(_BRACKET_NOTE)
-    other = _both_mines_note(args, mine, rows if offset + len(hits) >= total else (),
-                             genus_col=3)
-    if other:
-        footer.append(other)
+    tip = _other_mine_tip(args, mine, None, rows if offset + len(hits) >= total else (),
+                          genus_col=3)
+    if tip:
+        footer.append(tip)
     return _cap(out + "\n\n" + "\n".join(footer))
 
 

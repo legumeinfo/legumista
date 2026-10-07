@@ -489,7 +489,10 @@ def test_a_species_with_a_mine_still_routes_there(mine, catalog):
                                                    "taxon": "Glycine max"})
     assert "[mine: phaseolusmine]" in M._trait_qtls({"trait": "protein",
                                                      "taxon": "Phaseolus vulgaris"})
-    assert all("/glycinemine/" in u or "/phaseolusmine/" in u for u in mine["urls"])
+    # Queries go to the routed mines. Reading another mine's data model, to decide
+    # whether to suggest querying it too, is not a query.
+    assert all("/glycinemine/" in u or "/phaseolusmine/" in u
+               for u in mine["urls"] if "/service/model" not in u)
 
 
 def test_known_mines_reads_urls_not_names(catalog):
@@ -1068,27 +1071,47 @@ def test_gene_search_routes_taxon_and_filters_with_target_taxon(mine, catalog):
     assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in xml
 
 
-# --- both mines ----------------------------------------------------------------------------
-def test_a_reply_about_one_genus_names_its_other_mine(mine, catalog):
-    """Agents queried legumemine alone though a genus mine holds data it lacks."""
+# --- the other mine: a tip on every mine tool ---------------------------------------------
+def test_a_reply_about_one_genus_tips_to_its_other_mine(mine, catalog):
+    """Agents queried legumemine alone though the genus had its own mine."""
     out = M._gene_proteins({"gene": "Glyma.12G040000"})
-    assert "Glycine also has its own mine, glycinemine." in out
-    assert "query it too (mine='glycinemine')" in out
+    assert out.endswith("Tip: Glycine also has its own mine, glycinemine. Make this same "
+                        "query there (mine='glycinemine'), then compare the two results "
+                        "and present both to the user, each with its mine.")
     out = M._gene_proteins({"gene": "Glyma.12G040000", "taxon": "soybean"})
-    assert "legumemine also holds Glycine" in out and "(mine='legumemine')" in out
+    assert "Tip: legumemine also covers Glycine. Make this same query there " \
+           "(mine='legumemine')" in out
 
 
-def test_no_other_mine_is_named_without_one_subject_genus(mine, catalog):
-    out = M._gene_proteins({"gene": "Unknownus.1"})            # prefix resolves to nothing
-    assert "own mine" not in out and "also holds" not in out
+def test_the_tip_needs_the_other_mine_to_hold_the_data(mine, catalog, monkeypatch):
+    """legumemine has no QTL class, and genus mines other than glycinemine have no
+    GeneFunction: a tip there would send the model to a query that cannot answer."""
+    holds = {}
+    monkeypatch.setattr(M, "_has_class", lambda m, cls: holds.get((m, cls), False))
     out = M._trait_qtls({"trait": "seed protein", "taxon": "soybean"})
-    assert "also holds" not in out                            # breeding data: genus mines only
+    assert "Tip:" not in out
+    holds[("legumemine", "QTL")] = True
+    assert "Tip: legumemine also covers Glycine" in M._trait_qtls(
+        {"trait": "seed oil", "taxon": "soybean"})
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Symbol", "Gene"],
+                    "results": [["GmX", "Glyma.01G000100"]]}
+    assert "Tip:" not in M._gene_symbol({"symbol": "GmX", "taxon": "soybean"})
+    holds[("legumemine", "GeneFunction")] = True
+    assert "Tip: legumemine also covers Glycine" in M._gene_symbol(
+        {"symbol": "GmY", "taxon": "soybean"})
 
 
-def test_no_other_mine_is_named_for_a_genus_without_one(mine, catalog, monkeypatch):
+def test_no_tip_without_one_subject_genus_or_its_mine(mine, catalog, monkeypatch):
+    out = M._gene_proteins({"gene": "Unknownus.1"})            # prefix resolves to nothing
+    assert "Tip:" not in out
     monkeypatch.setattr(M, "_mine_exists", lambda name: False)
-    out = M._gene_search({"query": "kinase", "target_taxon": "Vicia villosa"})
-    assert "own mine" not in out
+    assert "Tip:" not in M._gene_search({"query": "kinase", "target_taxon": "Vicia villosa"})
+
+
+def test_keyword_search_tips_to_the_other_mine(mine, catalog, monkeypatch):
+    monkeypatch.setattr(M, "_get", lambda url, accept="": _search_doc(1, 1))
+    out = M._keyword_search({"query": "kinase", "taxon": "soybean"})
+    assert "Tip: legumemine also covers Glycine" in out
 
 
 def test_a_gene_id_spelled_differently_is_retried(mine, monkeypatch):
