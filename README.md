@@ -411,6 +411,11 @@ client refreshes it.
 | `LEGUMISTA_PYSAM_TIMEOUT` | Seconds before a `samtools`/`bcftools` call is killed. Default `300` |
 | `LEGUMISTA_PYSAM_WORKERS` | How many `samtools`/`bcftools` calls may run at once. Default `4` |
 | `LEGUMISTA_PYSAM_MAX_FILE_BYTES` | Largest file one write may produce. Default 4 GiB; `0` disables (reads are capped at 64 MiB) |
+| `LEGUMISTA_MINE_FETCH_MAX` | Most rows the mine tools fetch from one mine for one query; a reply that reaches it says so. Default `300000` |
+| `LEGUMISTA_MINE_SEARCH_MAX` | Most keyword-search results `mine_search` fetches from one mine (per organism filter). Default `30000` |
+| `LEGUMISTA_MINE_FETCH_CHUNK` / `LEGUMISTA_MINE_FETCH_WORKERS` | Rows per mine request, and requests run at once per mine. Defaults `10000` / `6` |
+| `LEGUMISTA_MINE_TIME_BUDGET` | Seconds a mine call waits before replying that a large fetch is still running; the fetch carries on and the same call collects it. Default `45` |
+| `LEGUMISTA_MINE_CACHE_ROWS` | Merged mine results kept for paging, in rows. Default `500000` |
 | `NCBI_API_KEY` | Raises the Entrez rate limit |
 
 ---

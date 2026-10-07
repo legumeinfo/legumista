@@ -8,9 +8,9 @@ started to allow it.
 ## LIS first
 
 Legumista is an LIS project. Search LIS before anything else: the Data Store (`lis_*`,
-`extract_features`, `browser_link`) and the LIS mines (`mine_*`). For a question about one
-species or genus, make each mine query in both LegumeMine and that genus's own mine where
-one exists, then compare the two results and present both, each with its mine. Then turn readily to NCBI and the literature: to corroborate what LIS shows,
+`extract_features`, `browser_link`) and the LIS mines (`mine_*`). The mine tools query
+LegumeMine and, for one species or genus, that genus's own mine too, and merge the two:
+present what each mine holds, and where they differ. Then turn readily to NCBI and the literature: to corroborate what LIS shows,
 to supply what it does not hold, or to judge which questions are worth pursuing next.
 Start from them only when LIS cannot answer, and say so. Where LIS and another source
 disagree, report both, each with its source.
@@ -194,14 +194,23 @@ GFF3 `Note`. A length far below the rest of a family usually marks a partial mod
 
 ## Mines
 
-Every tool here queries any LIS mine and every reply names the mine that answered.
-`taxon` picks a species' or genus's own mine, `mine` names one, and with neither
-`legumemine` answers. `mine_gene_family_members` is the exception: no routing `taxon`,
-since it is cross-species by purpose. `target_taxon` filters rows; it never picks a mine.
-For one species or genus, make the same query in `legumemine` and in its genus mine,
-compare, and present both; a reply about one genus ends with a tip naming the other mine
-whenever that mine can answer the same query. A fully qualified gene ID that a mine
-spells differently is retried in its other spelling, and the reply says so.
+Every `mine_*` tool queries LegumeMine and, when the question is about one genus with a
+mine of its own, that mine too: the genus of `taxon`, or of the gene ID. `taxon` also
+keeps only that species' or genus's rows, in every mine. `mine` queries one mine alone.
+The breeding tools query only genus mines, the only place their data exists.
+
+Each mine's whole result is fetched and the two are merged:
+- **`sources —`** gives each mine's total and the overlap: rows in both, and in each mine
+  only. Rows match across the mines' different ID spellings.
+- **The `in` column** says which mine holds each row: `both`, or one mine.
+- **`by annotation`** counts each annotation's rows per mine, over the whole result.
+- **`offset`** pages the merged list; `max_results` sets the page size.
+- **`PARTIAL RESULTS`** means a mine failed: its rows are unverified, not absent.
+  **`INCOMPLETE`** means some rows could not be fetched, or the fetch limit was reached.
+  **`STILL FETCHING`** means the result is large and still arriving: make the same call
+  again.
+- A fully qualified gene ID that a mine spells differently is retried in its other
+  spelling, and the reply says so.
 
 ### Which mine
 
@@ -221,31 +230,29 @@ ones its web pages show. Name the mine with any count you report.
   gnm4, gnm6). Read the assembly column and pass `assembly` to pick one.
 - **Empty results say which case applies**: "no gene matching X" (wrong ID, assembly or
   species) versus "X exists … but has no <kind> there", a real absence for that gene.
-- Results are capped by `max_results` (up to 500); the header says when there are more.
 
 ### Tools
 - `mine_gene_search`: genes, or with `search:"families"` gene families, whose
   description contains a phrase. Use full product names, not abbreviations: matching
   is by substring, and the reply flags rows where the phrase occurs only
-  inside a longer word. Genes take `target_taxon`; families span species, so they do not.
-  Families come largest first.
+  inside a longer word. With `taxon`, families are those with members in it. Families
+  come largest first.
 - `mine_search`: a mine's own keyword search, as its search box runs it: whole words in
   every indexed class and field (quoted phrases, OR, AND NOT, trailing `*`), with the
-  total and counts by category and organism. `taxon` routes to the genus mine;
-  `category` and `organism` narrow to one of the counts; pages of up to 100 with
-  `offset`. Its counts differ from `mine_gene_search`'s substring match, which also
-  takes longer words that contain the phrase.
-- `mine_gene_symbol`: symbol to gene IDs, with synopsis and DOIs. The catalog's
-  curated symbols answer first; the mine is the fall-through.
+  total and counts by category and organism, per mine. `taxon` narrows to that
+  species or genus; `category` to one of the counts. Its counts differ from
+  `mine_gene_search`'s substring match, which also takes longer words that contain the
+  phrase.
+- `mine_gene_symbol`: symbol to gene IDs, with synopsis and DOIs: the catalog's curated
+  record, then every mine that holds symbols for the genus.
 - `mine_gene_proteins`, `mine_gene_families`, `mine_gene_ontology`:
   per-gene records.
 - `mine_gene_expression`: values per sample with each study's unit. Compare only
   within one study.
 - `mine_gene_family_members`: a gene's family, or a named family, listed across
-  species. `target_taxon` keeps one species; `member_assembly`/`member_annotation` keep
-  one genome's members (`assembly`/`annotation` pick the gene's own copy). Long lists page
-  with `offset`. For one annotation's members with loci, a `family` selector in
-  `lis_gene` is complete and faster.
+  species. `taxon` keeps one species' or genus's members; `member_assembly`/
+  `member_annotation` one genome's (`assembly`/`annotation` pick the gene's own copy).
+  For one annotation's members with loci, a `family` selector in `lis_gene` is faster.
 - `mine_trait_qtls`, `mine_trait_gwas`, `mine_marker_position`: need `taxon`, because this
   data exists only in genus mines. A species with no mine is reported as such; its data,
   if any, is in the Data Store (`lis_find`).

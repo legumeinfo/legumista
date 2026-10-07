@@ -88,6 +88,16 @@ def catalog(tmp_path, clean):
     C.reset()
 
 
+def _members_query(mine):
+    """The family-members PathQuery among the requests made (others check the family
+    exists in each mine)."""
+    for url in mine["urls"]:
+        xml, _ = _parse(url)
+        if 'view="Gene.geneFamilyAssignments.geneFamily.primaryIdentifier Gene.primary' in xml:
+            return xml
+    raise AssertionError("no family-members query was made")
+
+
 def _parse(url):
     """Pull the PathQuery XML and params back out of a request URL."""
     q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
@@ -102,9 +112,18 @@ def mine(monkeypatch):
     `state['live']` is the set of mine names whose /service/version answers — the fake
     store of which mines exist. A name outside it raises, exactly as a real 404 does, so
     the existence probe can be exercised without the network."""
-    state = {"urls": [], "count": "7", "body": None,
+    state = {"urls": [], "count": "7", "body": None, "model_urls": [],
              "live": {"glycinemine", "phaseolusmine", "cajanusmine", "lensmine",
-                      "legumemine"}}
+                      "legumemine"},
+             # Each mine's data model, as /service/model reports it: legumemine has no
+             # breeding classes, and only it and glycinemine have GeneFunction.
+             "models": {"legumemine": {"Gene", "GeneFamily", "GeneFunction",
+                                       "ExpressionValue"},
+                        "glycinemine": {"Gene", "GeneFamily", "GeneFunction",
+                                        "ExpressionValue", "QTL", "GWASResult",
+                                        "GeneticMarker"}},
+             "genus_model": {"Gene", "GeneFamily", "ExpressionValue", "QTL", "GWASResult",
+                             "GeneticMarker"}}
 
     def default_body():
         return {"wasSuccessful": True,
@@ -113,6 +132,11 @@ def mine(monkeypatch):
                 "results": [["Glyma.12G040000", "gnm4", "glyma.Wm82.gnm4.ann1.X.1"]]}
 
     def fake_get(url, accept="application/json"):
+        if "/service/model" in url:
+            state["model_urls"].append(url)
+            name = url.rsplit("/service/", 1)[0].rsplit("/", 1)[-1]
+            classes = state["models"].get(name, state["genus_model"])
+            return {"model": {"classes": {c: {} for c in classes}}}
         state["urls"].append(url)
         if url.endswith("/version"):
             name = url.rsplit("/service/", 1)[0].rsplit("/", 1)[-1]
@@ -165,7 +189,7 @@ def test_expression_is_rooted_at_expressionvalue(mine):
     M._gene_expression({"gene": "Glyma.12G040000"})
     xml, params = _parse(mine["urls"][0])
     assert 'path="ExpressionValue.feature" op="LOOKUP"' in xml
-    assert "sortOrder=\"ExpressionValue.value desc\"" in xml
+    assert "sortOrder=\"ExpressionValue.value desc " in xml
 
 
 # --- InterMine reports failure inside a 200 body ---------------------------------------
@@ -234,14 +258,53 @@ def test_expression_does_not_claim_assemblies(mine):
 
 
 # --- capping and counts ---------------------------------------------------------------
-def test_capped_results_report_the_true_total(mine):
-    """639 expression values for one gene - truncating without saying so would let the
-    agent believe it saw everything."""
-    mine["count"] = "639"
-    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["V"],
-                    "results": [[str(i)] for i in range(2)]}
-    out = M._gene_expression({"gene": "G", "max_results": 2})
-    assert "of 639" in out and "raise 'max_results'" in out
+def _paged(monkeypatch, mine, total, fail_at=None, count_fails=False):
+    """A mine that honours size and start over `total` rows, fails the request that
+    starts at `fail_at`, and with `count_fails` cannot count."""
+    def fake(url, accept="application/json"):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        if "/service/model" in url:
+            return {"model": {"classes": {"Gene": {}, "ExpressionValue": {}}}}
+        mine["urls"].append(url)
+        if q.get("format") == ["count"]:
+            return "unavailable" if count_fails else str(total)
+        start, size = int(q.get("start", ["0"])[0]), int(q["size"][0])
+        if fail_at is not None and start == fail_at:
+            raise TimeoutError("timed out")
+        return {"wasSuccessful": True, "columnHeaders": ["V"],
+                "results": [[f"v{i:04d}"] for i in range(start, min(total, start + size))]}
+    monkeypatch.setattr(M, "_get", fake)
+
+
+def test_a_large_result_is_fetched_whole_in_chunks(mine, monkeypatch):
+    """639 expression values for one gene once came back as the first 50. Every row is
+    fetched now, in parallel chunks, and paged from the merged whole."""
+    monkeypatch.setattr(M, "FETCH_CHUNK", 10)
+    _paged(monkeypatch, mine, 25)
+    out = M._gene_expression({"gene": "G", "max_results": 5})
+    starts = sorted(int(urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+                        .get("start", ["0"])[0]) for u in mine["urls"] if "format=json" in u)
+    assert starts == [0, 10, 20]
+    assert "showing 5 of 25 row(s) — continue with offset=5" in out
+    nxt = M._gene_expression({"gene": "G", "max_results": 5, "offset": 20})
+    assert "showing 21–25 of 25 row(s)" in nxt and "v0024" in nxt
+    assert len([u for u in mine["urls"] if "format=json" in u]) == 3, "paging refetched"
+
+
+def test_the_fetch_limit_is_reported_never_presented_as_the_total(mine, monkeypatch):
+    monkeypatch.setattr(M, "FETCH_CHUNK", 10)
+    monkeypatch.setattr(M, "FETCH_MAX", 20)
+    _paged(monkeypatch, mine, 25)
+    out = M._gene_expression({"gene": "G"})
+    assert "INCOMPLETE — legumemine: fetched the first 20 of 25 rows" in out
+
+
+def test_a_failed_chunk_keeps_the_rows_before_it_and_says_so(mine, monkeypatch):
+    monkeypatch.setattr(M, "FETCH_CHUNK", 10)
+    _paged(monkeypatch, mine, 25, fail_at=10)
+    out = M._gene_expression({"gene": "G"})
+    assert "INCOMPLETE — legumemine: rows from 10 on could not be fetched" in out
+    assert "10 row(s)" in out
 
 
 def test_no_count_request_when_results_are_under_the_cap(mine):
@@ -257,9 +320,9 @@ def test_a_failed_count_does_not_sink_the_query(mine):
     assert "Expression values" in out and "error" not in out.lower()
 
 
-def test_max_results_is_clamped(mine):
+def test_max_results_sets_the_page_not_the_fetch(mine):
     M._gene_proteins({"gene": "G", "max_results": 99999})
-    assert "size=500" in mine["urls"][0]
+    assert f"size={M.FETCH_CHUNK}" in mine["urls"][0]
 
 
 # --- mine selection -------------------------------------------------------------------
@@ -306,7 +369,8 @@ def test_tools_are_read_only_and_well_formed():
     assert fam["required"] == []
     # 'taxon' used to route the query to a genus mine, which silently lost other genera's
     # genes; the target species is now a filter, never a routing choice.
-    assert "taxon" not in fam["properties"] and "target_taxon" in fam["properties"]
+    # One taxon argument: it filters the members and adds its genus mine.
+    assert "taxon" in fam["properties"] and "target_taxon" not in fam["properties"]
 
 
 def test_tools_are_registered_on_the_mcp_server():
@@ -439,7 +503,7 @@ def test_gwas_is_sorted_most_significant_first(mine):
     mine["body"] = {"wasSuccessful": True, "columnHeaders": ["p"], "results": [["1e-11"]]}
     M._trait_gwas({"trait": "seed protein", "taxon": "Glycine max"})
     xml, _ = _parse(mine["urls"][0])
-    assert 'sortOrder="GWASResult.pValue asc"' in xml
+    assert 'sortOrder="GWASResult.pValue asc ' in xml
 
 
 # --- catalog-driven mine routing ------------------------------------------------------
@@ -546,16 +610,17 @@ def test_an_identical_query_is_not_reissued(mine):
     assert len(mine["urls"]) == 1, "the second identical query must not hit the network"
 
 
-def test_the_cache_key_separates_mine_query_and_size(mine):
-    """A cache that ignored any of the three would answer one question with another's
-    rows — worse than no cache at all."""
+def test_the_cache_key_separates_mine_and_query_but_not_page(mine):
+    """A cache that ignored the mine or the query would answer one question with
+    another's rows. The page size is not part of the question: the whole result is
+    fetched once, and a different page of it costs nothing."""
     mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Gene > Name"],
                     "results": [["G"]]}
     M._gene_families({"gene": "G"})
     M._gene_families({"gene": "G", "mine": "glycinemine"})   # different mine
     M._gene_families({"gene": "OTHER"})                      # different xml
-    M._gene_families({"gene": "G", "max_results": 3})        # different size
-    assert len({u for u in mine["urls"]}) == 4
+    M._gene_families({"gene": "G", "max_results": 3})        # same question, other page
+    assert len(mine["urls"]) == 3 and len(set(mine["urls"])) == 3
 
 
 def test_a_repeated_family_members_call_reuses_both_of_its_round_trips(mine):
@@ -615,9 +680,12 @@ def test_symbol_resolution_prefers_the_curated_catalog(mine, catalog):
     """The catalog answers offline, instantly, with a FULLY QUALIFIED gene id — no mine
     round trip and no assembly ambiguity to resolve afterwards."""
     out = M._gene_symbol({"symbol": "GmNARK"})
-    assert "glyma.Wm82.gnm4.ann1.Glyma.12G040000" in out
+    assert out.index("glyma.Wm82.gnm4.ann1.Glyma.12G040000") < out.index("[mine")
     assert "10.1126/science.1077937" in out
-    assert not mine["urls"], "a curated hit must not query the mine"
+    # The mines answer too: their curation is broader, and carries every publication.
+    # The curated gene is soybean, so glycinemine, which holds symbols, answers as well.
+    assert {u.split("/service/")[0].rsplit("/", 1)[-1] for u in mine["urls"]} == {
+        "legumemine", "glycinemine"}
 
 
 def test_a_catalog_answer_says_it_came_from_the_catalog(mine, catalog):
@@ -713,13 +781,20 @@ def test_empty_result_separates_unknown_gene_from_no_annotations(mine, monkeypat
     assert "check the identifier" not in out
 
 
-def test_a_capped_result_with_a_failed_count_is_not_presented_as_complete(mine):
-    rows = [[f"G{i}", "gnm4", f"GO:{i}", "t", "GO"] for i in range(5)]
-    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["a", "b", "c", "d", "e"],
-                    "results": rows}
-    mine["count"] = "not-a-number"            # the count pre-flight fails
-    out = M._gene_ontology({"gene": "G", "max_results": 5})
-    assert "showing the first 5 row(s)" in out and "total is unavailable" in out
+def test_a_failed_count_still_fetches_the_whole_result(mine, monkeypatch):
+    """Without a total the chunks run one after another until one comes back short."""
+    monkeypatch.setattr(M, "FETCH_CHUNK", 10)
+    _paged(monkeypatch, mine, 25, count_fails=True)
+    out = M._gene_ontology({"gene": "G"})
+    assert "25 row(s)" in out and "INCOMPLETE" not in out
+
+
+def test_a_failed_count_at_the_fetch_limit_says_the_total_is_unknown(mine, monkeypatch):
+    monkeypatch.setattr(M, "FETCH_CHUNK", 10)
+    monkeypatch.setattr(M, "FETCH_MAX", 20)
+    _paged(monkeypatch, mine, 25, count_fails=True)
+    out = M._gene_ontology({"gene": "G"})
+    assert "stopped at the 20-row fetch limit" in out and "could not be counted" in out
 
 
 def test_target_taxon_filters_members_and_explains_a_real_zero(mine, catalog, monkeypatch):
@@ -735,8 +810,8 @@ def test_target_taxon_filters_members_and_explains_a_real_zero(mine, catalog, mo
                     "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000", "Legume.fam3.10524"]]}
         return {"wasSuccessful": True, "columnHeaders": [], "results": []}
     monkeypatch.setattr(M, "_get", fake)
-    out = M._gene_family_members({"gene": "Glyma.12G040000", "target_taxon": "phavu"})
-    members_xml, _ = _parse(mine["urls"][1])
+    out = M._gene_family_members({"gene": "Glyma.12G040000", "taxon": "phavu"})
+    members_xml = _members_query(mine)
     assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in members_xml
     assert 'value="vulgaris"' in members_xml
     assert "exists in legumemine with 347 members, none of them from Phaseolus vulgaris" in out
@@ -764,7 +839,7 @@ def test_family_members_does_not_call_a_failed_count_a_real_zero(mine, catalog,
                     "results": [["glyma.Wm82.gnm4.ann1.Glyma.12G040000", "Legume.fam3.10524"]]}
         return {"wasSuccessful": True, "columnHeaders": [], "results": []}
     monkeypatch.setattr(M, "_get", fake)
-    out = M._gene_family_members({"gene": "Glyma.12G040000", "target_taxon": "phavu"})
+    out = M._gene_family_members({"gene": "Glyma.12G040000", "taxon": "phavu"})
     assert "overall size could not be checked" in out
     assert "real zero for this family" not in out and "has no members" not in out
 
@@ -833,7 +908,7 @@ def test_family_members_narrows_the_members_by_member_assembly(mine):
 def test_family_members_title_names_the_species_and_the_assembly(mine, catalog):
     mine["body"] = _members_body(3)
     out = M._gene_family_members({"family": "Legume.fam3.08725", "member_assembly": "gnm2",
-                                  "target_taxon": "Phaseolus vulgaris"})
+                                  "taxon": "Phaseolus vulgaris"})
     assert "in Phaseolus vulgaris, assembly gnm2" in out
 
 
@@ -861,24 +936,24 @@ def test_assembly_picks_the_genes_copy_not_the_members(mine, catalog, monkeypatc
         return _members_body(2)
     monkeypatch.setattr(M, "_get", fake)
     out = M._gene_family_members({"gene": "Glyma.12G040000", "assembly": "gnm4",
-                                  "target_taxon": "phavu"})
+                                  "taxon": "phavu"})
     gene_xml, _ = _parse(mine["urls"][0])
-    members_xml, _ = _parse(mine["urls"][1])
+    members_xml = _members_query(mine)
     assert 'path="Gene.assemblyVersion" op="=" value="gnm4"' in gene_xml
     assert 'path="Gene.assemblyVersion"' not in members_xml
     assert 'value="Phaseolus"' in members_xml
     assert "in Phaseolus vulgaris —" in out and "real zero" not in out
 
 
-def test_family_members_pages_with_a_complete_sort(mine):
+def test_family_members_pages_the_whole_list_in_a_complete_sort(mine):
     mine["count"] = "348"
-    mine["body"] = _members_body(48, start=300)
+    mine["body"] = _members_body(348)
     out = M._gene_family_members({"family": "Legume.fam3.08725", "offset": 300,
                                   "max_results": 100})
     xml, params = _parse(mine["urls"][0])
-    assert params["start"] == ["300"]
-    # A tie in the sort lets a row move between pages, so the identifier breaks it.
-    assert 'sortOrder="Gene.organism.genus asc Gene.primaryIdentifier asc"' in xml
+    # The whole list is fetched once, in an order with no ties, and paged here.
+    assert 'sortOrder="Gene.organism.genus asc Gene.primaryIdentifier asc ' in xml
+    assert "start" not in params
     assert "showing 301–348 of 348 row(s)" in out
     assert "continue with offset" not in out
 
@@ -896,21 +971,21 @@ def test_a_long_member_list_is_cut_at_a_whole_row_with_the_offset_to_continue(mi
     assert out.rstrip().endswith(M._FAMILY_CAVEAT)
 
 
-def test_a_tool_without_offset_says_its_list_was_cut_by_size(mine):
+def test_every_mine_tool_pages_a_list_too_long_for_one_reply(mine):
     mine["count"] = "500"
     mine["body"] = {"wasSuccessful": True, "columnHeaders": ["V"],
                     "results": [["x" * 200] for _ in range(500)]}
     out = M._gene_expression({"gene": "G", "max_results": 500})
     assert "truncated to" not in out
-    assert "size limit stopped the list at" in out and "of the 500 rows fetched" in out
-    assert "offset" not in out
+    shown = sum(1 for line in out.splitlines() if line.startswith("  x"))
+    assert 0 < shown < 500 and f"continue with offset={shown}" in out
 
 
 def test_an_offset_past_the_end_reports_the_total(mine):
     mine["count"] = "348"
-    mine["body"] = {"wasSuccessful": True, "columnHeaders": [], "results": []}
+    mine["body"] = _members_body(348)
     out = M._gene_family_members({"family": "Legume.fam3.08725", "offset": 400})
-    assert "no rows at offset=400; the query has 348 row(s) in all" in out
+    assert "no rows at offset=400; the merged result has 348 row(s)" in out
 
 
 # --- search by description ------------------------------------------------------------
@@ -924,11 +999,11 @@ def _search_body(descriptions):
 
 def test_gene_search_matches_descriptions_within_a_taxon(mine, catalog):
     mine["body"] = _search_body(["chalcone synthase [Glycine max]; IPR011141"])
-    out = M._gene_search({"query": "chalcone synthase", "target_taxon": "phavu"})
+    out = M._gene_search({"query": "chalcone synthase", "taxon": "phavu"})
     xml, _ = _parse(mine["urls"][0])
     assert ('path="Gene.description" op="CONTAINS" value="chalcone synthase"') in xml
     assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in xml
-    assert 'sortOrder="Gene.primaryIdentifier asc"' in xml
+    assert 'sortOrder="Gene.primaryIdentifier asc ' in xml
     assert "Gene search by description in Phaseolus vulgaris" in out
     assert "Arahy.G00000" in out and "chalcone synthase [Glycine max]" in out
     # The caveat travels with every hit: a description is not a function.
@@ -940,7 +1015,7 @@ def test_gene_search_flags_a_term_found_only_inside_a_longer_word(mine):
     mine["body"] = _search_body(["Gp32 n=1 Tax=Roseibium sp. TrichSKD4",
                                  "putative CHS protein"])
     out = M._gene_search({"query": "CHS"})
-    assert "1 of the 2 rows shown contain 'CHS' only inside a longer word" in out
+    assert "1 of the 2 rows contain 'CHS' only inside a longer word" in out
     assert "Arahy.G00000" in out.split("only inside a longer word")[1]
 
 
@@ -951,17 +1026,25 @@ def test_gene_search_finds_families_largest_first(mine):
     out = M._gene_search({"query": "chalcone synthase", "search": "families"})
     xml, _ = _parse(mine["urls"][0])
     assert 'path="GeneFamily.description" op="CONTAINS"' in xml
-    assert 'sortOrder="GeneFamily.size desc GeneFamily.primaryIdentifier asc"' in xml
+    assert 'sortOrder="GeneFamily.size desc GeneFamily.primaryIdentifier asc ' in xml
     assert "Legume.fam3.08725 | 2833" in out and "lis_gene(genes={'family'" in out
 
 
 def test_gene_search_refuses_what_it_cannot_answer(mine):
     assert "at least 3 characters" in M._gene_search({"query": "CH"})
     assert "'genes' or 'families'" in M._gene_search({"query": "kinase", "search": "x"})
-    out = M._gene_search({"query": "kinase", "search": "families",
-                          "target_taxon": "peanut"})
-    assert out.startswith("error:") and "mine_gene_family_members" in out
     assert not mine["urls"]
+
+
+def test_a_family_search_keeps_families_with_members_in_the_taxon(mine, catalog):
+    """A taxon filters a family search to families with members there, the same one
+    taxon argument every mine tool takes."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Identifier", "Size",
+                                                             "Description"],
+                    "results": [["Legume.fam3.10524", 347, "protein kinase"]]}
+    M._gene_search({"query": "kinase", "search": "families", "taxon": "phavu"})
+    xml, _ = _parse(mine["urls"][0])
+    assert 'path="GeneFamily.genes.organism.genus" op="=" value="Phaseolus"' in xml
 
 
 def test_gene_search_explains_an_empty_result(mine):
@@ -971,13 +1054,11 @@ def test_gene_search_explains_an_empty_result(mine):
     assert "not abbreviations" in out
 
 
-def test_gene_search_pages(mine):
-    mine["count"] = "436"
-    mine["body"] = _search_body(["chalcone synthase"] * 50)
-    out = M._gene_search({"query": "chalcone synthase", "offset": 50})
-    _xml, params = _parse(mine["urls"][0])
-    assert params["start"] == ["50"]
-    assert "showing 51–100 of 436 row(s) — continue with offset=100" in out
+def test_gene_search_pages_the_merged_result(mine):
+    mine["count"] = "100"
+    mine["body"] = _search_body([f"receptor kinase {i}" for i in range(100)])
+    out = M._gene_search({"query": "receptor kinase", "offset": 50, "max_results": 25})
+    assert "showing 51–75 of 100 row(s) — continue with offset=75" in out
 
 
 # --- a mine's own keyword search ---------------------------------------------------------
@@ -994,34 +1075,61 @@ def _search_doc(n, total, start=0):
                 for i in range(n)]}
 
 
-def test_mine_search_runs_the_mines_keyword_search(mine, catalog, monkeypatch):
+def _search_by_mine(answers):
+    """A keyword-search fake: answers[(mine, organism or None)] = (total, identifiers)."""
     urls = []
-    monkeypatch.setattr(M, "_get", lambda url, accept="": urls.append(url)
-                        or _search_doc(2, 280))
-    out = M._keyword_search({"query": '"chalcone synthase"', "mine": "arachismine",
-                             "category": "Gene", "organism": "A. hypogaea",
-                             "max_results": 2})
-    q = urllib.parse.parse_qs(urllib.parse.urlparse(urls[0]).query)
-    assert urls[0].startswith(f"{M.MINES_BASE}/arachismine/service/search?")
-    assert q["q"] == ['"chalcone synthase"'] and q["facet_Category"] == ["Gene"]
-    assert q["facet_organism.shortName"] == ["A. hypogaea"]
-    assert q["size"] == ["2"] and q["start"] == ["0"]
-    assert "showing 2 of 280 row(s) — continue with offset=2" in out
-    assert "(or raise 'max_results', up to 100)" in out
-    assert "by category: Gene 280, OntologyTerm 10" in out
-    assert "by organism: A. hypogaea 277, A. ipaensis 3" in out
-    assert ("Gene | arahy.Tifrunner.gnm1.ann1.G00000 | G00000 | Arachis hypogaea "
-            "(Tifrunner) | gnm1.ann1 | chalcone synthase [Glycine max]") in out
-    # The bracket names the homolog's species, which the organism column contradicts.
+
+    def fake(url, accept=""):
+        urls.append(url)
+        if "/service/model" in url:
+            return {"model": {"classes": {"Gene": {}}}}
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        name = url.split("/service/")[0].rsplit("/", 1)[-1]
+        org = q.get("facet_organism.shortName", [None])[0]
+        total, idents = answers.get((name, org), (0, []))
+        start, size = int(q.get("start", ["0"])[0]), int(q.get("size", ["100"])[0])
+        return {"wasSuccessful": True, "totalHits": total,
+                "facets": {"Category": {"Gene": total},
+                           "organism.shortName": {org or "P. vulgaris": total}},
+                "results": [{"type": "Gene", "fields": {
+                    "primaryIdentifier": ident, "description": "receptor kinase [Glycine max]",
+                    "organism.name": "Phaseolus vulgaris"}}
+                    for ident in idents[start:start + size]]}
+    return fake, urls
+
+
+def test_mine_search_runs_in_legumemine_and_the_genus_mine_and_merges(
+        mine, catalog, monkeypatch):
+    ids = [f"phavu.G19833.gnm2.ann1.Phvul.00{i}" for i in range(3)]
+    fake, urls = _search_by_mine({("legumemine", "P. vulgaris"): (2, ids[:2]),
+                                  ("phaseolusmine", "P. vulgaris"): (2, ids[1:])})
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._keyword_search({"query": '"receptor kinase"', "taxon": "phavu",
+                             "category": "Gene"})
+    asked = [u for u in urls if "/search?" in u]
+    assert {u.split("/service/")[0].rsplit("/", 1)[-1] for u in asked} == {
+        "legumemine", "phaseolusmine"}
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(asked[0]).query)
+    assert q["facet_Category"] == ["Gene"] and q["facet_organism.shortName"] == ["P. vulgaris"]
+    assert ("sources — legumemine 2 row(s); phaseolusmine 2 row(s). Merged: 3 distinct "
+            "row(s): 1 in both, 1 legumemine only, 1 phaseolusmine only") in out
+    assert "by category — legumemine: Gene 2; phaseolusmine: Gene 2" in out
     assert "not this gene's species" in out
 
 
-def test_mine_search_routes_a_taxon_to_its_genus_mine(mine, catalog, monkeypatch):
-    urls = []
-    monkeypatch.setattr(M, "_get", lambda url, accept="": urls.append(url)
-                        or _search_doc(1, 1))
-    M._keyword_search({"query": "NARK", "taxon": "soybean"})
-    assert "/glycinemine/service/search?" in urls[0]
+def test_mine_search_expands_a_genus_into_its_species_in_legumemine(
+        mine, catalog, monkeypatch):
+    """The search filters only by organism ('G. max'); matching the initial alone would
+    take other genera's species, so the genus's own species come from the catalog."""
+    fake, urls = _search_by_mine({("legumemine", "G. max"): (1, ["glyma.X"]),
+                                  ("glycinemine", None): (1, ["glyma.X"])})
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._keyword_search({"query": "NARK", "taxon": "Glycine"})
+    orgs = {(u.split("/service/")[0].rsplit("/", 1)[-1],
+             urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+             .get("facet_organism.shortName", [None])[0]) for u in urls if "/search?" in u}
+    assert orgs == {("legumemine", "G. max"), ("glycinemine", None)}
+    assert "1 in both" in out
 
 
 def test_mine_search_failure_is_an_error_not_an_empty_result(mine, monkeypatch):
@@ -1036,82 +1144,100 @@ def test_mine_search_failure_is_an_error_not_an_empty_result(mine, monkeypatch):
 
 
 def test_mine_search_offset_past_the_end_reports_the_total(mine, monkeypatch):
-    monkeypatch.setattr(M, "_get", lambda url, accept="": {"wasSuccessful": True,
-                                                          "totalHits": 280, "results": []})
+    fake, _urls = _search_by_mine({("legumemine", None): (280, [f"x{i}" for i in range(280)])})
+    monkeypatch.setattr(M, "_get", fake)
     out = M._keyword_search({"query": "z", "offset": 300})
-    assert "no results at offset=300; the search has 280 in all" in out
+    assert "no rows at offset=300; the merged result has 280 row(s)" in out
 
 
-# --- one rule for choosing a mine ---------------------------------------------------------
-def test_every_mine_tool_chooses_its_mine_the_same_way():
-    """taxon picks a genus mine and mine names one, on every mine tool; family members
-    alone has no routing taxon (it is cross-species by purpose)."""
+# --- every mine that covers the subject -------------------------------------------------
+def _by_mine(rows_by_mine, cols=("Gene > Name", "Gene > Assembly Version")):
+    """A fake _get answering each mine with its own rows."""
+    def fake(url, accept="application/json"):
+        name = url.split("/service/")[0].rsplit("/", 1)[-1]
+        if "/service/model" in url:
+            return {"model": {"classes": {"Gene": {}, "GeneFunction": {}}}}
+        if "format=count" in url:
+            return str(len(rows_by_mine.get(name, [])))
+        if name in rows_by_mine.get("_fail", ()):
+            raise TimeoutError("timed out")
+        return {"wasSuccessful": True, "columnHeaders": list(cols),
+                "results": rows_by_mine.get(name, [])}
+    return fake
+
+
+def test_every_mine_tool_takes_the_same_taxon_and_mine():
     for tool in M.mine_tools():
         props = tool.parameters["properties"]
-        assert "mine" in props, tool.name
-        if tool.name == "mine_gene_family_members":
-            assert "taxon" not in props and "target_taxon" in props
-        else:
-            assert "taxon" in props, tool.name
+        assert "taxon" in props and "mine" in props, tool.name
+        assert "target_taxon" not in props, tool.name
 
 
-def test_a_gene_tool_routes_taxon_to_the_genus_mine(mine, catalog):
-    M._gene_proteins({"gene": "Glyma.12G040000", "taxon": "soybean"})
-    assert "/glycinemine/service/" in mine["urls"][-1]
-    M._gene_proteins({"gene": "Glyma.12G040000"})
-    assert f"/{M.MINE}/service/" in mine["urls"][-1]
-
-
-def test_gene_search_routes_taxon_and_filters_with_target_taxon(mine, catalog):
-    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["id", "g", "s", "d"],
-                    "results": [["phavu.X", "Phaseolus", "vulgaris", "kinase"]]}
-    M._gene_search({"query": "kinase", "taxon": "phavu", "target_taxon": "phavu"})
-    xml, _ = _parse(mine["urls"][-1])
-    assert "/phaseolusmine/service/" in mine["urls"][-1]
-    assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in xml
-
-
-# --- the other mine: a tip on every mine tool ---------------------------------------------
-def test_a_reply_about_one_genus_tips_to_its_other_mine(mine, catalog):
-    """Agents queried legumemine alone though the genus had its own mine."""
+def test_a_gene_tool_queries_legumemine_and_the_genus_mine_and_marks_each_row(
+        mine, catalog, monkeypatch):
+    """Agents asked about one species queried legumemine alone; the tools now ask
+    every mine that covers the subject themselves."""
+    asked = []
+    fake = _by_mine({"legumemine": [["Glyma.12G040000", "gnm4"], ["Glyma.12G040000", "gnm2"]],
+                     "glycinemine": [["Glyma.12G040000", "gnm4"], ["Glyma.12G040000", "gnm6"]]})
+    monkeypatch.setattr(M, "_get", lambda url, accept="application/json":
+                        asked.append(url) or fake(url, accept))
     out = M._gene_proteins({"gene": "Glyma.12G040000"})
-    assert out.endswith("Tip: Glycine also has its own mine, glycinemine. Make this same "
-                        "query there (mine='glycinemine'), then compare the two results "
-                        "and present both to the user, each with its mine.")
-    out = M._gene_proteins({"gene": "Glyma.12G040000", "taxon": "soybean"})
-    assert "Tip: legumemine also covers Glycine. Make this same query there " \
-           "(mine='legumemine')" in out
+    assert {u.split("/service/")[0].rsplit("/", 1)[-1] for u in asked
+            if "/query/results" in u} == {"legumemine", "glycinemine"}
+    assert "[mines: legumemine, glycinemine]" in out
+    assert ("sources — legumemine 2 row(s); glycinemine 2 row(s). Merged: 3 distinct "
+            "row(s): 1 in both, 1 legumemine only, 1 glycinemine only") in out
+    assert "  Glyma.12G040000 | gnm4 | both" in out
+    assert "  Glyma.12G040000 | gnm2 | legumemine" in out
+    assert "  Glyma.12G040000 | gnm6 | glycinemine" in out
 
 
-def test_the_tip_needs_the_other_mine_to_hold_the_data(mine, catalog, monkeypatch):
-    """legumemine has no QTL class, and genus mines other than glycinemine have no
-    GeneFunction: a tip there would send the model to a query that cannot answer."""
-    holds = {}
-    monkeypatch.setattr(M, "_has_class", lambda m, cls: holds.get((m, cls), False))
+def test_rows_spelled_differently_in_the_two_mines_are_one_row(mine, catalog, monkeypatch):
+    """ArachisMine drops the name's species token; once restored, the rows match."""
+    doc = json.loads(open(C.CATALOG_PATH).read())
+    doc["taxa"]["Arachis/hypogaea"] = {"abbrev": "arahy", "resources": [
+        {"URL": "https://mines.legumeinfo.org/arachismine/begin.do"}]}
+    open(C.CATALOG_PATH, "w").write(json.dumps(doc))
+    C.reset()
+    M.reset_cache()
+    ids = ("arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H", "arahy.Tifrunner.gnm2.ann1.GHMM2H")
+    monkeypatch.setattr(M, "_get", _by_mine({"legumemine": [[ids[0], "gnm2"]],
+                                             "arachismine": [[ids[1], "gnm2"]]}))
+    out = M._gene_proteins({"gene": ids[0]})
+    assert "1 distinct row(s): 1 in both" in out and f"  {ids[0]} | gnm2 | both" in out
+
+
+def test_a_failed_mine_leaves_partial_results_from_the_other(mine, catalog, monkeypatch):
+    monkeypatch.setattr(M, "_get", _by_mine({"legumemine": [["Glyma.12G040000", "gnm4"]],
+                                             "_fail": ("glycinemine",)}))
+    out = M._gene_proteins({"gene": "Glyma.12G040000"})
+    assert "PARTIAL RESULTS — glycinemine FAILED" in out
+    assert "The rows below come only from legumemine" in out
+    assert "Glyma.12G040000 | gnm4" in out
+
+
+def test_an_explicit_mine_is_queried_alone(mine, catalog):
+    M._gene_proteins({"gene": "Glyma.12G040000", "mine": "legumemine"})
+    assert all("/legumemine/" in u for u in mine["urls"])
+
+
+def test_taxon_filters_rows_and_adds_its_genus_mine(mine, catalog):
+    M._gene_proteins({"gene": "Phvul.001G000100", "taxon": "phavu"})
+    queried = {u.split("/service/")[0].rsplit("/", 1)[-1] for u in mine["urls"]}
+    assert queried == {"legumemine", "phaseolusmine"}
+    xml, _ = _parse(mine["urls"][0])
+    assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in xml
+    assert 'path="Gene.organism.species" op="=" value="vulgaris"' in xml
+
+
+def test_a_tool_whose_data_is_only_in_genus_mines_never_asks_legumemine(mine, catalog):
+    """legumemine's model has no QTL class: asking it would fail, not answer."""
+    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["QTL > Name"],
+                    "results": [["Seed protein 1-1"]]}
     out = M._trait_qtls({"trait": "seed protein", "taxon": "soybean"})
-    assert "Tip:" not in out
-    holds[("legumemine", "QTL")] = True
-    assert "Tip: legumemine also covers Glycine" in M._trait_qtls(
-        {"trait": "seed oil", "taxon": "soybean"})
-    mine["body"] = {"wasSuccessful": True, "columnHeaders": ["Symbol", "Gene"],
-                    "results": [["GmX", "Glyma.01G000100"]]}
-    assert "Tip:" not in M._gene_symbol({"symbol": "GmX", "taxon": "soybean"})
-    holds[("legumemine", "GeneFunction")] = True
-    assert "Tip: legumemine also covers Glycine" in M._gene_symbol(
-        {"symbol": "GmY", "taxon": "soybean"})
-
-
-def test_no_tip_without_one_subject_genus_or_its_mine(mine, catalog, monkeypatch):
-    out = M._gene_proteins({"gene": "Unknownus.1"})            # prefix resolves to nothing
-    assert "Tip:" not in out
-    monkeypatch.setattr(M, "_mine_exists", lambda name: False)
-    assert "Tip:" not in M._gene_search({"query": "kinase", "target_taxon": "Vicia villosa"})
-
-
-def test_keyword_search_tips_to_the_other_mine(mine, catalog, monkeypatch):
-    monkeypatch.setattr(M, "_get", lambda url, accept="": _search_doc(1, 1))
-    out = M._keyword_search({"query": "kinase", "taxon": "soybean"})
-    assert "Tip: legumemine also covers Glycine" in out
+    assert "[mine: glycinemine]" in out
+    assert not any("/legumemine/" in u for u in mine["urls"])
 
 
 def test_a_gene_id_spelled_differently_is_retried(mine, monkeypatch):
@@ -1128,8 +1254,64 @@ def test_a_gene_id_spelled_differently_is_retried(mine, monkeypatch):
     out = M._gene_proteins({"gene": "arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H",
                             "mine": "arachismine"})
     assert ("arachismine spells arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H as "
-            "arahy.Tifrunner.gnm2.ann1.GHMM2H; these rows are for that ID.") in out
+            "arahy.Tifrunner.gnm2.ann1.GHMM2H; its rows are for that ID.") in out
     assert "GHMM2H | gnm2" in out
     assert M._other_spellings("arahy.Tifrunner.gnm2.ann1.GHMM2H") == [
         "arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H"]
     assert M._other_spellings("GHMM2H") == []
+
+
+def test_a_slow_fetch_replies_still_fetching_and_the_next_call_collects_it(
+        mine, monkeypatch):
+    """A mine computing a large new result can outlast a client's patience. The reply
+    says so and the fetch carries on; the same call later gets the result."""
+    import threading
+    release = threading.Event()
+    calls = []
+
+    def slow(url, accept="application/json"):
+        if "/service/model" in url:
+            return {"model": {"classes": {"Gene": {}}}}
+        calls.append(url)
+        release.wait(5)
+        return {"wasSuccessful": True, "columnHeaders": ["Gene > Name"],
+                "results": [["G1"], ["G2"]]}
+    monkeypatch.setattr(M, "_get", slow)
+    monkeypatch.setattr(M, "TIME_BUDGET", 0.05)
+    first = M._gene_proteins({"gene": "G"})
+    assert "STILL FETCHING" in first and "make the same call again" in first
+    release.set()
+    monkeypatch.setattr(M, "TIME_BUDGET", 5)
+    second = M._gene_proteins({"gene": "G"})
+    assert "G1" in second and "G2" in second
+    assert len(calls) == 1, "the second call must collect the first fetch, not refetch"
+
+
+def test_keyword_hits_are_one_object_whatever_each_mine_shows_beside_them():
+    """legumemine names a Bailey II gene where arachismine leaves the name blank; the
+    two hits are the same gene."""
+    a, b = M._Fetched("legumemine"), M._Fetched("arachismine")
+    a.rows = [["Gene", "arahy.BaileyII.gnm1.ann1.G1", "G1", "Arachis hypogaea", "", "d"]]
+    b.rows = [["Gene", "arahy.BaileyII.gnm1.ann1.G1", "", "Arachis hypogaea", "", "d"]]
+    items = M._merge([a, b], set(), ["type", "identifier"], None, key_cols=(0, 1))
+    assert len(items) == 1 and items[0][1] == {"legumemine", "arachismine"}
+    # A PathQuery row is the answer itself: a difference in any column is a finding.
+    assert len(M._merge([a, b], set(), ["type", "identifier"], None)) == 2
+
+
+def test_a_mine_without_the_family_is_left_out_and_the_reply_says_why(
+        mine, catalog, monkeypatch):
+    """phaseolusmine holds legfed_v1_0 families only; asking it for a legume.fam3
+    family's members would report a certain zero as if it were a finding."""
+    def fake(url, accept="application/json"):
+        name = url.split("/service/")[0].rsplit("/", 1)[-1]
+        if "/service/model" in url:
+            return {"model": {"classes": {"Gene": {}}}}
+        mine["urls"].append(url)
+        if "format=count" in url:
+            return "0" if name == "phaseolusmine" else "9"
+        return _members_body(2)
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._gene_family_members({"family": "Legume.fam3.10524", "taxon": "phavu"})
+    assert "phaseolusmine was not queried: it has no gene family Legume.fam3.10524." in out
+    assert not any("/phaseolusmine/" in u and "format=json" in u for u in mine["urls"])

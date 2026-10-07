@@ -21,28 +21,34 @@ model. Each tool below owns a single tested PathQuery, so the traps are handled 
 3. **One gene name, several assemblies.** A bare name matches gnm2, gnm4 AND gnm6 — three
    different loci. Results always carry the assembly/annotation, and `assembly`/
    `annotation` narrow it.
-4. **Unbounded result sets.** One gene has 639 expression values, so queries are capped and
-   the total is reported via a `format=count` pre-flight rather than truncating silently.
+4. **Large result sets.** One gene has 639 expression values, and a description search can
+   return 200,000 genes. Every result is fetched whole, in parallel chunks under a sort
+   with no ties, up to a safety limit that is always reported (`_fetch_all`), and paged
+   from the merged list. A fetch that outlasts TIME_BUDGET keeps running, and the same
+   call collects it.
 5. **A mine that does not exist.** Only ~10 genera have a mine; the store holds ~48 species
    that have none. Routing them by name produced a 404 the model reads as an outage, so
    the catalog's published mines are checked BEFORE any request (see `_known_mines`).
 
-Successful responses are memoized for the life of the process (`_cached`): an agent working
-one gene re-issues the same PathQuery — `mine_gene_family_members` re-derives the
-family `mine_gene_families` just fetched. Errors are never cached, so a retry retries.
+Merged results are cached for paging, bounded by row count (`_merged_result`); small
+lookups are memoized for the life of the process (`_cached`). Errors are never cached, so
+a retry retries.
 
-Mine selection: `MINE` (env `LEGUMISTA_LIS_MINE`) with a per-call `mine` override. The
-default is `legumemine`, the pan-legume mine — it spans 55 organisms, so its gene families
-are cross-species (Legume.fam3.10524 has 347 members there vs 195 in the genus-scoped
-glycinemine). The PathQueries are mine-agnostic, so a per-genus mine ('glycinemine',
-'phaseolusmine', ...) is a one-argument switch when a genus-scoped answer is wanted. Every
-result names the mine that answered, so an agent can never misattribute.
+Mine selection (`_plan`): every query goes to `MINE` (env `LEGUMISTA_LIS_MINE`, default
+`legumemine`, the pan-legume mine) whenever its data model has the class queried, and to
+the subject genus's own mine too, when one exists and has it. Neither mine holds
+everything the other does, and agents told so still queried legumemine alone, so the
+tools ask both and merge them (`_merge`), marking each row with the mine(s) holding it.
+'taxon' names the subject and filters by it; 'mine' queries one mine alone.
 """
 import asyncio
 import os
 import re
 import threading
 import urllib.parse
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from xml.sax.saxutils import quoteattr
 
 from . import tools_catalog
@@ -53,9 +59,6 @@ from .tools_native import MAX_CHARS, _cap, _get, _validate_url
 MINES_BASE = os.environ.get("LEGUMISTA_LIS_MINES_BASE",
                             "https://mines.legumeinfo.org").rstrip("/")
 MINE = os.environ.get("LEGUMISTA_LIS_MINE", "legumemine")
-MAX_ROWS = int(os.environ.get("LEGUMISTA_MINE_MAX_ROWS", "50"))
-# Pre-flight counts cost a round trip; skip them for queries that cannot run away.
-COUNT_THRESHOLD = int(os.environ.get("LEGUMISTA_MINE_COUNT_THRESHOLD", "200"))
 # Characters of rows per reply. The rest of MAX_CHARS is left for what callers append (a
 # footer, the family caveat), so rows are dropped whole here and never cut mid-row by
 # _cap -- a list cut mid-row has no honest "continue from" point.
@@ -122,6 +125,9 @@ def reset_cache():
     """Forget every cached mine response. For tests, and for a future reload command."""
     with _CACHE_LOCK:
         _CACHE.clear()
+    with _MERGED_LOCK:
+        _MERGED.clear()
+        _PENDING.clear()
     with _MINES_LOCK:
         _KNOWN.clear()
         _PROBED.clear()
@@ -417,13 +423,31 @@ _TITLES = {"protein records": "Proteins", "gene family assignments": "Gene famil
            "expression values": "Expression values"}
 
 
-# --- both mines -------------------------------------------------------------------------
-# A genus with its own mine is covered twice: by legumemine and by that mine, and neither
-# holds everything the other does. Agents asked about one species queried legumemine
-# alone, so every reply about one genus ends with a tip to make the same query in the
-# other mine, compare, and present both.
+# --- every mine that covers the subject ---------------------------------------------------
+# A genus with its own mine is covered twice, by legumemine and by that mine, and neither
+# holds everything the other does. Agents asked about one species queried legumemine alone,
+# however plainly the genus mines were described, so the tools query both themselves: the
+# full result from each, merged, every row marked with the mine(s) that hold it.
+FETCH_CHUNK = int(os.environ.get("LEGUMISTA_MINE_FETCH_CHUNK", "10000"))
+# A safety limit, not a page size: the whole result is fetched up to here, and a reply
+# that reaches it says so. 300,000 rows covers the largest gene query seen (266,913).
+FETCH_MAX = int(os.environ.get("LEGUMISTA_MINE_FETCH_MAX", "300000"))
+FETCH_WORKERS = int(os.environ.get("LEGUMISTA_MINE_FETCH_WORKERS", "6"))
+PAGE_MAX = 500
+# Rows kept across cached merged results, so paging a large result does not refetch it.
+MERGED_CACHE_ROWS = int(os.environ.get("LEGUMISTA_MINE_CACHE_ROWS", "500000"))
+# Seconds a call waits for a fetch before replying that it is still running. A mine
+# computing a large result it has not seen before can take a minute or more, longer than
+# some clients wait for a tool; the fetch carries on, and the same call collects it.
+TIME_BUDGET = float(os.environ.get("LEGUMISTA_MINE_TIME_BUDGET", "45"))
+
 _QUALIFIED = re.compile(r"^(?P<abbrev>[a-z]{4,6})\.(?P<stem>[A-Za-z0-9_-]+\.gnm\d+\.ann\d+)\."
                         r"(?P<name>.+)$")
+# Where each query root reaches an organism, for filtering by taxon. A root not listed
+# (QTL, GWASResult, GeneticMarker) lives in genus mines only and is not filtered.
+_ORGANISM_PATH = {"Gene": "Gene.organism", "GeneFunction": "GeneFunction.gene.organism",
+                  "GeneFamily": "GeneFamily.genes.organism",
+                  "ExpressionValue": "ExpressionValue.feature.organism"}
 
 
 def _genus_of(name: str, exact: bool = False) -> str:
@@ -440,26 +464,13 @@ def _genus_of(name: str, exact: bool = False) -> str:
     return ""
 
 
-def _subject_genus(args, rows=(), genus_col=None) -> str:
-    """The one genus a query is about: its taxon arguments, else its gene ID's prefix,
-    else the genus column of a complete result. "" when it is not one genus."""
-    for key in ("target_taxon", "taxon"):
-        value = (args.get(key) or "").strip()
-        if value:
-            return _genus_of(value)
-    gene = (args.get("gene") or "").strip()
-    if gene:
-        match = _QUALIFIED.match(gene)
-        prefix = match.group("abbrev") if match else gene.split(".", 1)[0] if "." in gene else ""
-        genus = _genus_of(prefix, exact=True) if prefix else ""
-        if genus:
-            return genus
-    if genus_col is not None:
-        genera = {str(r[genus_col]).split()[0] for r in rows
-                  if len(r) > genus_col and r[genus_col]}
-        if len(genera) == 1:
-            return genera.pop()
-    return ""
+def _gene_genus(gene: str) -> str:
+    """The genus a gene ID names: the abbreviation of a qualified ID, else a bare name's
+    prefix when it is the species abbreviation (Glyma., Arahy.). "" otherwise."""
+    gene = (gene or "").strip()
+    match = _QUALIFIED.match(gene)
+    prefix = match.group("abbrev") if match else gene.split(".", 1)[0] if "." in gene else ""
+    return _genus_of(prefix, exact=True) if prefix else ""
 
 
 def _has_class(mine: str, cls: str):
@@ -472,36 +483,11 @@ def _has_class(mine: str, cls: str):
             _validate_url(url)
             doc = _get(url, accept="application/json")
             classes = set(((doc or {}).get("model") or {}).get("classes") or {})
-        except Exception:  # noqa: BLE001 - an unreadable model means "do not suggest"
+        except Exception:  # noqa: BLE001 - an unreadable model means "do not add this mine"
             return None, False
         return (classes or None), bool(classes)
     classes = _cached(("model", mine), compute)
     return None if classes is None else cls in classes
-
-
-def _other_mine_tip(args, mine, root=None, rows=(), genus_col=None) -> str:
-    """The tip that ends a reply about one genus: the other mine that covers it can answer
-    the same query, so make it there too, compare, and present both. Only when that mine
-    exists and its data model has the class this query reads (`root`); never a guess."""
-    genus = _subject_genus(args, rows, genus_col)
-    if not genus or not genus[0].isupper() or genus.isupper():
-        return ""
-    genus_mine = genus.lower() + "mine"
-    if mine == MINE:
-        other = genus_mine
-    elif mine == genus_mine:
-        other = MINE
-    else:
-        return ""
-    known = _known_mines()
-    if known is None or (other not in known and not _mine_exists(other)):
-        return ""
-    if root and root != "Gene" and _has_class(other, root) is not True:
-        return ""
-    where = (f"{genus} also has its own mine, {other}" if other == genus_mine
-             else f"{other} also covers {genus}")
-    return (f"Tip: {where}. Make this same query there (mine='{other}'), then compare the "
-            "two results and present both to the user, each with its mine.")
 
 
 def _other_spellings(gene: str) -> list:
@@ -518,65 +504,455 @@ def _other_spellings(gene: str) -> list:
     return [head + f"{token}.{name}"]
 
 
+def _latin(taxon: str):
+    """(genus, species) for a Latin genus or binomial ('Cajanus cajan'), else None."""
+    bits = taxon.replace("_", " ").split()
+    if not bits or not bits[0][:1].isupper() or not bits[0][1:].islower() or len(bits) > 2:
+        return None
+    return bits[0], (bits[1].lower() if len(bits) > 1 else "")
+
+
+def _taxon_scope(taxon: str):
+    """(genus, species, label, error, unresolved) for a taxon argument.
+
+    A name the catalog resolves is used as resolved. A Latin genus or binomial it does
+    not know is used as written, with `unresolved` holding the catalog's explanation: the
+    catalog is incomplete, and a genus mine it does not list can still hold the taxon
+    (the caller probes for it, and reports `unresolved` if nothing answers). Anything
+    else, a common name above all, is never guessed at."""
+    taxon = (taxon or "").strip()
+    if not taxon:
+        return "", "", "", None, ""
+    unresolved = ""
+    if tools_catalog.controller() is not None:
+        match = tools_catalog.resolve_taxon(taxon)
+        if match.ok:
+            species = "" if match.species == "GENUS" else match.species
+            return match.genus, species, f"{match.genus} {species}".strip(), None, ""
+        if match.candidates:
+            return "", "", "", f"error: taxon: {match.problem()}", ""
+        unresolved = match.problem()
+    latin = _latin(taxon)
+    if latin is None:
+        return "", "", "", ("error: taxon: " + (unresolved or
+                            "no LIS catalog is loaded, so only a Latin genus or binomial "
+                            "is accepted (e.g. 'Cicer arietinum').")), ""
+    genus, species = latin
+    return genus, species, f"{genus} {species}".strip(), None, unresolved
+
+
+def _genus_mine(genus: str, root: str, trust_guess: bool = False) -> str:
+    """The genus's own mine when it exists and its data model holds `root`, else "".
+
+    Existence comes from the catalog, or a probe for a mine it does not list. With no
+    catalog loaded nothing can be checked: `trust_guess` then takes '<genus>mine' on
+    faith, which a tool whose data lives only in genus mines must, and a tool that has
+    legumemine to answer need not."""
+    if not genus or not genus[:1].isupper() or genus.isupper():
+        return ""
+    mine = genus.lower() + "mine"
+    known = _known_mines()
+    if known is None:
+        return mine if trust_guess else ""
+    if mine not in known and not _mine_exists(mine):
+        return ""
+    return mine if root == "Gene" or _has_class(mine, root) is not False else ""
+
+
+def _plan(args, root, require_taxon=False, genus_hint=""):
+    """Which mines answer, and the taxon filter. Returns (mines, filter_constraints,
+    scope_label, error).
+
+    An explicit 'mine' is queried alone. Otherwise legumemine answers whenever its data
+    model has the root class, and so does the subject genus's own mine: the genus of
+    'taxon', else of the gene ID (or `genus_hint`). 'taxon' also filters rows to that
+    species or genus, in every mine."""
+    explicit = (args.get("mine") or "").strip()
+    genus, species, label, err, unresolved = _taxon_scope(
+        args.get("taxon") or args.get("genus") or "")
+    if err:
+        return [], [], "", err
+    path = _ORGANISM_PATH.get(root)
+    cons = []
+    if genus and path:
+        cons.append((f"{path}.genus", "=", genus))
+        if species:
+            cons.append((f"{path}.species", "=", species))
+    if explicit:
+        return [explicit], cons, label, None
+    if require_taxon and not genus:
+        return [], [], "", ("error: missing 'taxon' — QTL/GWAS/marker data lives only in the "
+                            "per-species mines (legumemine has none of it), so name the "
+                            "species, e.g. taxon='Glycine max' or taxon='Phaseolus vulgaris'.")
+    subject = genus or genus_hint or _gene_genus(args.get("gene") or "")
+    mines = []
+    if root == "Gene" or _has_class(MINE, root) is not False:
+        mines.append(MINE)
+    other = _genus_mine(subject, root, trust_guess=require_taxon)
+    if other and other not in mines:
+        mines.append(other)
+    if unresolved and not other:
+        # A name the catalog does not know, and no mine answers to its genus: the
+        # problem is the name, so say that rather than "X has no InterMine".
+        return [], [], "", f"error: taxon: {unresolved}"
+    if not mines:
+        taxon = (args.get("taxon") or "").strip()
+        if taxon and require_taxon:
+            return [], [], "", _no_mine(taxon, genus.lower() + "mine")
+        return [], [], "", (f"error: no LIS mine holds {root} data"
+                            + (f" for {label}" if label else "") + ".")
+    return mines, cons, label, None
+
+
+def _full_sort(view, sort):
+    """The tool's sort, then every view column: a complete order, so the chunks of a
+    large result neither repeat nor skip a row."""
+    named = set((sort or "").split()[0::2])
+    return " ".join(([sort] if sort else []) + [f"{p} asc" for p in view if p not in named])
+
+
+class _Fetched:
+    """One mine's whole answer to one query."""
+    def __init__(self, mine):
+        self.mine, self.rows, self.cols = mine, [], []
+        self.total = None          # rows the mine has for the query; None if not counted
+        self.error = ""            # the mine could not answer at all
+        self.incomplete = ""       # some rows could not be fetched (kept rows are valid)
+        self.respelled = ""        # the gene ID this mine answered under, if not as asked
+
+
+def _fetch_all(mine, view, constraints, sort, gene=""):
+    """Every row this mine has for the query, in FETCH_CHUNK requests run in parallel
+    up to FETCH_MAX. A fully qualified gene ID the mine does not know as written is
+    retried in its other spelling."""
+    got = _Fetched(mine)
+    order = _full_sort(view, sort)
+    xml = _pathquery(view, constraints, order)
+    rows, cols, err = _fetch(mine, xml, FETCH_CHUNK)
+    if err:
+        got.error = err
+        return got
+    if not rows and gene:
+        for alt in _other_spellings(gene):
+            alt_xml = _pathquery(view, [(p, op, alt if op == "LOOKUP" else v)
+                                        for p, op, v in constraints], order)
+            alt_rows, alt_cols, alt_err = _fetch(mine, alt_xml, FETCH_CHUNK)
+            if alt_err:
+                got.error = alt_err
+                return got
+            if alt_rows:
+                rows, cols, xml, got.respelled = alt_rows, alt_cols, alt_xml, alt
+                break
+    got.rows, got.cols = list(rows), cols
+    if len(rows) < FETCH_CHUNK:
+        got.total = len(rows)
+        return got
+    total = _count(mine, xml)
+    got.total = total
+    if total is None:
+        start = FETCH_CHUNK
+        while start < FETCH_MAX:
+            more, _c, err = _fetch(mine, xml, FETCH_CHUNK, start)
+            if err:
+                got.incomplete = f"rows from {start:,} on could not be fetched ({err})"
+                return got
+            got.rows += more
+            if len(more) < FETCH_CHUNK:
+                return got
+            start += FETCH_CHUNK
+        got.incomplete = (f"stopped at the {FETCH_MAX:,}-row fetch limit "
+                          "(LEGUMISTA_MINE_FETCH_MAX), and the total could not be counted")
+        return got
+    limit = min(total, FETCH_MAX)
+    starts = list(range(FETCH_CHUNK, limit, FETCH_CHUNK))
+    with ThreadPoolExecutor(max_workers=max(1, FETCH_WORKERS)) as pool:
+        chunks = list(pool.map(
+            lambda s: _fetch(mine, xml, min(FETCH_CHUNK, limit - s), s), starts))
+    for start, (more, _c, err) in zip(starts, chunks):
+        if err:
+            got.incomplete = f"rows from {start:,} on could not be fetched ({err})"
+            return got
+        got.rows += more
+    if total > FETCH_MAX:
+        got.incomplete = (f"fetched the first {FETCH_MAX:,} of {total:,} rows, the fetch "
+                          "limit (LEGUMISTA_MINE_FETCH_MAX)")
+    return got
+
+
+def _spelling_tokens(genera) -> set:
+    """The capitalized species abbreviations ('Arahy') that start gene names in these
+    genera, the token a genus mine may drop."""
+    ctl = tools_catalog.controller()
+    if ctl is None:
+        return set()
+    tokens = set()
+    for key, meta in (ctl.document.get("taxa") or {}).items():
+        if isinstance(meta, dict) and key.split("/")[0] in genera and meta.get("abbrev"):
+            tokens.add(str(meta["abbrev"]).capitalize())
+    return tokens
+
+
+def _merge(fetched, tokens, view, sort, key_cols=None):
+    """One list from every mine's rows: rows equal once the dropped name token is
+    restored count once, marked with every mine that holds them. Returns [(row, mines)]
+    in the tool's sort order.
+
+    `key_cols` picks the columns that identify a row (default: all of them). For a
+    PathQuery every column is part of the answer, so rows that differ anywhere are two
+    findings. A keyword-search hit is one object whatever the mine shows beside it: one
+    mine names a gene where the other leaves the name blank."""
+    strip = (re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, sorted(tokens))) + r")\.")
+             if tokens else None)
+
+    def key(row):
+        cells = row if key_cols is None else [row[i] for i in key_cols if i < len(row)]
+        return tuple(strip.sub("", c) if strip is not None and isinstance(c, str) else c
+                     for c in cells)
+    # A row's key carries its occurrence number within its mine, so rows a mine returns
+    # twice (two records alike in every column shown) stay two, and match the other
+    # mine's first and second copies, rather than collapsing into one.
+    merged, order, shared = {}, [], {}
+    for got in fetched:
+        seen = {}
+        for row in got.rows:
+            base = key(row)
+            seen[base] = seen.get(base, 0) + 1
+            k = base + (seen[base],)
+            if k in merged:
+                held = merged[k][1] | {got.mine}
+                merged[k] = (merged[k][0], shared.setdefault(held, held))
+            else:
+                held = frozenset((got.mine,))
+                merged[k] = (row, shared.setdefault(held, held))
+                order.append(k)
+
+    def norm(v):
+        return (v is None, (0, v) if isinstance(v, (int, float)) else (1, str(v)))
+    items = [merged[k] for k in sorted(order, key=lambda k: tuple(norm(v) for v in k))]
+    pairs = (sort or "").split()
+    for path, direction in reversed(list(zip(pairs[0::2], pairs[1::2]))):
+        if path in view:
+            i = view.index(path)
+            items.sort(key=lambda it, i=i: norm(it[0][i] if i < len(it[0]) else None),
+                       reverse=direction.lower() == "desc")
+    return items
+
+
+def _breakdown(items, mines) -> list:
+    """Rows per annotation, per mine, for a result keyed by fully qualified IDs: the
+    complete picture a page of rows cannot give."""
+    if not items:
+        return []
+    width = len(items[0][0])
+    col = next((i for i in range(width)
+                if sum(1 for row, _m in items if isinstance(row[i], str)
+                       and _QUALIFIED.match(row[i])) * 2 > len(items)), None)
+    if col is None:
+        return []
+    counts = {}
+    for row, held in items:
+        match = _QUALIFIED.match(str(row[col])) if isinstance(row[col], str) else None
+        stem = f"{match.group('abbrev')}.{match.group('stem')}" if match else "(other)"
+        for mine in held:
+            counts.setdefault(stem, {}).setdefault(mine, 0)
+            counts[stem][mine] += 1
+    if len(counts) < 2 and len(mines) < 2:
+        return []
+    stems = sorted(counts, key=lambda s: (-sum(counts[s].values()), s))
+    lines = [f"by annotation ({count_phrase(min(len(stems), 30), len(stems), 'annotation(s)')}):"]
+    for stem in stems[:30]:
+        lines.append(f"  {stem}: " + ", ".join(f"{m} {counts[stem].get(m, 0):,}"
+                                               for m in mines))
+    return lines
+
+
+_MERGED: "OrderedDict" = OrderedDict()
+_MERGED_LOCK = threading.Lock()
+_PENDING: dict = {}
+_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="legumista-mine")
+
+
+def _store(key, compute):
+    """Run a fetch-and-merge and cache what it found, bounded by MERGED_CACHE_ROWS
+    rows. A result with any failed or incomplete mine is not cached, so a retry retries;
+    it stays with its pending entry for the call that collects it."""
+    value, cacheable = compute()
+    if cacheable:
+        with _MERGED_LOCK:
+            _MERGED[key] = value
+            while (len(_MERGED) > 1
+                   and sum(len(v[1]) for v in _MERGED.values()) > MERGED_CACHE_ROWS):
+                _MERGED.popitem(last=False)
+            _PENDING.pop(key, None)
+    return value
+
+
+def _merged_result(key, compute):
+    """The merged result for `key`, or None while its fetch is still running.
+
+    A fetch runs in the background and the call waits up to TIME_BUDGET for it. One
+    still running is left to finish: the next identical call joins it, or finds it done,
+    rather than starting another."""
+    with _MERGED_LOCK:
+        if key in _MERGED:
+            _MERGED.move_to_end(key)
+            return _MERGED[key]
+        future = _PENDING.get(key)
+        if future is None:
+            # A finished fetch whose caller never came back is dropped once there are
+            # enough of them, so an abandoned large result does not stay in memory.
+            done = [k for k, f in _PENDING.items() if f.done()]
+            for stale in done[:max(0, len(done) - 8)]:
+                _PENDING.pop(stale, None)
+            future = _PENDING[key] = _POOL.submit(_store, key, compute)
+    try:
+        value = future.result(timeout=TIME_BUDGET)
+    except FutureTimeout:
+        return None
+    except Exception:
+        with _MERGED_LOCK:
+            _PENDING.pop(key, None)
+        raise
+    with _MERGED_LOCK:
+        if _PENDING.get(key) is future:
+            _PENDING.pop(key, None)
+    return value
+
+
 def _execute(args, title, view, constraints, sort=None, assembly_col=1,
              subject_key="gene", subject_hint="a gene identifier such as 'Glyma.12G040000'",
-             require_taxon=False, footer=None, on_empty=None, pageable=False,
-             genus_col=None):
-    """Run one PathQuery and render it. A `pageable` tool honours args['offset'], so
-    `sort` must then order the rows completely: a tie lets a row move between pages.
-
-    Every reply about one genus ends with the tip to make the same query in that genus's
-    other mine, when that mine can answer it (_other_mine_tip). A gene ID the mine does
-    not know as written is retried in its other spelling, and the reply says so."""
-    mine, mine_err = _resolve_mine(args, require_taxon)
-    if mine_err:
-        return mine_err
+             require_taxon=False, footer=None, on_empty=None, genus_hint="", holds=None,
+             **_ignored):
+    """Run one PathQuery against every mine that covers its subject (_plan), fetch each
+    mine's whole result (_fetch_all), merge them (_merge), and render one page of the
+    merged list with each mine's total, the overlap and a per-annotation breakdown.
+    'offset' pages through the merged list, which is cached."""
     subject = (args.get(subject_key) or "").strip()
     if not subject:
         return f"error: missing {subject_key!r} — {subject_hint}."
-    size = max(1, min(int(args.get("max_results") or MAX_ROWS), 500))
-    offset = max(0, int(args.get("offset") or 0)) if pageable else 0
-    xml = _pathquery(view, constraints, sort)
-    rows, cols, err = _run(mine, xml, size, offset)
+    root = view[0].split(".", 1)[0]
+    mines, taxon_cons, scope, err = _plan(args, root, require_taxon, genus_hint)
     if err:
         return err
-    respelled = ""
-    if not rows and not offset and subject_key == "gene":
-        for alt in _other_spellings(subject):
-            alt_xml = _pathquery(view, [(p, op, alt if op == "LOOKUP" else v)
-                                        for p, op, v in constraints], sort)
-            alt_rows, alt_cols, alt_err = _run(mine, alt_xml, size, offset)
-            if alt_err:
-                return alt_err
-            if alt_rows:
-                rows, cols, xml = alt_rows, alt_cols, alt_xml
-                respelled = f"{mine} spells {subject} as {alt}; these rows are for that ID."
-                break
-    root = view[0].split(".", 1)[0]
-    if not rows and offset:
-        total = _count(mine, xml)
-        return (f"{title} — {subject} [mine: {mine}]: no rows at offset={offset}; "
-                + (f"the query has {total:,} row(s) in all." if total is not None else
-                   "the query's total could not be checked."))
-    if not rows and on_empty is not None:
-        # The caller explains its own zero (see _render_empty) instead of the generic text.
-        out = on_empty(mine, subject)
-        tip = _other_mine_tip(args, mine, root)
-        return out + ("\n\n" + tip if tip else "")
-    capped = len(rows) >= size
-    total = (_count(mine, xml) if len(rows) >= min(size, COUNT_THRESHOLD)
-             else offset + len(rows))
+    # `holds(mine)` names why a mine cannot answer this exact query (a family id it does
+    # not have), so it is left out and the reply says why, rather than reporting its
+    # certain zero as a finding.
+    skipped = []
+    if holds is not None and len(mines) > 1:
+        for mine in list(mines):
+            reason = holds(mine)
+            if reason and len(mines) > 1:
+                mines.remove(mine)
+                skipped.append(f"{mine} was not queried: {reason}.")
+    constraints = list(constraints) + taxon_cons
+    if scope and scope not in title:
+        title = f"{title} in {scope}"
+    gene = subject if subject_key == "gene" else ""
+
+    def compute():
+        if len(mines) == 1:
+            fetched = [_fetch_all(mines[0], view, constraints, sort, gene)]
+        else:
+            with ThreadPoolExecutor(max_workers=len(mines)) as pool:
+                fetched = list(pool.map(
+                    lambda m: _fetch_all(m, view, constraints, sort, gene), mines))
+        ok = [f for f in fetched if not f.error]
+        genera = {g for g in (_gene_genus(gene), (scope.split() or [""])[0]) if g}
+        for f in ok:
+            for row in f.rows[:50]:
+                for cell in row:
+                    if isinstance(cell, str) and _QUALIFIED.match(cell):
+                        g = _gene_genus(cell)
+                        if g:
+                            genera.add(g)
+        items = _merge(ok, _spelling_tokens(genera), view, sort)
+        cacheable = all(not f.error and not f.incomplete for f in fetched)
+        return (fetched, items), cacheable
+
+    key = ("merged", tuple(mines), _pathquery(view, constraints, sort), gene)
+    result = _merged_result(key, compute)
+    if result is None:
+        return (f"{title} — {subject} [mines: {', '.join(mines)}]: STILL FETCHING. This "
+                f"result is large and the mines took longer than {TIME_BUDGET:g} s to "
+                "return it. The fetch carries on here: make the same call again to get the "
+                "result. This is not an empty result and not an error.")
+    fetched, items = result
+    return _reply(args, title, subject, fetched, items, assembly_col=assembly_col,
+                  footer=footer, on_empty=on_empty, head_extra=skipped)
+
+
+def _reply(args, title, subject, fetched, items, assembly_col=None, footer=None,
+           on_empty=None, head_extra=(), tail_extra=()):
+    """One page of a merged result: which mines answered, each one's total and the
+    overlap, the rows with the mine(s) that hold each, and the breakdown and footers
+    computed over the whole result. 'offset' and 'max_results' choose the page."""
+    ok = [f for f in fetched if not f.error]
+    failed = [f for f in fetched if f.error]
+    if not ok:
+        return failed[0].error if len(failed) == 1 else (
+            "error: every mine failed — " + "; ".join(f"{f.mine}: {f.error}" for f in failed))
+    labels = [f.mine for f in ok]
+    multi = len(fetched) > 1
+
+    head = []
+    if failed:
+        head.append("PARTIAL RESULTS — " + "; ".join(f"{f.mine} FAILED ({f.error})"
+                                                      for f in failed)
+                    + f". The rows below come only from {', '.join(labels)}; anything "
+                    "the failed mine holds is unverified, not absent.")
+    for f in ok:
+        if f.respelled:
+            head.append(f"{f.mine} spells {subject} as {f.respelled}; its rows are for that "
+                        "ID.")
+        if f.incomplete:
+            head.append(f"INCOMPLETE — {f.mine}: {f.incomplete}.")
+    if multi or failed:
+        per = [f"{f.mine} {count_phrase(len(f.rows), f.total, 'row(s)')}" for f in ok]
+        line = "sources — " + "; ".join(per)
+        if len(ok) > 1:
+            both = sum(1 for _r, held in items if len(held) == len(ok))
+            only = [(f.mine, sum(1 for _r, held in items if held == {f.mine})) for f in ok]
+            line += (f". Merged: {len(items):,} distinct row(s): {both:,} in both"
+                     + "".join(f", {n:,} {m} only" for m, n in only))
+        head.append(line)
+    head += list(head_extra)
+
+    if not items:
+        if on_empty is not None:
+            out = "\n".join(on_empty(f.mine, subject) for f in ok)
+        else:
+            out = (f"{title} — {subject} [{'mines' if multi else 'mine'}: "
+                   f"{', '.join(labels)}]: no matches. The query was valid and returned zero "
+                   "rows.")
+        return _cap("\n".join(head + [out] + list(tail_extra)))
+
+    offset = max(0, int(args.get("offset") or 0))
+    size = max(1, min(int(args.get("max_results") or PAGE_MAX), PAGE_MAX))
+    if offset >= len(items):
+        return (f"{title} — {subject} [mines: {', '.join(labels)}]: no rows at "
+                f"offset={offset}; the merged result has {len(items):,} row(s).")
+    cols = list(next((f.cols for f in ok if f.cols), []))
+    rows = [list(row) for row, _held in items]
+    if len(ok) > 1:
+        cols.append("in")
+        page = [list(row) + ["both" if len(held) == len(ok) else ", ".join(sorted(held))]
+                for row, held in items[offset:offset + size]]
+    else:
+        page = [list(row) for row, _held in items[offset:offset + size]]
     note = _assembly_note(rows, assembly_col) if assembly_col is not None else ""
-    out = _render(title, mine, subject, rows, cols, total, size, note, capped=capped,
-                  offset=offset, pageable=pageable)
-    if respelled:
-        out = out.replace("\n", f"\n{respelled}\n", 1)
-    # A footer names the next tool the rows unlock. It goes in the OUTPUT rather than a
-    # docstring because the hand-off is only discoverable once you are holding the values.
-    complete = total is not None and offset + len(rows) >= total
-    extras = [footer(rows) if footer and rows else "",
-              _other_mine_tip(args, mine, root, rows if complete else (), genus_col)]
-    extras = [x for x in extras if x]
+    mine_label = ", ".join(labels)
+    out = _render(title, mine_label, subject, page, cols, len(items), size, note,
+                  capped=False, offset=offset, pageable=True, size_max=PAGE_MAX)
+    if multi:
+        out = out.replace(f"[mine: {mine_label}]", f"[mines: {mine_label}]", 1)
+    first, _sep, rest = out.partition("\n")
+    out = "\n".join([first] + head + [rest])
+    extras = _breakdown(items, labels) if (multi or len(items) > len(page)) else []
+    if footer:
+        text = footer(rows)
+        if text:
+            extras.append(text)
+    extras += list(tail_extra)
     if extras:
         out = _cap(out + "\n\n" + "\n".join(extras))
     return out
@@ -693,30 +1069,37 @@ def _catalog_symbol(args) -> str:
     for hit in hits:
         lines.append("  " + " | ".join(str(hit.get(k) or "")
                                        for k in ("abbrev", "gene", "doi", "synopsis")))
-    lines.append("This is the catalog's primary DOI for the symbol; the mine lists every "
-                 "publication behind it: re-run with an explicit 'mine'.")
+    lines.append("This is the catalog's primary DOI for the symbol; the mine rows below "
+                 "list every publication behind it.")
     return _cap("\n".join(lines))
 
 
 def _gene_symbol(args) -> str:
     """Resolve a gene SYMBOL to its gene ID(s) — the lookup `lis_gene` cannot do.
 
-    The catalog is consulted first (see `_catalog_symbol`); the mine query below is the
-    fall-through. `=` is case-insensitive in InterMine (GmNARK / gmnark / GMNARK all
-    match), so exact matching is safe here. One row per publication, because the DOIs are
-    the point: they hand the literature tools a citation for the functional claim."""
-    if (args.get("symbol") or "").strip():
-        curated = _catalog_symbol(args)
-        if curated:
-            return curated
-    return _execute(
+    The catalog's curated symbols answer first, offline and fully qualified; the mines
+    answer too, since their curation is broader and they carry every publication, not one
+    DOI. `=` is case-insensitive in InterMine (GmNARK / gmnark / GMNARK all match). One row
+    per publication, because the DOIs are the point: they hand the literature tools a
+    citation for the functional claim."""
+    symbol = (args.get("symbol") or "").strip()
+    curated = _catalog_symbol(args) if symbol else ""
+    hint = ""
+    if curated:
+        genera = {_gene_genus(line.split(" | ")[1].strip())
+                  for line in curated.splitlines()[3:] if line.count(" | ") >= 3}
+        hint = genera.pop() if len(genera) == 1 else ""
+    mined = _execute(
         args, "Gene symbol",
         ["GeneFunction.symbol", "GeneFunction.symbolLong",
          "GeneFunction.gene.name", "GeneFunction.gene.primaryIdentifier",
          "GeneFunction.synopsis", "GeneFunction.publications.doi"],
-        [("GeneFunction.symbol", "=", (args.get("symbol") or "").strip())],
+        [("GeneFunction.symbol", "=", symbol)],
         assembly_col=None, subject_key="symbol",
-        subject_hint="a gene symbol such as 'GmNARK' or 'PvSYMRK'")
+        subject_hint="a gene symbol such as 'GmNARK' or 'PvSYMRK'", genus_hint=hint)
+    if not curated:
+        return mined
+    return _cap(curated + "\n\n" + mined)
 
 
 _FAMILY_CAVEAT = (
@@ -726,49 +1109,22 @@ _FAMILY_CAVEAT = (
     "phylogeny or synteny (lis_synteny), and say which evidence you used.")
 
 
-def _target_constraints(target: str):
-    """(constraints, label, error) restricting family members to one taxon."""
-    target = (target or "").strip()
-    if not target:
-        return [], "", None
-    if tools_catalog.controller() is None:
-        # Without the catalog, names cannot be resolved: accept only a Latin genus or
-        # binomial, so "chickpea" is not silently queried as a genus called "Chickpea".
-        bits = target.replace("_", " ").split()
-        if not bits[0][:1].isupper() or len(bits) > 2:
-            return None, "", ("error: target_taxon: no LIS catalog is loaded, so only a "
-                              "Latin genus or binomial is accepted (e.g. 'Cicer arietinum').")
-        genus, species = bits[0], (bits[1].lower() if len(bits) > 1 else "")
-    else:
-        match = tools_catalog.resolve_taxon(target)
-        if not match.ok:
-            return None, "", f"error: target_taxon: {match.problem()}"
-        genus, species = match.genus, match.species
-    cons = [("Gene.organism.genus", "=", genus)]
-    if species and species != "GENUS":
-        cons.append(("Gene.organism.species", "=", species))
-    return cons, f"{genus} {species}".strip(), None
-
-
 def _gene_family_members(args) -> str:
-    """Members of a gene's family, optionally restricted to one target species.
+    """Members of a gene's family, from every mine that covers the subject.
 
     Accepts a gene (whose family is resolved first) or a family identifier directly.
-    Always queries the pan-legume mine unless 'mine' is given: families are cross-species
-    there (Legume.fam3.10524 has 347 members) but genus-scoped in a per-genus mine (195
-    in glycinemine), where another genus's gene is simply absent.
+    legumemine answers always, since its families span genera; with 'taxon' (or a gene
+    naming one genus) that genus's own mine answers too, and 'taxon' keeps only that
+    species' or genus's members.
 
     'assembly'/'annotation' pick the gene's copy, as in every other gene tool;
     'member_assembly'/'member_annotation' narrow the members listed. They are separate
     because they mean different genomes: a soybean gene's bean homologs need 'gnm4' for
     the gene and nothing at all for the bean. 'assembly' with 'family' has no gene to
     narrow, so it is refused rather than dropped without a word, as it once was."""
-    mine, mine_err = _resolve_mine(args)
-    if mine_err:
-        return mine_err
     family = (args.get("family") or "").strip()
     gene = (args.get("gene") or "").strip()
-    target_cons, target_label, terr = _target_constraints(args.get("target_taxon"))
+    _g, _s, taxon_label, terr, _u = _taxon_scope(args.get("taxon") or "")
     if terr:
         return terr
     gene_narrowing = [k for k in ("assembly", "annotation") if (args.get(k) or "").strip()]
@@ -777,32 +1133,41 @@ def _gene_family_members(args) -> str:
                 f"{'pick' if len(gene_narrowing) > 1 else 'picks'} which copy of "
                 "'gene' to look up, and with 'family' given no gene is looked up. To list "
                 "only one genome's members, use 'member_assembly'/'member_annotation' "
-                "(with 'target_taxon').")
+                "(with 'taxon').")
     version_cons = [(f"Gene.{field}Version", "=", args[f"member_{field}"].strip())
                     for field in ("assembly", "annotation")
                     if (args.get(f"member_{field}") or "").strip()]
-    scope = ", ".join(([target_label] if target_label else [])
-                      + [f"{field} {args[f'member_{field}'].strip()}"
+    versions = ", ".join(f"{field} {args[f'member_{field}'].strip()}"
                          for field in ("assembly", "annotation")
-                         if (args.get(f"member_{field}") or "").strip()])
+                         if (args.get(f"member_{field}") or "").strip())
+    scope = ", ".join(x for x in (taxon_label, versions) if x)
     title = ("Gene family members (homologs; not an orthology call)"
              + (f" in {scope}" if scope else ""))
     if not family:
         if not gene:
             return ("error: provide 'gene' (e.g. 'Glyma.12G040000') or 'family' "
                     "(e.g. 'Legume.fam3.10524').")
-        # Step 1: gene -> family, per assembly (a bare name can match several).
-        xml = _pathquery(["Gene.primaryIdentifier",
-                          "Gene.geneFamilyAssignments.geneFamily.primaryIdentifier"],
-                         _gene_constraints(args))
-        rows, _cols, err = _run(mine, xml, 20)
-        if err:
-            return err
-        by_family = {}
-        for gene_id, fam in (r for r in rows or [] if len(r) > 1 and r[1]):
-            by_family.setdefault(fam, []).append(gene_id)
+        explicit = (args.get("mine") or "").strip()
+        candidates = [explicit] if explicit else [MINE] + [
+            m for m in [_genus_mine(_gene_genus(gene), "Gene")] if m and m != MINE]
+        by_family, looked = {}, []
+        for mine in candidates:
+            for name in [gene] + _other_spellings(gene):
+                xml = _pathquery(["Gene.primaryIdentifier",
+                                  "Gene.geneFamilyAssignments.geneFamily.primaryIdentifier"],
+                                 _gene_constraints({**args, "gene": name}))
+                rows, _cols, err = _run(mine, xml, 20)
+                if err:
+                    return err
+                for gene_id, fam in (r for r in rows or [] if len(r) > 1 and r[1]):
+                    by_family.setdefault(fam, []).append(gene_id)
+                looked.append(mine)
+                if by_family:
+                    break
+            if by_family:
+                break
         if not by_family:
-            return (_render_empty(title, mine, args, gene, "gene family assignment")
+            return (_render_empty(title, candidates[0], args, gene, "gene family assignment")
                     + "\n\n" + _FAMILY_CAVEAT)
         family = sorted(by_family, key=lambda f: (-len(by_family[f]), f))[0]
         others = [f for f in sorted(by_family) if f != family]
@@ -814,7 +1179,8 @@ def _gene_family_members(args) -> str:
     else:
         prefix = ""
     constraints = ([("Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "=", family)]
-                   + target_cons + version_cons)
+                   + version_cons)
+
     def explain(mine_name, fam):
         overall = _count(mine_name, _pathquery(
             ["Gene.primaryIdentifier"],
@@ -832,16 +1198,19 @@ def _gene_family_members(args) -> str:
         return (f"{title}: family {fam} exists in {mine_name} with {overall:,} members, "
                 f"none of them from {scope}. That is a real zero for this family "
                 f"in this mine, not a failed lookup.{hint}")
+    def holds(mine):
+        n = _count(mine, _pathquery(["GeneFamily.primaryIdentifier"],
+                                    [("GeneFamily.primaryIdentifier", "=", family)]))
+        return f"it has no gene family {family}" if n == 0 else ""
     out = _execute(
-        {**args, "family": family, "mine": mine}, title,
+        {**args, "family": family}, title,
         ["Gene.geneFamilyAssignments.geneFamily.primaryIdentifier", "Gene.primaryIdentifier",
          "Gene.organism.genus", "Gene.organism.species", "Gene.assemblyVersion"],
         constraints, sort="Gene.organism.genus asc Gene.primaryIdentifier asc",
         assembly_col=None, subject_key="family",
         subject_hint="a gene family identifier such as 'Legume.fam3.10524'",
-        on_empty=explain, pageable=True, genus_col=2)
-    body, tip_sep, tip = out.partition("\n\nTip: ")
-    return prefix + body + "\n\n" + _FAMILY_CAVEAT + (tip_sep + tip if tip_sep else "")
+        on_empty=explain, genus_hint=_gene_genus(gene), holds=holds)
+    return prefix + out + "\n\n" + _FAMILY_CAVEAT
 
 
 # --- search by description -------------------------------------------------------------
@@ -862,7 +1231,7 @@ def _whole_word_note(rows, query, col):
     partial = [r for r in rows if len(r) > col and r[col] and not word.search(str(r[col]))]
     if not partial:
         return ""
-    return (f"{len(partial)} of the {len(rows)} rows shown contain {query!r} only inside a "
+    return (f"{len(partial)} of the {len(rows):,} rows contain {query!r} only inside a "
             f"longer word (e.g. {str(partial[0][0])}: {str(partial[0][col])[:80]!r}) — "
             "they do not match the term. Prefer full product names.")
 
@@ -878,36 +1247,23 @@ def _gene_search(args) -> str:
     kind = (args.get("search") or "genes").strip().lower()
     if kind not in ("genes", "families"):
         return "error: 'search' must be 'genes' or 'families'."
-    mine, mine_err = _resolve_mine(args)
-    if mine_err:
-        return mine_err
     if kind == "families":
-        if (args.get("target_taxon") or "").strip():
-            return ("error: a gene family spans species, so 'target_taxon' does not apply "
-                    "to search='families'. Find the family here, then list one species' "
-                    "members with mine_gene_family_members(target_taxon=...), or "
-                    "one annotation's with lis_gene(genes={'family': ..., 'collection': "
-                    "...}).")
         view = ["GeneFamily.primaryIdentifier", "GeneFamily.size",
                 "GeneFamily.description"]
         constraints = [("GeneFamily.description", "CONTAINS", query)]
         # Largest first: the broad family is usually the one wanted. The identifier
         # breaks ties so paging is stable.
-        sort, col, scope = "GeneFamily.size desc GeneFamily.primaryIdentifier asc", 2, ""
+        sort, col = "GeneFamily.size desc GeneFamily.primaryIdentifier asc", 2
         nxt = ("A family's members in one annotation, with loci: lis_gene(genes="
                "{'family': <id>, 'collection': <annotation>}); across species: "
                "mine_gene_family_members.")
     else:
-        target_cons, scope, terr = _target_constraints(args.get("target_taxon"))
-        if terr:
-            return terr
         view = ["Gene.primaryIdentifier", "Gene.organism.genus", "Gene.organism.species",
                 "Gene.description"]
-        constraints = [("Gene.description", "CONTAINS", query)] + target_cons
+        constraints = [("Gene.description", "CONTAINS", query)]
         sort, col = "Gene.primaryIdentifier asc", 3
         nxt = ""
-    title = (f"Gene {'families' if kind == 'families' else 'search'} by description"
-             + (f" in {scope}" if scope else ""))
+    title = f"Gene {'families' if kind == 'families' else 'search'} by description"
 
     def empty(mine_name, subject):
         return (f"{title}: no {kind} in {mine_name} with a description containing "
@@ -919,11 +1275,10 @@ def _gene_search(args) -> str:
         return "\n".join(x for x in (_whole_word_note(rows, query, col), _SEARCH_CAVEAT,
                                       nxt) if x)
 
-    return _execute({**args, "mine": mine}, title, view, constraints, sort=sort,
+    return _execute(args, title, view, constraints, sort=sort,
                     assembly_col=None, subject_key="query",
                     subject_hint="description text such as 'receptor kinase'",
-                    footer=footer, on_empty=empty, pageable=True,
-                    genus_col=1 if kind == "genes" else None)
+                    footer=footer, on_empty=empty)
 
 
 # --- a mine's own keyword search -----------------------------------------------------
@@ -934,91 +1289,169 @@ _BRACKET_NOTE = ("A bracketed species in a description ('[Glycine max]') names t
                  "gene's species: that is the organism column.")
 
 
+KEYWORD_FETCH_MAX = int(os.environ.get("LEGUMISTA_MINE_SEARCH_MAX", "30000"))
+
+
+def _search_request(mine, params):
+    """One page of a mine's keyword search. Returns (doc, error)."""
+    url = f"{_service(mine)}/search?" + urllib.parse.urlencode(params)
+    try:
+        _validate_url(url)
+        doc = _get(url, accept="application/json")
+    except Exception as e:  # noqa: BLE001
+        return None, f"error: {mine} search failed: {type(e).__name__}: {e}"
+    if not isinstance(doc, dict) or not doc.get("wasSuccessful", False):
+        detail = (doc.get("error") if isinstance(doc, dict) else "") or "no reason given"
+        return None, f"error: {mine} rejected the search: {detail}"
+    return doc, ""
+
+
+def _search_row(hit):
+    f = hit.get("fields") or {}
+    ident = f.get("primaryIdentifier") or f.get("identifier") or f.get("name") or ""
+    name = f.get("symbol") or f.get("name") or ""
+    organism_name = f.get("organism.name") or f.get("organism.shortName") or ""
+    if f.get("strain.identifier"):
+        organism_name += f" ({f['strain.identifier']})"
+    version = ".".join(v for v in (f.get("assemblyVersion"), f.get("annotationVersion")) if v)
+    desc = str(f.get("description") or "")
+    return [hit.get("type", ""), ident, "" if name == ident else name, organism_name,
+            version, desc[:160] + ("…" if len(desc) > 160 else "")]
+
+
+def _search_all(mine, base, organisms):
+    """Every hit of one mine's keyword search, over each organism filter in `organisms`
+    ([None] for none), in pages of SEARCH_PAGE_MAX run in parallel up to
+    KEYWORD_FETCH_MAX per filter. The counts by facet are summed over the filters."""
+    got = _Fetched(mine)
+    got.facets, got.total = {}, 0
+    for organism in organisms:
+        params = dict(base, size=str(SEARCH_PAGE_MAX), start="0")
+        if organism:
+            params["facet_organism.shortName"] = organism
+        doc, err = _search_request(mine, params)
+        if err:
+            got.error = err
+            return got
+        total = int(doc.get("totalHits") or 0)
+        got.total += total
+        for facet, values in (doc.get("facets") or {}).items():
+            bucket = got.facets.setdefault(facet, {})
+            for value, n in (values or {}).items():
+                bucket[value] = bucket.get(value, 0) + int(n)
+        got.rows += [_search_row(h) for h in doc.get("results") or []]
+        limit = min(total, KEYWORD_FETCH_MAX)
+        starts = list(range(SEARCH_PAGE_MAX, limit, SEARCH_PAGE_MAX))
+        with ThreadPoolExecutor(max_workers=max(1, FETCH_WORKERS)) as pool:
+            pages = list(pool.map(
+                lambda st: _search_request(mine, dict(params, start=str(st))), starts))
+        for start, (page, perr) in zip(starts, pages):
+            if perr:
+                got.incomplete = f"results from {start:,} on could not be fetched ({perr})"
+                return got
+            got.rows += [_search_row(h) for h in page.get("results") or []]
+        if total > KEYWORD_FETCH_MAX:
+            got.incomplete = (f"fetched the first {KEYWORD_FETCH_MAX:,} of {total:,} results"
+                              + (f" for {organism}" if organism else "")
+                              + ", the search fetch limit (LEGUMISTA_MINE_SEARCH_MAX)")
+    got.cols = ["type", "identifier", "name", "organism", "version", "description"]
+    return got
+
+
+def _genus_short_names(genus: str):
+    """The organism names a keyword search counts by ('A. hypogaea') for a genus's
+    species, from the catalog, or None without one. Matching on the initial alone would
+    take other genera's species: legumemine counts 'A. evenia' (Aeschynomene) beside the
+    Arachis species."""
+    ctl = tools_catalog.controller()
+    if ctl is None:
+        return None
+    return sorted({f"{genus[0]}. {key.split('/')[1]}"
+                   for key in (ctl.document.get("taxa") or {})
+                   if key.split("/")[0] == genus and "/" in key})
+
+
 def _keyword_search(args) -> str:
     """What a mine's search box does: InterMine's keyword search over every indexed class
-    and field, with the counts by category and organism its results page shows.
+    and field, with the counts by category and organism its results page shows; run in
+    legumemine and, for one species or genus, that genus's own mine, each in full, then
+    merged.
 
     Not mine_gene_search's substring match on descriptions. Keyword search matches
-    whole words, so "chalcone synthase" finds 280 ArachisMine genes where a substring
-    finds 342: "synthase-like" and "deoxychalcone" are other words. Both are right; the
-    reply says which one ran."""
+    whole words, so a count can differ from the substring count for the same phrase;
+    the reply says which one ran. The search can filter only by organism, so a genus
+    in legumemine is searched once per species of it."""
     query = (args.get("query") or "").strip()
     if not query:
         return "error: missing 'query' — keywords, a quoted phrase, OR, AND NOT, or dros*."
-    mine, mine_err = _resolve_mine(args)
-    if mine_err:
-        return mine_err
-    size = max(1, min(int(args.get("max_results") or MAX_ROWS), SEARCH_PAGE_MAX))
-    offset = max(0, int(args.get("offset") or 0))
-    params = {"q": query, "size": str(size), "start": str(offset)}
+    genus, species, label, err, unresolved = _taxon_scope(args.get("taxon") or "")
+    if err:
+        return err
+    explicit = (args.get("mine") or "").strip()
+    if explicit:
+        mines = [explicit]
+    else:
+        mines = [MINE]
+        other = _genus_mine(genus, "Gene") if genus else ""
+        if other:
+            mines.append(other)
+        elif unresolved:
+            return f"error: taxon: {unresolved}"
     category = (args.get("category") or "").strip()
-    organism = (args.get("organism") or "").strip()
+    base = {"q": query}
     if category:
-        params["facet_Category"] = category
-    if organism:
-        params["facet_organism.shortName"] = organism
-    url = f"{_service(mine)}/search?" + urllib.parse.urlencode(params)
+        base["facet_Category"] = category
+    notes = []
+
+    def organisms_for(mine):
+        if not genus:
+            return [None]
+        if species:
+            return [f"{genus[0]}. {species}"]
+        if mine == genus.lower() + "mine":
+            return [None]
+        names = _genus_short_names(genus)
+        if names is None:
+            notes.append(f"{mine}'s results are not narrowed to {genus}: without a catalog "
+                         "its species cannot be told from other genera's.")
+            return [None]
+        return names
+    scope = ", ".join(x for x in (f"category {category}" if category else "", label) if x)
+    title = f"Keyword search{' (' + scope + ')' if scope else ''}"
 
     def compute():
-        try:
-            _validate_url(url)
-            doc = _get(url, accept="application/json")
-        except Exception as e:  # noqa: BLE001
-            return f"error: {mine} search failed: {type(e).__name__}: {e}", False
-        if not isinstance(doc, dict) or not doc.get("wasSuccessful", False):
-            detail = (doc.get("error") if isinstance(doc, dict) else "") or "no reason given"
-            return f"error: {mine} rejected the search: {detail}", False
-        return doc, True
+        plans = [(m, organisms_for(m)) for m in mines]
+        with ThreadPoolExecutor(max_workers=len(plans)) as pool:
+            fetched = list(pool.map(lambda p: _search_all(p[0], base, p[1]), plans))
+        ok = [f for f in fetched if not f.error]
+        tokens = _spelling_tokens({genus} if genus else set())
+        items = _merge(ok, tokens, ["type", "identifier"], None, key_cols=(0, 1))
+        return (fetched, items), all(not f.error and not f.incomplete for f in fetched)
 
-    doc = _cached(("search", url), compute)
-    if isinstance(doc, str):
-        return doc
-    total = int(doc.get("totalHits") or 0)
-    hits = doc.get("results") or []
-    scope = ", ".join(x for x in (f"category {category}" if category else "",
-                                  f"organism {organism}" if organism else "") if x)
-    title = f"Keyword search{' (' + scope + ')' if scope else ''}"
-    if not hits:
-        if offset and total:
-            return (f"{title} — {query} [mine: {mine}]: no results at offset={offset}; "
-                    f"the search has {total:,} in all.")
-        return (f"{title} — {query} [mine: {mine}]: no results. Keyword search matches "
-                "whole words in any indexed field; a filter value must match a count the "
-                "unfiltered search shows.")
-    rows, descriptions = [], []
-    for hit in hits:
-        f = hit.get("fields") or {}
-        ident = f.get("primaryIdentifier") or f.get("identifier") or f.get("name") or ""
-        name = f.get("symbol") or f.get("name") or ""
-        organism_name = f.get("organism.name") or f.get("organism.shortName") or ""
-        if f.get("strain.identifier"):
-            organism_name += f" ({f['strain.identifier']})"
-        version = ".".join(v for v in (f.get("assemblyVersion"), f.get("annotationVersion"))
-                           if v)
-        desc = f.get("description") or ""
-        descriptions.append(desc)
-        rows.append([hit.get("type", ""), ident, "" if name == ident else name,
-                     organism_name, version, desc[:160] + ("…" if len(desc) > 160 else "")])
+    key = ("search", tuple(mines), query, category, genus, species)
+    result = _merged_result(key, compute)
+    if result is None:
+        return (f"{title} — {query} [mines: {', '.join(mines)}]: STILL FETCHING. This "
+                f"result is large and the mines took longer than {TIME_BUDGET:g} s to "
+                "return it. The fetch carries on here: make the same call again to get the "
+                "result. This is not an empty result and not an error.")
+    fetched, items = result
+    ok = [f for f in fetched if not f.error]
     counts = []
-    for facet, label in (("Category", "by category"), ("organism.shortName", "by organism")):
-        values = (doc.get("facets") or {}).get(facet) or {}
-        if values:
-            counts.append(f"{label}: " + ", ".join(
-                f"{k} {v:,}" for k, v in sorted(values.items(), key=lambda kv: -kv[1])))
-    out = _render(title, mine, query, rows,
-                  ["type", "identifier", "name", "organism", "version", "description"],
-                  total, size, capped=len(hits) >= size, offset=offset, pageable=True,
-                  size_max=SEARCH_PAGE_MAX)
-    footer = counts + ["Whole words in any indexed field: 'kinase-like' is another word, "
-                       "so this can count fewer than mine_gene_search's substring "
-                       "match."]
-    if any(_BRACKET_RE.search(d) for d in descriptions):
-        footer.append(_BRACKET_NOTE)
-    tip = _other_mine_tip(args, mine, None, rows if offset + len(hits) >= total else (),
-                          genus_col=3)
-    if tip:
-        footer.append(tip)
-    return _cap(out + "\n\n" + "\n".join(footer))
+    for facet, name in (("Category", "by category"), ("organism.shortName", "by organism")):
+        per = []
+        for f in ok:
+            values = (getattr(f, "facets", {}) or {}).get(facet) or {}
+            if values:
+                per.append((f"{f.mine}: " if len(ok) > 1 else "") + ", ".join(
+                    f"{k} {v:,}" for k, v in sorted(values.items(), key=lambda kv: -kv[1])))
+        if per:
+            counts.append(f"{name} — " + "; ".join(per))
+    tail = counts + ["Whole words in any indexed field: 'kinase-like' is another word, so "
+                     "this can count fewer than mine_gene_search's substring match."]
+    if any(_BRACKET_RE.search(str(row[5])) for row, _held in items):
+        tail.append(_BRACKET_NOTE)
+    return _reply(args, title, query, fetched, items, head_extra=notes, tail_extra=tail)
 
 
 def _trait_qtls(args) -> str:
@@ -1115,27 +1548,31 @@ def _marker_position(args) -> str:
 
 
 # --- registry -------------------------------------------------------------------------
-# One rule for choosing a mine, on every mine tool: 'taxon' picks that genus's mine,
-# 'mine' names one, and with neither the pan-legume mine answers (the breeding tools,
-# whose data lives only in genus mines, require 'taxon'). 'target_taxon', where a tool
-# has it, filters rows and never picks the mine. The one exception is
-# mine_gene_family_members, which takes no routing 'taxon': it is cross-species
-# by purpose, and a 'taxon' that routed to a genus mine once dropped every other genus's
-# members without a word.
+# Every mine tool answers from every mine that covers its subject: legumemine, and the
+# subject genus's own mine where one exists and holds the data (see _plan). 'taxon' names
+# the species or genus asked about: it filters the rows and brings in its genus mine.
+# 'mine' queries one mine alone. Results are fetched whole, merged with each row's
+# source, and paged with 'offset'.
 _MINE_ARGS = {
     "taxon": {"type": "string",
-              "description": f"Query this species' or genus's own mine instead of "
-                             f"{MINE!r}: Latin name, common name or abbreviation "
-                             "('Arachis hypogaea', 'peanut', 'arahy'). For one species or "
-                             f"genus, query both its mine and {MINE!r}."},
+              "description": "The species or genus asked about: Latin name, common name or "
+                             "abbreviation ('Arachis hypogaea', 'peanut', 'arahy'). Keeps "
+                             "only its rows, and adds its genus's own mine to legumemine."},
     "mine": {"type": "string",
-             "description": "A mine by name ('arachismine'); overrides taxon."},
+             "description": "Query only this mine ('legumemine', 'arachismine', …)."},
+}
+_PAGE_ARGS = {
+    "max_results": {"type": "integer",
+                    "description": "Rows per page, 1-500 (default as many as fit)."},
+    "offset": {"type": "integer",
+               "description": "Rows of the merged result to skip; the reply names the "
+                              "offset that continues it."},
 }
 _GENE_ARG = {
     "gene": {"type": "string",
              "description": "Gene ID, bare ('Glyma.12G040000') or fully qualified."},
     **_MINE_ARGS,
-    "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
+    **_PAGE_ARGS,
 }
 _ASSEMBLY_ARGS = {
     "assembly": {"type": "string",
@@ -1148,11 +1585,11 @@ _ASSEMBLY_ARGS = {
 
 _TAXON_ARG = {
     "taxon": {"type": "string",
-              "description": "Species or genus whose mine to query: Latin name, common "
-                             "name or abbreviation ('Glycine max', 'soybean', 'glyma')."},
-    "mine": {"type": "string",
-             "description": "A mine by name ('glycinemine'); overrides taxon."},
-    "max_results": {"type": "integer", "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
+              "description": "The species or genus asked about: Latin name, common name or "
+                             "abbreviation ('Glycine max', 'soybean', 'glyma'). Its genus "
+                             "mine answers; this data is in no other."},
+    "mine": {"type": "string", "description": "Query only this mine ('glycinemine')."},
+    **_PAGE_ARGS,
 }
 
 
@@ -1190,41 +1627,31 @@ def mine_tools() -> list:
             _gene_expression),
         _mk("mine_gene_symbol",
             "A gene symbol (GmNARK, PvSYMRK) to its gene IDs, full name, synopsis and "
-            "DOIs: from the catalog's curated symbols when it has the symbol, else "
-            "from the mine; the reply says which. The other gene tools match "
+            "DOIs: the catalog's curated record when it has the symbol, and every mine "
+            "that holds symbols for the genus, merged. The other gene tools match "
             "identifiers, not symbols.",
             {"symbol": {"type": "string",
                         "description": "Gene symbol, e.g. 'GmNARK'. Case-insensitive, exact."},
              **_MINE_ARGS,
-             "max_results": {"type": "integer",
-                             "description": f"Row cap, 1-500 (default {MAX_ROWS})."}},
+             **_PAGE_ARGS},
             _gene_symbol, required=("symbol",)),
         _mk("mine_gene_family_members",
-            "A gene family's members across legumes, given a gene or a family. "
-            "target_taxon keeps one species, member_assembly/member_annotation one "
-            "genome; assembly/annotation pick the gene's own copy. Long lists page "
-            "with offset. Members are homologs, paralogs included: not an orthology "
-            "call.",
+            "A gene family's members across legumes, given a gene or a family, from "
+            "legumemine and, for one genus, that genus's own mine, merged. taxon keeps "
+            "one species' or genus's members, member_assembly/member_annotation one "
+            "genome; assembly/annotation pick the gene's own copy. Members are "
+            "homologs, paralogs included: not an orthology call.",
             {"gene": {"type": "string", "description": "Gene identifier, e.g. 'Glyma.12G040000'."},
              "family": {"type": "string",
                         "description": "Gene family identifier, e.g. 'Legume.fam3.10524'. "
                                        "Skips the gene->family step."},
-             "target_taxon": {"type": "string",
-                              "description": "Only list members from this species or genus "
-                                             "(Latin name, abbreviation or common name)."},
-             "mine": {"type": "string",
-                      "description": f"A mine by name (default {MINE!r}, where families "
-                                     "span genera); a genus mine holds only its genus."},
-             "max_results": {"type": "integer",
-                             "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
-             "offset": {"type": "integer",
-                        "description": "Rows to skip, to continue a list the reply cut "
-                                       "short (it names the offset to use)."},
+             **_MINE_ARGS,
+             **_PAGE_ARGS,
              "member_assembly": {"type": "string",
                                  "description": "Only list members on this assembly "
                                                 "version, e.g. 'gnm2'. Versions repeat "
                                                 "across species, so pair it with "
-                                                "'target_taxon'."},
+                                                "'taxon'."},
              "member_annotation": {"type": "string",
                                    "description": "Only list members from this "
                                                   "annotation version, e.g. 'ann1'."},
@@ -1233,31 +1660,26 @@ def mine_tools() -> list:
         _mk("mine_gene_search",
             "Genes, or with search='families' gene families, whose description "
             "contains a phrase as a substring, so 'receptor kinase' also takes "
-            "'receptor kinase-like': the way from a function to genes. Descriptions "
-            "only, never IDs. Descriptions are transferred from homologs, so a hit is "
-            "a candidate, and close paralogs share them.",
+            "'receptor kinase-like': the way from a function to genes. Answers from "
+            "legumemine and, for one genus, its own mine, merged. Descriptions only, "
+            "never IDs. Descriptions are transferred from homologs, so a hit is a "
+            "candidate, and close paralogs share them.",
             {"query": {"type": "string",
                        "description": "Description text, matched case-insensitively as a "
                                       "substring, e.g. 'receptor kinase'. Use full "
                                       "product names, not abbreviations."},
              "search": {"type": "string", "enum": ["genes", "families"],
                         "description": "'genes' (default) or 'families'."},
-             "target_taxon": {"type": "string",
-                              "description": "Genes only: this species or genus (Latin "
-                                             "name, abbreviation or common name)."},
              **_MINE_ARGS,
-             "max_results": {"type": "integer",
-                             "description": f"Row cap, 1-500 (default {MAX_ROWS})."},
-             "offset": {"type": "integer",
-                        "description": "Rows to skip, to continue a list the reply cut "
-                                       "short (it names the offset to use)."}},
+             **_PAGE_ARGS},
             _gene_search, required=("query",)),
         _mk("mine_search",
             "A mine's own keyword search, as its search box runs it: whole words in "
             "every indexed class and field (genes, proteins, families, QTL, ontology "
             "terms…), so 'receptor kinase' does not take 'receptor kinase-like'. "
-            "Gives the total and counts by category and organism, as the mine's results "
-            "page does; category and organism narrow to one of them. Pages with offset.",
+            "Runs in legumemine and, for one species or genus, its own mine, each in "
+            "full, merged; gives each mine's total and counts by category and organism, "
+            "as a mine's results page does. category narrows to one category.",
             {"query": {"type": "string",
                        "description": "Keywords: a quoted phrase, OR, AND NOT, or a "
                                       "trailing * (\"receptor kinase\")."},
@@ -1265,15 +1687,7 @@ def mine_tools() -> list:
              "category": {"type": "string",
                           "description": "One category from the counts, e.g. 'Gene', "
                                          "'Protein', 'GeneFamily', 'QTL'."},
-             "organism": {"type": "string",
-                          "description": "One organism as the counts name it, e.g. "
-                                         "'A. hypogaea'."},
-             "max_results": {"type": "integer",
-                             "description": f"Results per page, 1-{SEARCH_PAGE_MAX} "
-                                            f"(default {MAX_ROWS})."},
-             "offset": {"type": "integer",
-                        "description": "Results to skip, to continue a list the reply "
-                                       "cut short (it names the offset to use)."}},
+             **_PAGE_ARGS},
             _keyword_search, required=("query",)),
         _mk("mine_trait_qtls",
             "QTLs mapped for a trait: QTL, linkage group, LOD, marker R2, study. Needs "
