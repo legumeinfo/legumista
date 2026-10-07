@@ -8,8 +8,9 @@ started to allow it.
 ## LIS first
 
 Legumista is an LIS project. Search LIS before anything else: the Data Store (`lis_*`,
-`extract_features`, `browser_link`) and the LIS mines (`mine_*`), LegumeMine and the genus
-mines alike. Then turn readily to NCBI and the literature: to corroborate what LIS shows,
+`extract_features`, `browser_link`) and the LIS mines (`mine_*`). For a question about one
+species or genus, query both LegumeMine and that genus's own mine where one exists: each
+holds data the other lacks. Report each result with the mine that gave it. Then turn readily to NCBI and the literature: to corroborate what LIS shows,
 to supply what it does not hold, or to judge which questions are worth pursuing next.
 Start from them only when LIS cannot answer, and say so. Where LIS and another source
 disagree, report both, each with its source.
@@ -197,13 +198,16 @@ Every tool here queries any LIS mine and every reply names the mine that answere
 `taxon` picks a species' or genus's own mine, `mine` names one, and with neither
 `legumemine` answers. `mine_gene_family_members` is the exception: no routing `taxon`,
 since it is cross-species by purpose. `target_taxon` filters rows; it never picks a mine.
+For one species or genus, query both `legumemine` and its genus mine; a reply about one
+genus names the other mine. A fully qualified gene ID that a mine spells differently is
+retried in its other spelling, and the reply says so.
 
 ### Which mine
 
 | | `legumemine` | a genus mine (`arachismine`, `glycinemine`, …) |
 |---|---|---|
-| Genes, descriptions, families | every legume; the most annotations of each genus | its genus only, fewer annotations |
-| Expression | yes | most; none in `lupinusmine`, `aeschynomenemine`, `lensmine` |
+| Genes, descriptions, families | every legume; every annotation a genus mine has, and some it lacks | its genus only |
+| Expression | yes | in most, with studies or values `legumemine` lacks; none in `lupinusmine`, `aeschynomenemine`, `lensmine` |
 | Curated symbols | yes | `glycinemine` only |
 | QTL, GWAS, markers | none | `arachismine`, `glycinemine`, `phaseolusmine`, `vignamine` only |
 | Gene ID spelling | the Data Store's | may differ: ArachisMine writes `…ann1.GHMM2H` for `…ann1.Arahy.GHMM2H` |

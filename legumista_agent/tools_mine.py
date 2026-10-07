@@ -417,11 +417,97 @@ _TITLES = {"protein records": "Proteins", "gene family assignments": "Gene famil
            "expression values": "Expression values"}
 
 
+# --- both mines -------------------------------------------------------------------------
+# legumemine holds every genus, but a genus's own mine is not a subset of it: glycinemine
+# holds ten Glycine expression studies to legumemine's eight, arachismine more Arachis
+# expression values, and every genus mine its own publications, breeding data and gene-ID
+# spellings. Agents asked about one species queried legumemine alone, so a reply about one
+# genus says where its other mine is.
+_QUALIFIED = re.compile(r"^(?P<abbrev>[a-z]{4,6})\.(?P<stem>[A-Za-z0-9_-]+\.gnm\d+\.ann\d+)\."
+                        r"(?P<name>.+)$")
+
+
+def _genus_of(name: str, exact: bool = False) -> str:
+    """The genus a taxon name, abbreviation or gene-name prefix resolves to, or "".
+    `exact` refuses an ambiguous match; suggestions are never used."""
+    if tools_catalog.controller() is None or not name:
+        return ""
+    match = tools_catalog.resolve_taxon(name)
+    if match.ok or (match.genus and not exact and not match.candidates):
+        return match.genus
+    if not exact and match.candidates:
+        genera = {c.split()[0] for c in match.candidates}
+        return genera.pop() if len(genera) == 1 else ""
+    return ""
+
+
+def _subject_genus(args, rows=(), genus_col=None) -> str:
+    """The one genus a query is about: its taxon arguments, else its gene ID's prefix,
+    else the genus column of a complete result. "" when it is not one genus."""
+    for key in ("target_taxon", "taxon"):
+        value = (args.get(key) or "").strip()
+        if value:
+            return _genus_of(value)
+    gene = (args.get("gene") or "").strip()
+    if gene:
+        match = _QUALIFIED.match(gene)
+        prefix = match.group("abbrev") if match else gene.split(".", 1)[0] if "." in gene else ""
+        genus = _genus_of(prefix, exact=True) if prefix else ""
+        if genus:
+            return genus
+    if genus_col is not None:
+        genera = {str(r[genus_col]).split()[0] for r in rows
+                  if len(r) > genus_col and r[genus_col]}
+        if len(genera) == 1:
+            return genera.pop()
+    return ""
+
+
+def _both_mines_note(args, mine, rows=(), genus_col=None) -> str:
+    """Name the other mine that holds this genus, when the query is about one genus and
+    that genus has a mine of its own."""
+    genus = _subject_genus(args, rows, genus_col)
+    if not genus or not genus[0].isupper() or genus.isupper():
+        return ""
+    genus_mine = genus.lower() + "mine"
+    known = _known_mines()
+    if known is None or (genus_mine not in known and not _mine_exists(genus_mine)):
+        return ""
+    if mine == MINE:
+        return (f"{genus} also has its own mine, {genus_mine}. Its expression studies, "
+                f"publications, breeding data and gene-ID spellings can differ from "
+                f"{MINE}'s: query it too (mine='{genus_mine}') and report each result with "
+                "its mine.")
+    if mine == genus_mine:
+        return (f"{MINE} also holds {genus}, and can hold annotations {genus_mine} lacks: "
+                f"query it too (mine='{MINE}') and report each result with its mine.")
+    return ""
+
+
+def _other_spellings(gene: str) -> list:
+    """The same gene ID as another LIS mine may spell it: with the name's first token
+    dropped (ArachisMine's ...ann1.GHMM2H for ...ann1.Arahy.GHMM2H), or added back from the
+    species abbreviation. Only for fully qualified IDs, where the abbreviation is known."""
+    match = _QUALIFIED.match(gene)
+    if not match:
+        return []
+    head = f"{match.group('abbrev')}.{match.group('stem')}."
+    name, token = match.group("name"), match.group("abbrev").capitalize()
+    if name.startswith(token + "."):
+        return [head + name[len(token) + 1:]]
+    return [head + f"{token}.{name}"]
+
+
 def _execute(args, title, view, constraints, sort=None, assembly_col=1,
              subject_key="gene", subject_hint="a gene identifier such as 'Glyma.12G040000'",
-             require_taxon=False, footer=None, on_empty=None, pageable=False):
+             require_taxon=False, footer=None, on_empty=None, pageable=False,
+             both_mines=True, genus_col=None):
     """Run one PathQuery and render it. A `pageable` tool honours args['offset'], so
-    `sort` must then order the rows completely: a tie lets a row move between pages."""
+    `sort` must then order the rows completely: a tie lets a row move between pages.
+
+    `both_mines` adds the note naming the subject genus's other mine (not for the breeding
+    tools, whose data exists only in genus mines). A gene ID the mine does not know as
+    written is retried in its other spelling, and the reply says so."""
     mine, mine_err = _resolve_mine(args, require_taxon)
     if mine_err:
         return mine_err
@@ -434,6 +520,19 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
     rows, cols, err = _run(mine, xml, size, offset)
     if err:
         return err
+    respelled = ""
+    if not rows and not offset and subject_key == "gene":
+        for alt in _other_spellings(subject):
+            alt_xml = _pathquery(view, [(p, op, alt if op == "LOOKUP" else v)
+                                        for p, op, v in constraints], sort)
+            alt_rows, alt_cols, alt_err = _run(mine, alt_xml, size, offset)
+            if alt_err:
+                return alt_err
+            if alt_rows:
+                rows, cols, xml = alt_rows, alt_cols, alt_xml
+                respelled = f"{mine} spells {subject} as {alt}; these rows are for that ID."
+                break
+    both = both_mines and not require_taxon
     if not rows and offset:
         total = _count(mine, xml)
         return (f"{title} — {subject} [mine: {mine}]: no rows at offset={offset}; "
@@ -441,19 +540,26 @@ def _execute(args, title, view, constraints, sort=None, assembly_col=1,
                    "the query's total could not be checked."))
     if not rows and on_empty is not None:
         # The caller explains its own zero (see _render_empty) instead of the generic text.
-        return on_empty(mine, subject)
+        out = on_empty(mine, subject)
+        extra = _both_mines_note(args, mine) if both else ""
+        return out + ("\n\n" + extra if extra else "")
     capped = len(rows) >= size
     total = (_count(mine, xml) if len(rows) >= min(size, COUNT_THRESHOLD)
              else offset + len(rows))
     note = _assembly_note(rows, assembly_col) if assembly_col is not None else ""
     out = _render(title, mine, subject, rows, cols, total, size, note, capped=capped,
                   offset=offset, pageable=pageable)
+    if respelled:
+        out = out.replace("\n", f"\n{respelled}\n", 1)
     # A footer names the next tool the rows unlock. It goes in the OUTPUT rather than a
     # docstring because the hand-off is only discoverable once you are holding the values.
-    if footer and rows:
-        extra = footer(rows)
-        if extra:
-            out = _cap(out + "\n\n" + extra)
+    extras = [footer(rows) if footer and rows else ""]
+    if both:
+        complete = total is not None and offset + len(rows) >= total
+        extras.append(_both_mines_note(args, mine, rows if complete else (), genus_col))
+    extras = [x for x in extras if x]
+    if extras:
+        out = _cap(out + "\n\n" + "\n".join(extras))
     return out
 
 
@@ -591,7 +697,7 @@ def _gene_symbol(args) -> str:
          "GeneFunction.synopsis", "GeneFunction.publications.doi"],
         [("GeneFunction.symbol", "=", (args.get("symbol") or "").strip())],
         assembly_col=None, subject_key="symbol",
-        subject_hint="a gene symbol such as 'GmNARK' or 'PvSYMRK'")
+        subject_hint="a gene symbol such as 'GmNARK' or 'PvSYMRK'", both_mines=False)
 
 
 _FAMILY_CAVEAT = (
@@ -714,7 +820,7 @@ def _gene_family_members(args) -> str:
         constraints, sort="Gene.organism.genus asc Gene.primaryIdentifier asc",
         assembly_col=None, subject_key="family",
         subject_hint="a gene family identifier such as 'Legume.fam3.10524'",
-        on_empty=explain, pageable=True)
+        on_empty=explain, pageable=True, genus_col=2)
     return prefix + out + "\n\n" + _FAMILY_CAVEAT
 
 
@@ -796,7 +902,8 @@ def _gene_search(args) -> str:
     return _execute({**args, "mine": mine}, title, view, constraints, sort=sort,
                     assembly_col=None, subject_key="query",
                     subject_hint="description text such as 'receptor kinase'",
-                    footer=footer, on_empty=empty, pageable=True)
+                    footer=footer, on_empty=empty, pageable=True,
+                    genus_col=1 if kind == "genes" else None)
 
 
 # --- a mine's own keyword search -----------------------------------------------------
@@ -887,6 +994,10 @@ def _keyword_search(args) -> str:
                        "match."]
     if any(_BRACKET_RE.search(d) for d in descriptions):
         footer.append(_BRACKET_NOTE)
+    other = _both_mines_note(args, mine, rows if offset + len(hits) >= total else (),
+                             genus_col=3)
+    if other:
+        footer.append(other)
     return _cap(out + "\n\n" + "\n".join(footer))
 
 
@@ -995,7 +1106,8 @@ _MINE_ARGS = {
     "taxon": {"type": "string",
               "description": f"Query this species' or genus's own mine instead of "
                              f"{MINE!r}: Latin name, common name or abbreviation "
-                             "('Arachis hypogaea', 'peanut', 'arahy')."},
+                             "('Arachis hypogaea', 'peanut', 'arahy'). For one species or "
+                             f"genus, query both its mine and {MINE!r}."},
     "mine": {"type": "string",
              "description": "A mine by name ('arachismine'); overrides taxon."},
 }

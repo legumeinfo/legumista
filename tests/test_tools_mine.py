@@ -1066,3 +1066,47 @@ def test_gene_search_routes_taxon_and_filters_with_target_taxon(mine, catalog):
     xml, _ = _parse(mine["urls"][-1])
     assert "/phaseolusmine/service/" in mine["urls"][-1]
     assert 'path="Gene.organism.genus" op="=" value="Phaseolus"' in xml
+
+
+# --- both mines ----------------------------------------------------------------------------
+def test_a_reply_about_one_genus_names_its_other_mine(mine, catalog):
+    """Agents queried legumemine alone though a genus mine holds data it lacks."""
+    out = M._gene_proteins({"gene": "Glyma.12G040000"})
+    assert "Glycine also has its own mine, glycinemine." in out
+    assert "query it too (mine='glycinemine')" in out
+    out = M._gene_proteins({"gene": "Glyma.12G040000", "taxon": "soybean"})
+    assert "legumemine also holds Glycine" in out and "(mine='legumemine')" in out
+
+
+def test_no_other_mine_is_named_without_one_subject_genus(mine, catalog):
+    out = M._gene_proteins({"gene": "Unknownus.1"})            # prefix resolves to nothing
+    assert "own mine" not in out and "also holds" not in out
+    out = M._trait_qtls({"trait": "seed protein", "taxon": "soybean"})
+    assert "also holds" not in out                            # breeding data: genus mines only
+
+
+def test_no_other_mine_is_named_for_a_genus_without_one(mine, catalog, monkeypatch):
+    monkeypatch.setattr(M, "_mine_exists", lambda name: False)
+    out = M._gene_search({"query": "kinase", "target_taxon": "Vicia villosa"})
+    assert "own mine" not in out
+
+
+def test_a_gene_id_spelled_differently_is_retried(mine, monkeypatch):
+    """ArachisMine spells legumemine's ...ann1.Arahy.GHMM2H as ...ann1.GHMM2H."""
+    asked = []
+
+    def fake(url, accept="application/json"):
+        xml, _ = _parse(url)
+        asked.append(xml)
+        hit = 'value="arahy.Tifrunner.gnm2.ann1.GHMM2H"' in xml
+        return {"wasSuccessful": True, "columnHeaders": ["Gene > Name", "Assembly"],
+                "results": [["GHMM2H", "gnm2"]] if hit else []}
+    monkeypatch.setattr(M, "_get", fake)
+    out = M._gene_proteins({"gene": "arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H",
+                            "mine": "arachismine"})
+    assert ("arachismine spells arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H as "
+            "arahy.Tifrunner.gnm2.ann1.GHMM2H; these rows are for that ID.") in out
+    assert "GHMM2H | gnm2" in out
+    assert M._other_spellings("arahy.Tifrunner.gnm2.ann1.GHMM2H") == [
+        "arahy.Tifrunner.gnm2.ann1.Arahy.GHMM2H"]
+    assert M._other_spellings("GHMM2H") == []
